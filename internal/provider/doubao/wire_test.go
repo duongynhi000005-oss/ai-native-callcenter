@@ -4,6 +4,7 @@ package doubao
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -287,4 +288,21 @@ func nested(t *testing.T, value any, path ...string) any {
 		}
 	}
 	return value
+}
+
+// The session body has no sampling parameter, so a flow's temperature is
+// ignored here rather than sent into a field the service does not define.
+func TestAFlowsTemperatureIsNotSent(t *testing.T) {
+	f := newFakeDoubao(t, acceptSession)
+	session := testSession(t, f)
+
+	cfg := testConfig()
+	temperature := 0.4
+	cfg.Temperature = &temperature
+	start(t, session, cfg)
+
+	created := f.awaitMessages("session.create", 1)
+	if encoded, _ := json.Marshal(created[0]); strings.Contains(string(encoded), "temperature") {
+		t.Errorf("the session carries a temperature: %s", encoded)
+	}
 }

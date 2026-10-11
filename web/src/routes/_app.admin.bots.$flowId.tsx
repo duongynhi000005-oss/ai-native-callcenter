@@ -891,6 +891,13 @@ function Persona({ spec, lang }: { spec: FlowSpec; lang: SpecLang }) {
               deployment: it is part of the bot's character. Empty means the
               provider's own default answers. */}
           <Fact label={t('bots.voice')}>{spec.global?.voice || t('bots.providerDefault')}</Fact>
+          <Fact label={t('bots.temperature')}>
+            {spec.global?.temperature == null ? (
+              t('bots.providerDefault')
+            ) : (
+              <span className="tabular">{spec.global.temperature}</span>
+            )}
+          </Fact>
           <Fact label={t('bots.maxTurns')}>
             <span className="tabular">{spec.global?.maxTurns ?? '—'}</span>
           </Fact>

@@ -5,6 +5,7 @@ package flow
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 )
@@ -77,6 +78,10 @@ func (s *Spec) validate() error {
 	}
 	if d := s.Global.MaxDurationSec; d != nil && *d != 0 && (*d < MinDurationLimitSec || *d > MaxDurationLimitSec) {
 		report("global.maxDurationSec is %d; it is a number of seconds from %d to %d, 0 to turn the limit off", *d, MinDurationLimitSec, MaxDurationLimitSec)
+	}
+
+	if t := s.Global.Temperature; t != nil && (math.IsNaN(*t) || *t < 0 || *t >= MaxTemperatureExclusive) {
+		report("global.temperature is %v; it is a sampling temperature from 0 up to but not including %v", *t, MaxTemperatureExclusive)
 	}
 
 	// Every tool a phase names must exist, or the model will be offered

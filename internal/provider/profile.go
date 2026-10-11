@@ -122,6 +122,14 @@ type Profile struct {
 	// the caller after a tool call.
 	PutsTerminalAnnounceInToolResult bool
 
+	// AcceptsTemperature means the session configuration has a sampling
+	// temperature field and this client sends SessionConfig.Temperature in it.
+	// Where it is false the value is ignored: the OpenAI GA session object has
+	// no such field, the gateway's is not documented, and Doubao's session has
+	// no sampling parameter at all. Sending it anyway risks a rejected
+	// session.update, which costs the whole session.
+	AcceptsTemperature bool
+
 	// SemanticTurnType is this vendor's name for semantic turn detection.
 	SemanticTurnType string
 	// SemanticTurnSilenceMs is the hold the vendor forces in that mode,
@@ -178,6 +186,9 @@ func QwenProfile() Profile {
 		// The vendor's default voice for this model, by owner decision
 		// (2026-09-24).
 		Voice: "longanqian_v3.1",
+		// session.temperature, documented range [0, 2); the default for this
+		// model is undocumented.
+		AcceptsTemperature: true,
 		// No TranscribeModel, and that is the finding rather than an omission.
 		// Design 08 §4.2 left it open — "Qwen-Audio-Realtime's default
 		// behaviour for input transcription is unverified" — and live calls on
@@ -359,6 +370,9 @@ func GeminiProfile() Profile {
 		LinearInput:              media.PCM16Format(media.RateProviderIn),
 		LinearOutput:             media.PCM16Format(media.RateProviderOut),
 		RequiresTerminalAnnounce: false,
+		// setup.generationConfig.temperature, documented range [0.0, 2.0];
+		// the Live model's default is undocumented.
+		AcceptsTemperature: true,
 		// Held back until W-G6 is fixed: a tool result the model leaves
 		// unanswered would end the call without the line, where SpeakText
 		// after the result still says it.

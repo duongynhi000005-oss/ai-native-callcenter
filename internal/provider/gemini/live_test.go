@@ -119,6 +119,73 @@ collect:
 	t.Logf("stats: %+v", session.Stats())
 }
 
+// A temperature rides setup.generationConfig. The documented range is
+// [0.0, 2.0]; this proves the model takes it in the setup and still greets.
+func TestLiveGeminiAcceptsATemperature(t *testing.T) {
+	requireLiveProvider(t)
+
+	profile := liveProfile()
+	profile.AcceptsTemperature = true
+	session, err := newSession(profile, slog.New(slog.NewTextHandler(os.Stderr,
+		&slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+
+	temperature := 0.3
+	cfg := provider.SessionConfig{
+		Instructions: "You are Ada, the voice assistant on the NovaNet customer hotline. " +
+			"Open the call by greeting the caller in one short English sentence and " +
+			"asking how you can help. RESPOND IN ENGLISH.",
+		Language:     "en",
+		Turn:         provider.DefaultTurnDetection(),
+		Tools:        liveTools(),
+		InputFormat:  media.PCM16Format(media.RateProviderIn),
+		OutputFormat: media.PCM16Format(media.RateProviderOut),
+		Temperature:  &temperature,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := session.Start(ctx, cfg); err != nil {
+		t.Fatalf("start with a temperature: %v", err)
+	}
+	defer func() { _ = session.Close(context.Background()) }()
+
+	var audio []byte
+	var said string
+	listening := time.After(20 * time.Second)
+collect:
+	for {
+		select {
+		case <-listening:
+			break collect
+		case event, ok := <-session.Events():
+			if !ok {
+				break collect
+			}
+			switch event.Type {
+			case provider.EventTypeAudioDelta:
+				audio = append(audio, event.Audio...)
+			case provider.EventTypeOutputTranscript:
+				if event.IsFinal {
+					said += event.Text
+				}
+			case provider.EventTypeError:
+				t.Errorf("provider error (fatal=%v): %v", event.IsFatal, event.Err)
+			case provider.EventTypeResponseDone:
+				if len(audio) > 0 {
+					break collect
+				}
+			}
+		}
+	}
+	t.Logf("greeting %q, %d audio bytes", said, len(audio))
+	if len(audio) == 0 || said == "" {
+		t.Errorf("no greeting came back (audio %d bytes, transcript %q)", len(audio), said)
+	}
+}
+
 // The control for the rewrite: the same schema, in the casing the flows write it
 // in, sent by hand.
 //

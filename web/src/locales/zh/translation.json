@@ -698,6 +698,7 @@
     "rules": "规则",
     "runtime": "运行参数",
     "voice": "音色",
+    "temperature": "温度",
     "providerDefault": "供应商默认",
     "maxTurns": "最大轮次",
     "fallbackTarget": "兜底阶段",

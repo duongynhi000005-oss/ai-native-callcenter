@@ -4,8 +4,10 @@ package flow
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -996,3 +998,58 @@ func TestTheTimeLimitClosesToTheClosingTarget(t *testing.T) {
 		t.Errorf("a flow with no closing target moved to %q", moved)
 	}
 }
+
+// global.temperature: absent is the provider's default; 0 and just under 2
+// load; anything outside [0, 2) is refused at load.
+func TestTheTemperatureIsValidatedAtLoad(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		insert  string
+		want    *float64
+		problem string
+	}{
+		{"absent", "", nil, ""},
+		{"zero", `"temperature": 0,`, ptr(0.0), ""},
+		{"middle", `"temperature": 0.6,`, ptr(0.6), ""},
+		{"just under the bound", `"temperature": 1.99,`, ptr(1.99), ""},
+		{"negative", `"temperature": -0.1,`, nil, "global.temperature is -0.1"},
+		{"the bound itself", `"temperature": 2,`, nil, "global.temperature is 2"},
+		{"past the bound", `"temperature": 3.5,`, nil, "global.temperature is 3.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec, err := Load([]byte(strings.Replace(testFlow, `"maxTurns": 6,`,
+				`"maxTurns": 6, `+tc.insert, 1)))
+			if tc.problem != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.problem) {
+					t.Fatalf("load error = %v, want it to contain %q", err, tc.problem)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			got := spec.Global.Temperature
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Errorf("Temperature = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestANaNTemperatureIsRefused(t *testing.T) {
+	t.Parallel()
+	spec, err := Load([]byte(testFlow))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	nan := math.NaN()
+	spec.Global.Temperature = &nan
+	if err := spec.validate(); err == nil || !strings.Contains(fmt.Sprint(err), "global.temperature") {
+		t.Errorf("a NaN temperature passed validation: %v", err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

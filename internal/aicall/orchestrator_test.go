@@ -1007,6 +1007,28 @@ func TestTheEntryPhasesLineOpensTheCall(t *testing.T) {
 	}
 }
 
+// global.temperature travels in the session configuration; a flow that sets
+// none leaves it nil so the provider's default stands.
+func TestTheFlowsTemperatureReachesTheSessionConfig(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	build := func(src string) provider.SessionConfig {
+		spec, err := flow.Load([]byte(src))
+		if err != nil {
+			t.Fatalf("load flow: %v", err)
+		}
+		engine := flow.NewEngine(spec, "en", nil, log)
+		runtime := flow.NewRuntime(engine, &callActions{log: log}, flow.NewBackend(""), nil, log)
+		return sessionConfigFor(spec, runtime, "en")
+	}
+	if got := build(driveFlow).Temperature; got != nil {
+		t.Errorf("temperature = %v, want nil for a flow that names none", *got)
+	}
+	withTemperature := strings.Replace(driveFlow, `"global": {`, `"global": {"temperature": 0.4,`, 1)
+	if got := build(withTemperature).Temperature; got == nil || *got != 0.4 {
+		t.Errorf("temperature = %v, want 0.4", got)
+	}
+}
+
 // announcingFlow carries a line on its entry phase and on both of its terminal
 // phases, which is the shape a provider that cannot be cued demands.
 const announcingFlow = `{

@@ -3,11 +3,14 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"math"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,5 +230,99 @@ func TestLiveQwenLinear(t *testing.T) {
 	checkAudioArrived(t, result, output)
 	if result.modelSaid == "" {
 		t.Error("the model produced no transcript, so the turn may not have completed")
+	}
+}
+
+// lockedBuffer lets the session's goroutines log while the test reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestLiveQwenAcceptsATemperature proves the model the qwen profile uses takes
+// session.temperature on the opening session.update. The vendor's documentation
+// lists the field for other omni realtime models, not necessarily this one, and
+// a rejection would make the client fall back to the reduced retry, which drops
+// the field silently: so the test fails if that retry happens.
+func TestLiveQwenAcceptsATemperature(t *testing.T) {
+	profile := QwenProfile()
+	requireLive(t, profile)
+	if !profile.AcceptsTemperature {
+		t.Fatal("the qwen profile does not accept a temperature")
+	}
+
+	var logs lockedBuffer
+	session, err := New(profile, slog.New(slog.NewTextHandler(&logs,
+		&slog.HandlerOptions{Level: slog.LevelWarn})))
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer func() { _ = session.Close(context.Background()) }()
+
+	input, output := profile.FormatsFor(media.LawMu)
+	temperature := 0.3
+	cfg := SessionConfig{
+		Instructions: "你是 NovaNet 的电话客服。用一句话问候来电者，并询问需要什么帮助。",
+		Turn:         DefaultTurnDetection(),
+		InputFormat:  input,
+		OutputFormat: output,
+		Temperature:  &temperature,
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	if err := session.Start(ctx, cfg); err != nil {
+		t.Fatalf("start with a temperature: %v\nlogs: %s", err, logs.String())
+	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go feedRoomTone(session, media.LawMu, input, stop)
+
+	var audioBytes int
+	var said string
+	deadline := time.After(12 * time.Second)
+listen:
+	for {
+		select {
+		case <-deadline:
+			break listen
+		case event, ok := <-session.Events():
+			if !ok {
+				break listen
+			}
+			switch event.Type {
+			case EventTypeAudioDelta:
+				audioBytes += len(event.Audio)
+			case EventTypeOutputTranscript:
+				if event.IsFinal {
+					said += event.Text
+				}
+			case EventTypeError:
+				t.Errorf("provider error (fatal=%v): %v", event.IsFatal, event.Err)
+			case EventTypeResponseDone:
+				break listen
+			}
+		}
+	}
+
+	t.Logf("greeting %q, %d audio bytes", said, audioBytes)
+	if strings.Contains(logs.String(), "retrying without optional fields") {
+		t.Errorf("the provider rejected the session configuration and the client retried without it:\n%s", logs.String())
+	}
+	if audioBytes == 0 || said == "" {
+		t.Errorf("no greeting came back (audio %d bytes, transcript %q)", audioBytes, said)
 	}
 }

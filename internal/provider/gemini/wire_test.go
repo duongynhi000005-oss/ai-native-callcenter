@@ -698,3 +698,29 @@ func TestSpeakTextAsksForTheLineVerbatim(t *testing.T) {
 		t.Errorf("the line was asked for as\n got: %s\nwant: %s", got, want)
 	}
 }
+
+// The flow's temperature rides generationConfig; without one the field is not
+// in the frame at all, which keeps the measured setup byte-identical.
+func TestTheFlowsTemperatureRidesGenerationConfig(t *testing.T) {
+	t.Run("the flow sets one", func(t *testing.T) {
+		f := newFakeGemini(t, acceptSetup)
+		session := testSession(t, f)
+		cfg := testConfig()
+		temperature := 0.4
+		cfg.Temperature = &temperature
+		start(t, session, cfg)
+
+		created := f.awaitMessages("setup", 1)
+		if got := nested(t, created[0], "setup", "generationConfig", "temperature"); got != 0.4 {
+			t.Errorf("the setup carries temperature %v, want 0.4", got)
+		}
+	})
+
+	t.Run("the flow sets none", func(t *testing.T) {
+		f := newFakeGemini(t, acceptSetup)
+		startedSession(t, f)
+		if setup := string(f.settledFrames(2)[0]); strings.Contains(setup, "temperature") {
+			t.Errorf("the setup carries a temperature nobody asked for: %s", setup)
+		}
+	})
+}

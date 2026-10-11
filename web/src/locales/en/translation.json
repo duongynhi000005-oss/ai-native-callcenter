@@ -701,6 +701,7 @@
     "rules": "Rules",
     "runtime": "Runtime",
     "voice": "Voice",
+    "temperature": "Temperature",
     "providerDefault": "Provider default",
     "maxTurns": "Max turns",
     "fallbackTarget": "Fallback phase",
