@@ -159,8 +159,9 @@ Pass: no `FAIL` line, exit status 0. `SKIP` is allowed only for
 
 On the target itself, in Chrome with web-sip-phone installed: add `<ip>` to
 the extension's Allow Sites, open `http://<ip>:8080`, sign in as `wei`
-(password: `AICC_SEED_PASSWORD` in `<dir>/.env`), allow the microphone, press
-**Sign in** on the phone bar.
+(password: `AICC_SEED_PASSWORD` in `<dir>/.env`, root-owned on Linux where
+`sudo grep AICC_SEED_PASSWORD /opt/aicc/.env` reads it), allow the microphone,
+press **Sign in** on the phone bar.
 
 Pass:
 

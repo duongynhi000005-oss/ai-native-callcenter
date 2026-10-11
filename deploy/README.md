@@ -63,11 +63,14 @@ allowing the stack's ports ([Ports and firewall](#ports-and-firewall)).
   queues.
 - Secrets: `POSTGRES_PASSWORD`, `ESL_PASSWORD`, `LUA_PASSWORD` and
   `AICC_SEED_PASSWORD` are generated (32 random characters each) and written
-  to `<dir>/.env`, mode 0600. With the demo seed (the default), the installer
-  prints the admin password once, on the first install; afterwards it is
-  `AICC_SEED_PASSWORD` in `.env`. An install made with `--no-demo` seeds no
-  account, so the installer prints the `aicc useradd` command that creates the
-  first administrator instead (as root on Linux).
+  to `<dir>/.env`, mode 0600 — root-owned on Linux, so only `sudo` reads it;
+  the operator's own file on macOS. With the demo seed (the default), the
+  installer prints the admin password once, on the first install; afterwards
+  it is `AICC_SEED_PASSWORD` in that file, and the installer prints the
+  command that reads it: `sudo grep AICC_SEED_PASSWORD /opt/aicc/.env` on
+  Linux, `grep AICC_SEED_PASSWORD ~/.aicc/.env` on macOS. An install made with
+  `--no-demo` seeds no account, so the installer prints the `aicc useradd`
+  command that creates the first administrator instead (as root on Linux).
 
 `--yes` never prompts: it accepts confirmations and fails on any value it
 would have had to ask for.
@@ -152,7 +155,8 @@ just-recreated `aicc_bot` gateway up to 45 seconds to answer again.
    [Chrome Web Store](https://chromewebstore.google.com/detail/dkhaojcfjdcdpldokeokajkmambkbacp).
 2. In the extension, add the host's address (`<ip>`) to its Allow Sites.
 3. Open `http://<ip>:8080` and sign in as an agent (`wei`, `amy` or `ben`;
-   the password is `AICC_SEED_PASSWORD` in `.env`).
+   the password is `AICC_SEED_PASSWORD` in `.env` — root-owned on Linux, where
+   `sudo grep AICC_SEED_PASSWORD /opt/aicc/.env` reads it).
 4. Press **Sign in** on the phone bar. The agent's device counts as registered
    only after this ([#37](https://github.com/rasonyang/ai-native-callcenter/issues/37)).
 5. Dial `95001` (English) or `95002` (Chinese) to reach the bot. The agent's

@@ -1026,7 +1026,14 @@ do_uninstall() {
 final_output() {
     _fo_seed=$(env_get "$ENV_FILE" AICC_SEED)
     _fo_dc='docker compose'
-    [ "$OS" = linux ] && _fo_dc='sudo docker compose'
+    # .env is root-owned mode 0600 on Linux, so the operator's own shell needs
+    # sudo to read the password out of it; on macOS the file is theirs. The
+    # hints below print the commands, so they work when pasted as they are.
+    _fo_read="grep AICC_SEED_PASSWORD $ENV_FILE"
+    if [ "$OS" = linux ]; then
+        _fo_dc='sudo docker compose'
+        _fo_read="sudo $_fo_read"
+    fi
     say ""
     say "The call center is running."
     say ""
@@ -1038,6 +1045,7 @@ final_output() {
         else
             say "  Sign in:    admin; the password is AICC_SEED_PASSWORD in $ENV_FILE"
         fi
+        say "              read it with: $_fo_read"
     else
         say "  Sign in:    no demo accounts were seeded; create the first one:"
         say "              cd $DIR && $_fo_dc exec aicc aicc useradd -username admin -password '<password>' -role ADMIN"

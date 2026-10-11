@@ -332,5 +332,33 @@ final_output >"$TMP/output-demo.txt"
 ok 'final_output: demo prints the admin password' grep -q 'admin / secret' "$TMP/output-demo.txt"
 ok 'final_output: demo keeps the dial line' grep -q 'dial 95001' "$TMP/output-demo.txt"
 
+# The hint names where the password lives, and prints the command that reads
+# it. On Linux .env is root-owned mode 0600 and the stack runs with sudo, so
+# everything the message prints must carry sudo; on macOS it must not, or the
+# hint cannot be pasted as it is. Both seeds, first install and rerun.
+for _os in linux macos; do
+    OS=$_os
+    for _seed in demo no-demo; do
+        for _first in 1 0; do
+            FIRST_INSTALL=$_first
+            ENV_FILE="$TMP/output-$_seed.env"
+            _out="$TMP/output-$_os-$_seed-$_first.txt"
+            _case="$_os $_seed first-install=$_first"
+            _want="grep AICC_SEED_PASSWORD $ENV_FILE"
+            [ "$_os" = linux ] && _want="sudo $_want"
+            final_output >"$_out"
+            if [ "$_seed" = demo ]; then
+                ok "final_output: $_case prints the read command" grep -q "$_want" "$_out"
+            fi
+            if [ "$_os" = linux ]; then
+                eq "final_output: $_case runs no command without sudo" \
+                    "$(grep -E 'grep AICC_SEED_PASSWORD|docker compose' "$_out" | grep -v 'sudo ')" ''
+            else
+                notok "final_output: $_case prints no sudo" grep -q sudo "$_out"
+            fi
+        done
+    done
+done
+
 printf '\n%d tests, %d failed\n' "$tests" "$failures"
 [ "$failures" = 0 ]
