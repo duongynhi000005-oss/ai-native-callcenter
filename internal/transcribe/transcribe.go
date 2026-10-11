@@ -10,7 +10,7 @@
 // Like internal/provider, which holds three, this package holds *two* clients,
 // and that is the same rule applied rather than an exception to it: the
 // extension point is the wire protocol. OpenAI serves transcription over the
-// Realtime dialect; Alibaba serves qwen-audio-3.0-asr-flash-streaming over DashScope's native
+// Realtime dialect; Alibaba serves qwen-audio-3.1-asr-flash-message over DashScope's native
 // run-task duplex protocol. Those are different grammars, not different field
 // names, and no Profile bridges them. A new *engine* on either protocol is a
 // new profile; only a new *protocol* earns a third client.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -141,7 +142,7 @@ func ProfileFor(name string, over Override) (Profile, error) {
 			Name: ProviderQwen,
 			// No default: the workspace id is the hostname.
 			Endpoint:        "",
-			Model:           "qwen-audio-3.0-asr-flash-streaming",
+			Model:           "qwen-audio-3.1-asr-flash-message",
 			SampleRate:      16000,
 			APIKeyEnv:       "ALIYUN_API_KEY",
 			OwnsEndpointing: false,
@@ -171,6 +172,33 @@ func (p Profile) Validate() error {
 	}
 	if p.Model == "" {
 		return errors.New("transcribe: a model is required")
+	}
+	if p.Name == ProviderQwen {
+		if err := validateDashscopeModel(p.Model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dashscopeModelRE matches the DashScope-native recognition families the qwen
+// client can drive, with dated or suffixed variants.
+var dashscopeModelRE = regexp.MustCompile(
+	`^(qwen-audio-[0-9.]+-asr-flash-(streaming|message)|fun-asr-realtime|fun-asr-flash-8k-realtime)(-.+)?$`)
+
+// validateDashscopeModel rejects a model name the qwen client cannot run. A
+// misspelled name is not refused at task-started: DashScope accepts the task
+// and fails it only after finish-task ("Model not exist."), so Start cannot
+// catch it and a call would lose its transcript. Refuse it at startup instead.
+func validateDashscopeModel(model string) error {
+	if model == "qwen3-asr-flash-realtime" {
+		return fmt.Errorf("transcribe: AICC_TRANSCRIBE_MODEL=%s speaks the OpenAI Realtime dialect "+
+			"and cannot run on the qwen (DashScope run-task) client", model)
+	}
+	if !dashscopeModelRE.MatchString(model) {
+		return fmt.Errorf("transcribe: AICC_TRANSCRIBE_MODEL=%q is not a DashScope-native model the qwen client runs; "+
+			"accepted families: qwen-audio-<ver>-asr-flash-streaming, qwen-audio-<ver>-asr-flash-message, "+
+			"fun-asr-realtime[-<suffix>], fun-asr-flash-8k-realtime[-<suffix>]", model)
 	}
 	return nil
 }

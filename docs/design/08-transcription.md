@@ -753,7 +753,7 @@ protocol, each with its own profile for the values that vary within it:
 | Client | Protocol | Engines |
 |---|---|---|
 | `transcribe/openairt` | OpenAI-Realtime transcription session | `gpt-live-transcribe`; also `qwen3-asr-flash-realtime`, which speaks this dialect `[MEASURED]` |
-| `transcribe/dashscope` | DashScope native duplex (`run-task`) | `qwen-audio-3.0-asr-flash-streaming`, `fun-asr-realtime*` `[MEASURED]` |
+| `transcribe/dashscope` | DashScope native duplex (`run-task`) | `qwen-audio-3.1-asr-flash-message` (default), `qwen-audio-3.0-asr-flash-streaming`, `fun-asr-realtime*` `[MEASURED]` |
 
 `AICC_TRANSCRIBE_PROVIDER` selects the client at startup, exactly as `AICC_PROVIDER`
 selects the voice profile — one transcription engine per deployment, resolved once in
@@ -777,10 +777,10 @@ media path; the transcripts both engines returned are quoted in Appendix B.
 
 The two columns are **the two clients**, not two configurations of one.
 
-| Concern | `openairt` — OpenAI `gpt-live-transcribe` | `dashscope` — Qwen `qwen-audio-3.0-asr-flash-streaming` |
+| Concern | `openairt` — OpenAI `gpt-live-transcribe` | `dashscope` — Qwen `qwen-audio-3.1-asr-flash-message` (default; B.3b was measured on `-3.0-asr-flash-streaming`) |
 |---|---|---|
 | Endpoint | `wss://api.openai.com/v1/realtime?intent=transcription` `[MEASURED]` — note `intent=`, not `model=` | `wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference` `[MEASURED]` — **fixed path, no query**; the workspace ID *is* the hostname |
-| Model name | `gpt-live-transcribe`, in `audio.input.transcription.model` `[MEASURED]` | `qwen-audio-3.0-asr-flash-streaming`, in `payload.model` `[MEASURED]` |
+| Model name | `gpt-live-transcribe`, in `audio.input.transcription.model` `[MEASURED]` | `qwen-audio-3.1-asr-flash-message`, in `payload.model` `[MEASURED, D14 amendment]` |
 | Session shape | nested: `session.type:"transcription"`, `session.audio.input.*` `[MEASURED]` | `run-task` envelope: `header{action, task_id, streaming:"duplex"}` + `payload{task_group:"audio", task:"asr", function:"recognition", model, parameters, input:{}}` `[MEASURED]` |
 | Auth | `Authorization: Bearer` `[MEASURED]` | `Authorization: Bearer` `[MEASURED]`; optional `X-DashScope-WorkSpace` (not needed when the workspace is in the host) |
 | Audio transport | base64 inside `input_audio_buffer.append` JSON | **raw binary WebSocket frames** `[MEASURED]` — no JSON wrapper, no base64 |
@@ -788,7 +788,7 @@ The two columns are **the two clients**, not two configurations of one.
 | **Sample rate** | **≥ 24000 enforced.** 16000 → `integer_below_min_value`, "Expected a value >= 24000" `[MEASURED]`. Supplied by asking the tap for `24000` — no Go resampling (D15) | **16000 accepted natively** `[MEASURED]`; the tap is asked for `16000`. 8 k needs a different model (`fun-asr-flash-8k-realtime`, exactly 8000) |
 | **Turn detection** | **must be `null`.** `server_vad` → "Turn detection is not supported for this transcription model" `[MEASURED]` | server-side, tuned by `semantic_punctuation_enabled`, `max_sentence_silence` (default 1300 ms, 200–6000), `speech_noise_threshold` |
 | **Who ends an utterance** | **We do.** 6 s of trailing silence produced *no* final; only `input_audio_buffer.commit` did `[MEASURED]` | **The server does** `[MEASURED, B.3b]` — in a two-utterance test both finals arrived *while audio was still streaming*, 8 s and 3 s before `finish-task` |
-| Partial event | `…transcription.delta` carries an **incremental fragment** — the client accumulates `[MEASURED]` | `result-generated` with `sentence_end:false`; `sentence.text` is the **cumulative sentence so far** (`"您"` → `"您好"` → `"您好，我这边"`), so the client *replaces* rather than appends `[MEASURED]` |
+| Partial event | `…transcription.delta` carries an **incremental fragment** — the client accumulates `[MEASURED]` | `result-generated` with `sentence_end:false` (on the `-message` model only when `intermediate_result_enabled:true` is sent, which the client does); `sentence.text` is the **cumulative sentence so far** (`"您"` → `"您好"` → `"您好，我这边"`), so the client *replaces* rather than appends `[MEASURED]` |
 | Final event | `…completed`; `transcript` is a **corrected rewrite**, not the concatenation of the deltas `[MEASURED]` | `result-generated` with `sentence_end:true`, punctuated and corrected (`"，妈"` → `"，麻烦"`) `[MEASURED]` |
 | **Utterance identity** | `item_id` | `sentence.sentence_id`, **monotonic from 1** `[MEASURED]` — a ready-made ordering key |
 | **Timestamps** | **none** `[MEASURED]` | **`begin_time` / `end_time`, ms from stream start** `[MEASURED]`, plus a `words[]` array with per-word times and punctuation |
@@ -1307,7 +1307,7 @@ and has no inline-comment syntax.
 | `AICC_STREAM_SECRET` | `""` | HMAC key for the ingest token. Empty + enabled = startup error. |
 | `AICC_TRANSCRIBE_PROVIDER` | falls back to `AICC_PROVIDER` | `openai` \| `qwen`. **Selects the client, not just a profile** (D20). Defaulting to the deployment's provider honours A1: one vendor is reachable per deployment. |
 | `AICC_TRANSCRIBE_ENDPOINT` | `""` | Override, same semantics as `AICC_PROVIDER_ENDPOINT` (`config.go:116`). **On `qwen` this is effectively required**, not optional: `[MEASURED, B.3b]` the DashScope host embeds the workspace ID (`llm-….cn-beijing.maas.aliyuncs.com`), so it is deployment-specific and cannot ship as a profile constant. `[INFERENCE]` Validation should therefore refuse to boot with `qwen` + transcription enabled + an empty endpoint, rather than dial a placeholder host. |
-| `AICC_TRANSCRIBE_MODEL` | `""` | Override; client default is `gpt-live-transcribe` / `qwen-audio-3.0-asr-flash-streaming` `[MEASURED, B.3b]`. Note the value must match the *client*: `qwen3-asr-flash-realtime` is an `openai`-dialect model and will not run on the `qwen` client. |
+| `AICC_TRANSCRIBE_MODEL` | `""` | Override; client default is `gpt-live-transcribe` / `qwen-audio-3.1-asr-flash-message` (D14 amendment). The value must match the *client*: on `qwen` only the DashScope-native families (`qwen-audio-<ver>-asr-flash-streaming`, `-message`, `fun-asr-realtime*`, `fun-asr-flash-8k-realtime*`) are accepted and anything else, a typo included, is refused at startup. `qwen3-asr-flash-realtime` is an `openai`-dialect model and will not run on the `qwen` client. |
 | `AICC_TRANSCRIBE_PARTIALS` | `true` | Push partials over SSE (D9). Storage is unaffected (D3). |
 
 No new credential slot: the ASR client reads the **same** `OPENAI_API_KEY` /
@@ -2077,6 +2077,31 @@ workspace host, because the workspace ID *is* the hostname here and cannot be a 
 constant (§13).
 
 *This falsifies the "one client × profile" premise of §8.3 — see D20.*
+
+**Amendment (2026-09-24): the default is now `qwen-audio-3.1-asr-flash-message`.**
+A live probe on the workspace host (Beijing) found the same endpoint, run-task protocol
+and client serve `qwen-audio-3.1-asr-flash-message`; zh and en at 16 kHz and 8 kHz
+transcribed, finals arrived while audio streamed, and `task-finished` followed
+`finish-task`. Differences from the `-streaming` models, and what the client does:
+
+- `intermediate_result_enabled` defaults to false: without it there are no live partials
+  (one empty partial per sentence). The client sends `true`; partials are cumulative.
+- `disfluency_removal_enabled` exists only on this model (default false). Not sent, so a
+  call transcript stays verbatim.
+- `language_hints`, `semantic_punctuation_enabled`, `multi_threshold_mode_enabled` and
+  `special_word_filter` are documented unsupported (tolerated, no error). The client
+  sends neither `language_hints` nor `semantic_punctuation_enabled` for this family.
+- `vocabulary`, `context`, `continue-task`, `keep_dialect` and `vad_model` are supported.
+- Finals carry word `fixed:false` (`-streaming`: true), the payload has only
+  `output.sentence`, and usage is billed in tokens. Nothing in the client reads word
+  `fixed`.
+- Not usable on the OpenAI-Realtime endpoint or over HTTP.
+
+Hazard found alongside: a misspelled model gets `task-started` (after about 5 s) and
+fails only after `finish-task` with `task-failed InvalidParameter "Model not exist."`, so
+`Start()` cannot catch it. `Profile.Validate` therefore refuses, at startup, a qwen-client
+model outside the known DashScope-native families. The `-streaming` and `fun-asr-*` models
+remain available through `AICC_TRANSCRIBE_MODEL` with their parameters unchanged.
 
 **D15 — ~~the OpenAI path needs a 3:2 resampler~~ → CLOSED by measurement (2026-08-17):
 there is no Go-side resampler. The tap emits 24 kHz itself.**
