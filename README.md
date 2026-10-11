@@ -153,13 +153,6 @@ Never the other way round.
 The human path, the AI path, the product surface and the packaging are built
 and verified against live FreeSWITCH and live providers.
 
-Performance is not yet a claim this project makes. The design has a capacity
-budget and a latency target ([design 06](docs/design/06-capacity.md)), and the
-harness to test them against is in the repository
-([docs/load-tests.md](docs/load-tests.md)) — but the benchmark campaign itself
-is still to come, so treat the budget as an intention rather than a
-measurement.
-
 What is deliberately *not* here, and will not be: any cascaded
 ASR + LLM + TTS pipeline inside this process. That composition belongs in a
 separate service speaking the same protocol, such as

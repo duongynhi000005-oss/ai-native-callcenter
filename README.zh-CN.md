@@ -136,11 +136,6 @@ HTTP API 是**契约先行**的：[`docs/openapi.json`](docs/openapi.json) 是�
 人工路径、AI 路径、产品界面和打包都已完成，并在真实 FreeSWITCH 与真实厂商上验证
 过。
 
-性能目前**还不是**本项目对外给出的承诺。设计里有容量预算和延迟目标
-（[设计 06](docs/design/06-capacity.md)），压测所需的工具也已经在仓库里
-（[docs/load-tests.md](docs/load-tests.md)），但正式的压测 benchmark 还没有做——所
-以那份预算目前只是目标，不是实测结论。
-
 有一件事是**明确不做**的：在本进程内做 ASR + LLM + TTS 的级联流水线。那种组合应当
 是一个独立服务，说同一套协议，例如
 [cascade-realtime-gateway](https://github.com/rasonyang/cascade-realtime-gateway)。
