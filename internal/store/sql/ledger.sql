@@ -72,9 +72,12 @@ WHERE EXCLUDED.ended_at > cdrs.ended_at;
 SELECT * FROM cdrs WHERE call_id = $1;
 
 -- name: ListCDRs :many
+-- An open time bound is coalesced to ±infinity rather than OR-ed with IS NULL,
+-- so it stays an Index Cond under a generic plan as well as a custom one.
+-- CountCDRs and the two audit-log queries bound their time the same way.
 SELECT * FROM cdrs
-WHERE (sqlc.narg('from_at')::timestamptz IS NULL OR started_at >= sqlc.narg('from_at'))
-  AND (sqlc.narg('to_at')::timestamptz IS NULL OR started_at < sqlc.narg('to_at'))
+WHERE started_at >= coalesce(sqlc.narg('from_at')::timestamptz, '-infinity'::timestamptz)
+  AND started_at <  coalesce(sqlc.narg('to_at')::timestamptz,   'infinity'::timestamptz)
   AND (sqlc.narg('queue_id')::uuid IS NULL OR queue_id = sqlc.narg('queue_id'))
   AND (sqlc.narg('agent_id')::uuid IS NULL OR primary_agent_id = sqlc.narg('agent_id')
        OR sqlc.narg('agent_id') = ANY (agent_ids))
@@ -86,8 +89,8 @@ LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
 
 -- name: CountCDRs :one
 SELECT count(*) FROM cdrs
-WHERE (sqlc.narg('from_at')::timestamptz IS NULL OR started_at >= sqlc.narg('from_at'))
-  AND (sqlc.narg('to_at')::timestamptz IS NULL OR started_at < sqlc.narg('to_at'))
+WHERE started_at >= coalesce(sqlc.narg('from_at')::timestamptz, '-infinity'::timestamptz)
+  AND started_at <  coalesce(sqlc.narg('to_at')::timestamptz,   'infinity'::timestamptz)
   AND (sqlc.narg('queue_id')::uuid IS NULL OR queue_id = sqlc.narg('queue_id'))
   AND (sqlc.narg('agent_id')::uuid IS NULL OR primary_agent_id = sqlc.narg('agent_id')
        OR sqlc.narg('agent_id') = ANY (agent_ids))
@@ -353,8 +356,8 @@ LEFT JOIN users u ON u.id = a.actor_id
 WHERE (sqlc.narg('actor_id')::uuid IS NULL OR a.actor_id = sqlc.narg('actor_id')::uuid)
   AND (sqlc.narg('action_prefix')::text IS NULL
        OR a.action LIKE sqlc.narg('action_prefix')::text || '%')
-  AND (sqlc.narg('from_at')::timestamptz IS NULL OR a.occurred_at >= sqlc.narg('from_at')::timestamptz)
-  AND (sqlc.narg('to_at')::timestamptz IS NULL OR a.occurred_at < sqlc.narg('to_at')::timestamptz)
+  AND a.occurred_at >= coalesce(sqlc.narg('from_at')::timestamptz, '-infinity'::timestamptz)
+  AND a.occurred_at <  coalesce(sqlc.narg('to_at')::timestamptz,   'infinity'::timestamptz)
 ORDER BY a.occurred_at DESC, a.id DESC
 LIMIT $1 OFFSET $2;
 
@@ -363,8 +366,8 @@ SELECT count(*) FROM audit_logs a
 WHERE (sqlc.narg('actor_id')::uuid IS NULL OR a.actor_id = sqlc.narg('actor_id')::uuid)
   AND (sqlc.narg('action_prefix')::text IS NULL
        OR a.action LIKE sqlc.narg('action_prefix')::text || '%')
-  AND (sqlc.narg('from_at')::timestamptz IS NULL OR a.occurred_at >= sqlc.narg('from_at')::timestamptz)
-  AND (sqlc.narg('to_at')::timestamptz IS NULL OR a.occurred_at < sqlc.narg('to_at')::timestamptz);
+  AND a.occurred_at >= coalesce(sqlc.narg('from_at')::timestamptz, '-infinity'::timestamptz)
+  AND a.occurred_at <  coalesce(sqlc.narg('to_at')::timestamptz,   'infinity'::timestamptz);
 
 -- Recordings past their retention period, oldest first.
 --
