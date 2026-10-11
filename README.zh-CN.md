@@ -61,9 +61,11 @@ S3 的对象存储。
 
 **中英双语，并且明确告诉你在用哪个厂商。** 界面和机器人都支持中英文。一套部署只用
 一个语音厂商，启动时选定：中国大陆用 `qwen` 或 `doubao`，其他地区用 `openai` 或
-`gemini`，也可以用 `gateway` 指向自建的 Realtime 网关。**通话的语言永远不会用来选
-择厂商。** 其中三个是同一套协议的不同 profile；`doubao` 和 `gemini` 各自走另一套协
-议，各有自己的客户端（见[如何接入一个语音厂商](docs/provider-extension.md)）。
+`gemini`，也可以用 `gateway` 指向自建的 Realtime 网关（例如
+[cascade-realtime-gateway](https://github.com/rasonyang/cascade-realtime-gateway)）。
+**通话的语言永远不会用来选择厂商。** 其中三个是同一套协议的不同 profile；`doubao`
+和 `gemini` 各自走另一套协议，各有自己的客户端
+（见[如何接入一个语音厂商](docs/provider-extension.md)）。
 
 ## 结构
 
@@ -140,7 +142,8 @@ HTTP API 是**契约先行**的：[`docs/openapi.json`](docs/openapi.json) 是�
 以那份预算目前只是目标，不是实测结论。
 
 有一件事是**明确不做**的：在本进程内做 ASR + LLM + TTS 的级联流水线。那种组合应当
-是一个独立服务，说同一套协议。
+是一个独立服务，说同一套协议，例如
+[cascade-realtime-gateway](https://github.com/rasonyang/cascade-realtime-gateway)。
 
 ## 许可证
 
