@@ -121,6 +121,10 @@ type OrchestratorConfig struct {
 	// original behaviour, greeting the moment the model session is ready.
 	IsGreetingGated   bool
 	GreetingMediaWait time.Duration
+	// NoInput is how long a call waits after the caller has heard the bot's
+	// last word before the flow gets NO_INPUT; see Config. Zero means the
+	// session's default (8 s).
+	NoInput time.Duration
 	// Profile is the provider this deployment runs, resolved at startup. The
 	// same one answers every call, whatever language it is in.
 	Profile provider.Profile
@@ -333,13 +337,8 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		return fmt.Errorf("no %s provider: %w", profile.Name, err)
 	}
 
-	session, err := New(FromDialog(dialog), model, profile, Config{
-		Session:           sessionConfigFor(spec, runtime, language),
-		IsGreetingGated:   o.cfg.IsGreetingGated,
-		GreetingMediaWait: o.cfg.GreetingMediaWait,
-		IsEndingArmed:     actions.isArmed,
-		Logger:            log,
-	})
+	session, err := New(FromDialog(dialog), model, profile,
+		o.sessionConfig(sessionConfigFor(spec, runtime, language), actions.isArmed, log))
 	if err != nil {
 		return err
 	}
@@ -1010,4 +1009,17 @@ func callTypeFromHeader(v string) callType {
 		return callType(v)
 	}
 	return callTypeInbound
+}
+
+// sessionConfig is the per-call session Config: the deployment's settings from
+// OrchestratorConfig around what this call's flow and ending state supply.
+func (o *Orchestrator) sessionConfig(session provider.SessionConfig, isEndingArmed func() bool, log *slog.Logger) Config {
+	return Config{
+		Session:           session,
+		IsGreetingGated:   o.cfg.IsGreetingGated,
+		GreetingMediaWait: o.cfg.GreetingMediaWait,
+		NoInput:           o.cfg.NoInput,
+		IsEndingArmed:     isEndingArmed,
+		Logger:            log,
+	}
 }

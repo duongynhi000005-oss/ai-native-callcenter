@@ -318,6 +318,7 @@ func run() error {
 			outboundSvc.Data(),
 			cfg.IsBotGreetingGated,
 			cfg.BotGreetingMediaWait,
+			cfg.BotNoInputTimeout,
 		))
 		if err != nil {
 			return fmt.Errorf("build ai voice leg: %w", err)

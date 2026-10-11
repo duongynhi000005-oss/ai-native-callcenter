@@ -82,6 +82,11 @@ type Config struct {
 	IsBotGreetingGated   bool
 	botGreetingWaitErr   error // a malformed value, refused by validate
 	BotGreetingMediaWait time.Duration
+	// BotNoInputTimeout is how long a call waits, from the moment the caller
+	// has heard the bot's last word, for speech, a keypress or a new bot turn
+	// before the flow gets NO_INPUT. Between 2s and 60s; there is no off.
+	BotNoInputTimeout time.Duration
+	botNoInputErr     error // a malformed value, refused by validate
 	// BotBackendBase is the base URL flows' declarative HTTP tools call.
 	BotBackendBase string
 	// OutboundEndpoint renders a destination number into a dial string for
@@ -268,11 +273,22 @@ func parseRange(raw string) (low, high int, err error) {
 	return low, high, nil
 }
 
+// The dead-air timeout (AICC_BOT_NO_INPUT_TIMEOUT): its default and bounds.
+const (
+	DefaultBotNoInputTimeout = 8 * time.Second
+	MinBotNoInputTimeout     = 2 * time.Second
+	MaxBotNoInputTimeout     = 60 * time.Second
+)
+
 // Load reads configuration from .env (if present) and the environment.
 func Load() (Config, error) {
 	loadDotEnv(".env")
 
 	greetingWait, isGreetingGated, greetingErr := envDurationIfSet("AICC_BOT_GREETING_MEDIA_WAIT")
+	noInput, isNoInputSet, noInputErr := envDurationIfSet("AICC_BOT_NO_INPUT_TIMEOUT")
+	if !isNoInputSet {
+		noInput = DefaultBotNoInputTimeout
+	}
 	c := Config{
 		Env:                  env("AICC_ENV", "dev"),
 		HTTPAddr:             env("AICC_HTTP_ADDR", ":8080"),
@@ -297,6 +313,8 @@ func Load() (Config, error) {
 		IsBotGreetingGated:   isGreetingGated,
 		BotGreetingMediaWait: greetingWait,
 		botGreetingWaitErr:   greetingErr,
+		BotNoInputTimeout:    noInput,
+		botNoInputErr:        noInputErr,
 		BotBackendBase:       env("AICC_BOT_BACKEND_BASE", ""),
 		IsBotEnabled:         envBool("AICC_BOT_ENABLED", true),
 
@@ -446,6 +464,13 @@ func (c Config) validate() error {
 		errs = append(errs, fmt.Errorf(
 			"AICC_BOT_GREETING_MEDIA_WAIT must be unset, 0 (wait for media) or a positive grace, got %s",
 			c.BotGreetingMediaWait))
+	}
+	if c.botNoInputErr != nil {
+		errs = append(errs, c.botNoInputErr)
+	} else if c.BotNoInputTimeout < MinBotNoInputTimeout || c.BotNoInputTimeout > MaxBotNoInputTimeout {
+		errs = append(errs, fmt.Errorf(
+			"AICC_BOT_NO_INPUT_TIMEOUT must be between %ds and %ds, got %s",
+			int(MinBotNoInputTimeout.Seconds()), int(MaxBotNoInputTimeout.Seconds()), c.BotNoInputTimeout))
 	}
 	if c.WebhookDeliveredRetentionDays < 0 || c.WebhookFailedRetentionDays < 0 {
 		errs = append(errs, fmt.Errorf(

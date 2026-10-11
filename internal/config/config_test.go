@@ -127,6 +127,49 @@ func TestBotGreetingMediaWait(t *testing.T) {
 	}
 }
 
+func TestBotNoInputTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   *string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "unset is 8s", want: 8 * time.Second},
+		{name: "empty is unset", value: ptrTo(""), want: 8 * time.Second},
+		{name: "a value", value: ptrTo("15s"), want: 15 * time.Second},
+		{name: "the lower bound", value: ptrTo("2s"), want: 2 * time.Second},
+		{name: "the upper bound", value: ptrTo("60s"), want: 60 * time.Second},
+		{name: "below the bound is refused", value: ptrTo("1s"), wantErr: true},
+		{name: "above the bound is refused", value: ptrTo("61s"), wantErr: true},
+		{name: "zero is refused, there is no off", value: ptrTo("0"), wantErr: true},
+		{name: "negative is refused", value: ptrTo("-1s"), wantErr: true},
+		{name: "a malformed value is refused, not read as the default", value: ptrTo("eight"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.value == nil {
+				t.Setenv("AICC_BOT_NO_INPUT_TIMEOUT", "")
+				os.Unsetenv("AICC_BOT_NO_INPUT_TIMEOUT")
+			} else {
+				t.Setenv("AICC_BOT_NO_INPUT_TIMEOUT", *tt.value)
+			}
+			c, err := Load()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "AICC_BOT_NO_INPUT_TIMEOUT") {
+					t.Fatalf("Load() error = %v, want one naming the setting", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if c.BotNoInputTimeout != tt.want {
+				t.Errorf("got %s, want %s", c.BotNoInputTimeout, tt.want)
+			}
+		})
+	}
+}
+
 func ptrTo[T any](v T) *T { return &v }
 
 func TestParsePeers(t *testing.T) {
@@ -331,6 +374,10 @@ func TestValidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			// The fixtures leave the dead-air timeout out; Load always sets it.
+			if tt.cfg.BotNoInputTimeout == 0 {
+				tt.cfg.BotNoInputTimeout = DefaultBotNoInputTimeout
+			}
 			err := tt.cfg.validate()
 			if tt.wantErr == "" {
 				if err != nil {
