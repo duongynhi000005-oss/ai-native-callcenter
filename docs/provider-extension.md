@@ -64,6 +64,7 @@ Every field of `provider.Profile` exists because a vendor forced it to
 | `Headers` | Anything the upgrade request needs beyond authorization |
 | `Style` | `GA` nests audio settings under `session.audio.input/output`; `BETA` is the older flat shape. Both are in the wild. |
 | `Voice` | The profile's default voice, used only when the flow does not name one |
+| `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours) and gemini (`setup.generationConfig.temperature`, range [0.0, 2.0], default undocumented for the Live model). False on openai (the GA `session` object has no such field), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
 | `AcceptsG711` | Whether telephone audio passes through untouched. True removes conversion from the hot path entirely. |
 | `LinearInput` / `LinearOutput` | The PCM formats used when it does not. Fixed by the vendor, not negotiated. |
 | `CancelsResponseItself` | Whether it stops generating when it hears the caller, or has to be told |

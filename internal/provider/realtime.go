@@ -869,6 +869,12 @@ func (r *Realtime) buildSessionUpdate(cfg SessionConfig, isReduced bool) map[str
 	if voice != "" {
 		session["voice"] = voice
 	}
+	// Only the opening session.update carries it; mid-call updates are
+	// instructions alone. It is optional, so the reduced retry drops it: a
+	// session at the provider's default beats a caller with no bot.
+	if r.profile.AcceptsTemperature && cfg.Temperature != nil && !isReduced {
+		session["temperature"] = *cfg.Temperature
+	}
 	return map[string]any{"type": "session.update", "session": session}
 }
 

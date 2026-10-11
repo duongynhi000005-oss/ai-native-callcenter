@@ -197,3 +197,44 @@ func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 		}
 	}
 }
+
+// The flow's temperature reaches only the profiles whose session object has a
+// field for it. The GA dialect has none, so sending it there would risk a
+// rejected session.update; the retry after a rejection drops it with the other
+// optional fields; an unset temperature changes nothing anywhere.
+func TestTheSessionUpdateCarriesTheFlowsTemperatureOnlyWhereItIsAccepted(t *testing.T) {
+	temperature := 0.3
+	cases := []struct {
+		name    string
+		profile Profile
+		isSent  bool
+	}{
+		{"qwen", QwenProfile(), true},
+		{"openai", OpenAIProfile(), false},
+		{"gateway", GatewayProfile(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &Realtime{profile: tc.profile}
+			for _, isReduced := range []bool{false, true} {
+				set := client.buildSessionUpdate(SessionConfig{Temperature: &temperature}, isReduced)["session"].(map[string]any)
+				got, isPresent := set["temperature"]
+				if isWanted := tc.isSent && !isReduced; isPresent != isWanted {
+					t.Fatalf("reduced=%v: temperature present = %v, want %v", isReduced, isPresent, isWanted)
+				}
+				if isPresent && got != temperature {
+					t.Errorf("session.temperature = %v, want %v", got, temperature)
+				}
+				unset := client.buildSessionUpdate(SessionConfig{}, isReduced)["session"].(map[string]any)
+				if _, isPresent := unset["temperature"]; isPresent {
+					t.Errorf("reduced=%v: an unset temperature was sent", isReduced)
+				}
+			}
+		})
+	}
+	if tc := QwenProfile(); !tc.AcceptsTemperature || OpenAIProfile().AcceptsTemperature ||
+		GatewayProfile().AcceptsTemperature || DoubaoProfile().AcceptsTemperature ||
+		!GeminiProfile().AcceptsTemperature {
+		t.Error("AcceptsTemperature is not qwen and gemini only")
+	}
+}

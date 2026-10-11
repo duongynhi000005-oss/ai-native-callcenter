@@ -112,6 +112,9 @@ type audioTranscriptionConfig struct {
 type generationConfig struct {
 	ResponseModalities []string      `json:"responseModalities"`
 	SpeechConfig       *speechConfig `json:"speechConfig,omitempty"`
+	// Temperature is documented as [0.0, 2.0]; omitted leaves the model's own
+	// default, which the Live documentation does not state.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 type speechConfig struct {
@@ -214,6 +217,7 @@ func (s *Session) buildSetup() setupFrame {
 	tools := s.tools
 	silenceMs := s.silenceMs
 	language := s.cfg.Language
+	temperature := s.cfg.Temperature
 	s.mu.Unlock()
 
 	body := setupBody{
@@ -234,6 +238,7 @@ func (s *Session) buildSetup() setupFrame {
 			VoiceConfig: voiceConfig{
 				PrebuiltVoiceConfig: prebuiltVoiceConfig{VoiceName: voice}}}
 	}
+	body.GenerationConfig.Temperature = temperature
 	if instructions != "" {
 		body.SystemInstruction = &content{Parts: []part{{Text: instructions}}}
 	}

@@ -87,6 +87,10 @@ type CallDataSource interface {
 	CallData(callID uuid.UUID) map[string]any
 }
 
+// ignoredTemperatureOnce keeps the "temperature is ignored" notice to one line
+// per process rather than one per call.
+var ignoredTemperatureOnce sync.Once
+
 // SessionFactory builds a provider session; swapped out in tests.
 type SessionFactory func(profile provider.Profile, log *slog.Logger) (provider.VoiceSession, error)
 
@@ -337,6 +341,13 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		return fmt.Errorf("no %s provider: %w", profile.Name, err)
 	}
 
+	if spec.Global.Temperature != nil && !profile.AcceptsTemperature {
+		ignoredTemperatureOnce.Do(func() {
+			log.Warn("flow sets global.temperature but this provider has no such setting; it is ignored",
+				"provider", profile.Name)
+		})
+	}
+
 	session, err := New(FromDialog(dialog), model, profile,
 		o.sessionConfig(sessionConfigFor(spec, runtime, language), actions.isArmed, log))
 	if err != nil {
@@ -389,6 +400,7 @@ func sessionConfigFor(spec *flow.Spec, runtime *flow.Runtime, language string) p
 		// The bot's own voice, published with the flow. Empty falls back
 		// to the provider profile's default.
 		Voice:       spec.Global.Voice,
+		Temperature: spec.Global.Temperature,
 		Turn:        provider.DefaultTurnDetection(),
 		Tools:       runtime.Tools(),
 		OpeningText: runtime.Announce(),

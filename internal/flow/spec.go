@@ -256,6 +256,15 @@ type Global struct {
 	// should not change its voice mid-catalogue. Empty uses the provider's
 	// default.
 	Voice string `json:"voice,omitempty"`
+	// Temperature is the model's sampling temperature, a property of the
+	// persona and so published with the flow for the same reason as Voice
+	// (A7). It pins the variance of what the model writes freely, such as the
+	// summary handed to an agent. Absent leaves the provider's default.
+	//
+	// The range 0 <= t < 2 is what both engines that take one accept; a
+	// provider without the setting (openai, gateway, doubao) ignores it and
+	// says so once per process.
+	Temperature *float64 `json:"temperature,omitempty"`
 	// FallbackTarget is where a conversation goes when it has run too long or
 	// lost its way.
 	FallbackTarget string `json:"fallbackTarget,omitempty"`
@@ -301,6 +310,9 @@ type Global struct {
 	// Transitions apply in every non-terminal phase, after the node's own.
 	Transitions []Transition `json:"transitions,omitempty"`
 }
+
+// MaxTemperatureExclusive is the first value Global.Temperature may not take.
+const MaxTemperatureExclusive = 2.0
 
 // The bounds of Global.MaxDurationSec.
 const (

@@ -87,6 +87,8 @@ export interface FlowGlobal {
   rules?: FlowTextList
   /** The bot's timbre, published with the persona rather than set per host. */
   voice?: string
+  /** Sampling temperature, 0 up to but not including 2; absent is the provider default. */
+  temperature?: number
   fallbackTarget?: string
   /**
    * The flow's own goodbye phase: a terminal node the engine moves a call to

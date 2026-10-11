@@ -112,6 +112,11 @@ type VoiceSession interface {
 type SessionConfig struct {
 	Instructions string
 	Voice        string
+	// Temperature is the sampling temperature the flow asked for. Nil leaves
+	// the provider's own default, which is what every call did before there
+	// was a place to say it. A profile that cannot take one
+	// (Profile.AcceptsTemperature) ignores it.
+	Temperature *float64
 	// Language sets the prompt language and the default greeting cue. It never
 	// selects the provider, which a deployment chooses once at startup (A1),
 	// nor the voice, which the flow owns (A7).
