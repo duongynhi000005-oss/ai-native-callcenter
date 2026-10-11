@@ -643,6 +643,10 @@ hand instead of pulling it.
   `AICC_BOT_GREETING_MEDIA_WAIT` (`0` waits for the first inbound RTP however
   long, `3s` waits for it or 3 s) so the greeting is asked for only after media
   has started; unset keeps the greeting immediate.
+- **A silent caller is prompted too soon or too late.** The dead-air timeout
+  (the wait after the bot's last word before the flow gets `NO_INPUT`) is 8 s by
+  default; set `AICC_BOT_NO_INPUT_TIMEOUT` (2s to 60s) to change it. The log
+  line `dead air` shows it as `afterMs`.
 - **The bot speaks, then about 5 s later the call goes to a queue.** The
   caller's audio does not reach the switch, so the bot leg receives no media
   and ends. The application logs `media went dead` (media that was flowing

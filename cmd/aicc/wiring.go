@@ -503,6 +503,7 @@ func botConfig(
 	callData aicall.CallDataSource,
 	isGreetingGated bool,
 	greetingMediaWait time.Duration,
+	noInput time.Duration,
 ) aicall.OrchestratorConfig {
 	return aicall.OrchestratorConfig{
 		UAS:                uas,
@@ -523,6 +524,8 @@ func botConfig(
 		// the deployment's AICC_BOT_GREETING_MEDIA_WAIT.
 		IsGreetingGated:   isGreetingGated,
 		GreetingMediaWait: greetingMediaWait,
+		// Dead air before NO_INPUT: the deployment's AICC_BOT_NO_INPUT_TIMEOUT.
+		NoInput: noInput,
 	}
 }
 

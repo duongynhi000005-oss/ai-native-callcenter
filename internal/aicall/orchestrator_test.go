@@ -2247,3 +2247,35 @@ func TestAToolResultThatChangesThePhasesInstructionRepinsItBeforeTheAnswer(t *te
 		t.Fatalf("calls = %s, want the third answer with no instruction update", got)
 	}
 }
+
+// The deployment's dead-air timeout (AICC_BOT_NO_INPUT_TIMEOUT) reaches each
+// call's session, and a non-default value changes when NO_INPUT fires.
+func TestTheOrchestratorPassesTheDeadAirTimeoutToTheSession(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	unset := testOrchestrator(t, &fakeSwitch{}).sessionConfig(provider.SessionConfig{}, nil, log)
+	if unset.NoInput != 0 {
+		t.Errorf("unset NoInput = %s, want 0 (the session's 8 s default)", unset.NoInput)
+	}
+
+	o := testOrchestrator(t, &fakeSwitch{})
+	o.cfg.NoInput = 150 * time.Millisecond
+	cfg := o.sessionConfig(provider.SessionConfig{}, nil, log)
+	if cfg.NoInput != 150*time.Millisecond {
+		t.Fatalf("session NoInput = %s, want 150ms", cfg.NoInput)
+	}
+
+	// With the default (8 s) nothing would fire inside this test; the
+	// configured value does, from the config the orchestrator built.
+	cfg.BargeGuard = -1
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(), cfg)
+	awaitBridgeEvent(t, session, EventTypeReady)
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type:  provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples),
+	}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	awaitBridgeEvent(t, session, EventTypePlaybackDone)
+	awaitBridgeEvent(t, session, EventTypeNoInput)
+}

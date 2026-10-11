@@ -572,6 +572,7 @@ func TestEveryBotDependencyIsPlumbed(t *testing.T) {
 		outbound.NewCallData(),
 		true,
 		3*time.Second,
+		8*time.Second,
 	)
 
 	// The greeting gate is exempt only when unset, which is a real setting
@@ -636,10 +637,42 @@ func TestBotConfigCarriesTheGreetingMediaWait(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			got := botConfig(botUAS(cfg), nil, nil, nil, nil, nil, "", provider.Profile{},
-				nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait)
+				nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
 			if got.IsGreetingGated != tc.wantGated || got.GreetingMediaWait != tc.wantWait {
 				t.Errorf("orchestrator gate = %v, %s, want %v, %s",
 					got.IsGreetingGated, got.GreetingMediaWait, tc.wantGated, tc.wantWait)
+			}
+		})
+	}
+}
+
+// The dead-air timeout must come from configuration, default 8 s.
+func TestBotConfigCarriesTheNoInputTimeout(t *testing.T) {
+	cases := []struct {
+		name  string
+		value *string
+		want  time.Duration
+	}{
+		{"unset is the default", nil, 8 * time.Second},
+		{"a deployment's value", ptr("15s"), 15 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AICC_ENV", "dev")
+			if tc.value == nil {
+				t.Setenv("AICC_BOT_NO_INPUT_TIMEOUT", "")
+				os.Unsetenv("AICC_BOT_NO_INPUT_TIMEOUT")
+			} else {
+				t.Setenv("AICC_BOT_NO_INPUT_TIMEOUT", *tc.value)
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			got := botConfig(botUAS(cfg), nil, nil, nil, nil, nil, "", provider.Profile{},
+				nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
+			if got.NoInput != tc.want {
+				t.Errorf("orchestrator NoInput = %s, want %s", got.NoInput, tc.want)
 			}
 		})
 	}
