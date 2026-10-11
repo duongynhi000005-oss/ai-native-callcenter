@@ -50,8 +50,8 @@ SELECT count(*) FROM audit_logs a
 WHERE ($1::uuid IS NULL OR a.actor_id = $1::uuid)
   AND ($2::text IS NULL
        OR a.action LIKE $2::text || '%')
-  AND ($3::timestamptz IS NULL OR a.occurred_at >= $3::timestamptz)
-  AND ($4::timestamptz IS NULL OR a.occurred_at < $4::timestamptz)
+  AND a.occurred_at >= coalesce($3::timestamptz, '-infinity'::timestamptz)
+  AND a.occurred_at <  coalesce($4::timestamptz,   'infinity'::timestamptz)
 `
 
 type CountAuditLogsParams struct {
@@ -75,8 +75,8 @@ func (q *Queries) CountAuditLogs(ctx context.Context, arg CountAuditLogsParams) 
 
 const countCDRs = `-- name: CountCDRs :one
 SELECT count(*) FROM cdrs
-WHERE ($1::timestamptz IS NULL OR started_at >= $1)
-  AND ($2::timestamptz IS NULL OR started_at < $2)
+WHERE started_at >= coalesce($1::timestamptz, '-infinity'::timestamptz)
+  AND started_at <  coalesce($2::timestamptz,   'infinity'::timestamptz)
   AND ($3::uuid IS NULL OR queue_id = $3)
   AND ($4::uuid IS NULL OR primary_agent_id = $4
        OR $4 = ANY (agent_ids))
@@ -680,8 +680,8 @@ LEFT JOIN users u ON u.id = a.actor_id
 WHERE ($3::uuid IS NULL OR a.actor_id = $3::uuid)
   AND ($4::text IS NULL
        OR a.action LIKE $4::text || '%')
-  AND ($5::timestamptz IS NULL OR a.occurred_at >= $5::timestamptz)
-  AND ($6::timestamptz IS NULL OR a.occurred_at < $6::timestamptz)
+  AND a.occurred_at >= coalesce($5::timestamptz, '-infinity'::timestamptz)
+  AND a.occurred_at <  coalesce($6::timestamptz,   'infinity'::timestamptz)
 ORDER BY a.occurred_at DESC, a.id DESC
 LIMIT $1 OFFSET $2
 `
@@ -763,8 +763,8 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 
 const listCDRs = `-- name: ListCDRs :many
 SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims FROM cdrs
-WHERE ($1::timestamptz IS NULL OR started_at >= $1)
-  AND ($2::timestamptz IS NULL OR started_at < $2)
+WHERE started_at >= coalesce($1::timestamptz, '-infinity'::timestamptz)
+  AND started_at <  coalesce($2::timestamptz,   'infinity'::timestamptz)
   AND ($3::uuid IS NULL OR queue_id = $3)
   AND ($4::uuid IS NULL OR primary_agent_id = $4
        OR $4 = ANY (agent_ids))
@@ -787,6 +787,9 @@ type ListCDRsParams struct {
 	PageLimit  int32              `json:"pageLimit"`
 }
 
+// An open time bound is coalesced to ±infinity rather than OR-ed with IS NULL,
+// so it stays an Index Cond under a generic plan as well as a custom one.
+// CountCDRs and the two audit-log queries bound their time the same way.
 func (q *Queries) ListCDRs(ctx context.Context, arg ListCDRsParams) ([]Cdr, error) {
 	rows, err := q.db.Query(ctx, listCDRs,
 		arg.FromAt,
