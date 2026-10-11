@@ -653,3 +653,106 @@ func TestCloseGivesUpOnAServiceThatNeverFinishes(t *testing.T) {
 		t.Fatalf("Close did not give up within %s", dsFinishTimeout)
 	}
 }
+
+func TestQwenDefaultModelIsTheMessageFamily(t *testing.T) {
+	t.Parallel()
+	qwen, err := ProfileFor("qwen", Override{})
+	if err != nil {
+		t.Fatalf("qwen: %v", err)
+	}
+	if qwen.Model != "qwen-audio-3.1-asr-flash-message" {
+		t.Errorf("default model = %q", qwen.Model)
+	}
+}
+
+// runTaskParams starts a dashscope session on model and returns the run-task
+// parameters the fake service received.
+func runTaskParams(t *testing.T, model string, cfg Config) map[string]any {
+	t.Helper()
+	engine := newFakeEngine(t, func(c *websocket.Conn) {
+		_ = c.WriteJSON(map[string]any{"header": map[string]any{"event": "task-started"}})
+	})
+	s := newDashscope(Profile{Name: ProviderQwen, Endpoint: engine.url(),
+		Model: model, SampleRate: 16000}, "k", nopLogger{})
+	if err := s.Start(context.Background(), cfg); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Close(context.Background())
+	select {
+	case raw := <-engine.received:
+		var run dsRunTask
+		if err := json.Unmarshal([]byte(raw), &run); err != nil {
+			t.Fatalf("run-task did not decode: %v", err)
+		}
+		return run.Payload.Parameters
+	case <-time.After(2 * time.Second):
+		t.Fatal("no run-task was sent")
+	}
+	return nil
+}
+
+func TestRunTaskParametersFollowTheModelFamily(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Language: "zh", Hints: []string{"NovaNet"}}
+
+	msg := runTaskParams(t, "qwen-audio-3.1-asr-flash-message", cfg)
+	if msg["intermediate_result_enabled"] != true {
+		t.Errorf("message model must ask for partials: %v", msg)
+	}
+	for _, k := range []string{"language_hints", "semantic_punctuation_enabled", "disfluency_removal_enabled"} {
+		if _, ok := msg[k]; ok {
+			t.Errorf("message model must not send %s: %v", k, msg)
+		}
+	}
+	for _, k := range []string{"format", "sample_rate", "max_sentence_silence", "heartbeat", "vocabulary"} {
+		if _, ok := msg[k]; !ok {
+			t.Errorf("message model lost %s: %v", k, msg)
+		}
+	}
+
+	st := runTaskParams(t, "qwen-audio-3.0-asr-flash-streaming", cfg)
+	if st["semantic_punctuation_enabled"] != true {
+		t.Errorf("streaming model lost semantic_punctuation_enabled: %v", st)
+	}
+	if hints, ok := st["language_hints"].([]any); !ok || len(hints) != 1 || hints[0] != "zh" {
+		t.Errorf("streaming model language_hints = %v", st["language_hints"])
+	}
+	for _, k := range []string{"intermediate_result_enabled", "disfluency_removal_enabled"} {
+		if _, ok := st[k]; ok {
+			t.Errorf("streaming model must not send %s: %v", k, st)
+		}
+	}
+}
+
+func TestQwenModelGuard(t *testing.T) {
+	t.Parallel()
+	valid := func(model string) error {
+		return Profile{Name: ProviderQwen, Endpoint: "wss://x.invalid/ws", Model: model}.Validate()
+	}
+	for _, m := range []string{
+		"qwen-audio-3.0-asr-flash-streaming",
+		"qwen-audio-3.1-asr-flash-streaming",
+		"qwen-audio-3.1-asr-flash-message",
+		"fun-asr-realtime",
+		"fun-asr-realtime-2025-11-07",
+		"fun-asr-flash-8k-realtime",
+		"fun-asr-flash-8k-realtime-2026-01-01",
+	} {
+		if err := valid(m); err != nil {
+			t.Errorf("%s rejected: %v", m, err)
+		}
+	}
+	for _, m := range []string{"qwen-audio-3.1-asr-flash-mesage", "qwen3-asr-flash-realtime", "gpt-live-transcribe"} {
+		err := valid(m)
+		if err == nil || !strings.Contains(err.Error(), "AICC_TRANSCRIBE_MODEL") {
+			t.Errorf("%s: error = %v, want one naming AICC_TRANSCRIBE_MODEL", m, err)
+		}
+	}
+	if err := valid("qwen3-asr-flash-realtime"); err == nil || !strings.Contains(err.Error(), "OpenAI") {
+		t.Errorf("realtime error = %v, want the OpenAI dialect explained", err)
+	}
+	// The openai profile's model is not checked.
+	if err := (Profile{Name: ProviderOpenAI, Endpoint: "wss://x.invalid", Model: "anything"}).Validate(); err != nil {
+		t.Errorf("openai model checked: %v", err)
+	}
+}

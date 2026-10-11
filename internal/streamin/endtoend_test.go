@@ -156,7 +156,7 @@ func TestBothProducersShareOneActorAndOneSequence(t *testing.T) {
 	actor := reg.For(callID, "INBOUND", time.Now().Add(-time.Minute))
 	t.Cleanup(func() { reg.Close(callID) })
 
-	profile := transcribe.Profile{Name: "qwen", Endpoint: asrURL, Model: "m", SampleRate: 16000}
+	profile := transcribe.Profile{Name: "qwen", Endpoint: asrURL, Model: "qwen-audio-3.1-asr-flash-message", SampleRate: 16000}
 	srv, err := New(Config{
 		Addr:   "127.0.0.1:0",
 		Secret: []byte("e2e"),

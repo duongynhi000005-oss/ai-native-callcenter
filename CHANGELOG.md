@@ -5,6 +5,20 @@ under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
 run them together. From v0.2.0 on, the GitHub release of the same tag also
 carries the one-line installer's files.
 
+## Unreleased
+
+### Changed
+
+- Live transcription on the qwen recogniser now defaults to
+  `qwen-audio-3.1-asr-flash-message` (was `qwen-audio-3.0-asr-flash-streaming`).
+  The client asks this model for live partials and leaves out the parameters it
+  does not support. Set `AICC_TRANSCRIBE_MODEL` to keep a `-streaming` or
+  `fun-asr-*` model; their parameters are unchanged.
+- The server now refuses to start when `AICC_TRANSCRIBE_MODEL` names a model
+  outside the DashScope-native families on the qwen client (a typo used to fail
+  only after the first call finished, with "Model not exist.").
+  `qwen3-asr-flash-realtime` is refused explicitly: it speaks the OpenAI dialect.
+
 ## v0.4.0 - 2026-10-10
 
 ### Upgrade notes

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,16 +198,25 @@ func (d *dashscope) Start(ctx context.Context, cfg Config) error {
 	})
 
 	params := map[string]any{
-		"format":                       "pcm",
-		"sample_rate":                  d.profile.SampleRate,
-		"semantic_punctuation_enabled": true,
-		"max_sentence_silence":         dsSentenceSilence,
+		"format":               "pcm",
+		"sample_rate":          d.profile.SampleRate,
+		"max_sentence_silence": dsSentenceSilence,
 		// A call has long silences by nature — one party listens while the
 		// other talks — and without this the service may close an idle task.
 		"heartbeat": true,
 	}
-	if cfg.Language != "" {
-		params["language_hints"] = []string{cfg.Language}
+	if isMessageModel(d.profile.Model) {
+		// The message family sends no live partials unless asked (only one
+		// empty partial per sentence). It documents language_hints and
+		// semantic_punctuation_enabled as unsupported, so neither is sent.
+		// disfluency_removal_enabled is deliberately left at the service
+		// default (false): a call transcript stays verbatim.
+		params["intermediate_result_enabled"] = true
+	} else {
+		params["semantic_punctuation_enabled"] = true
+		if cfg.Language != "" {
+			params["language_hints"] = []string{cfg.Language}
+		}
 	}
 	if len(cfg.Hints) > 0 {
 		vocabulary := make(map[string]int, len(cfg.Hints))
@@ -388,6 +398,12 @@ func (d *dashscope) readLoop() {
 			return
 		}
 	}
+}
+
+// isMessageModel reports the qwen-audio-*-asr-flash-message family, whose
+// run-task parameters differ from the streaming models'.
+func isMessageModel(model string) bool {
+	return strings.Contains(model, "-asr-flash-message")
 }
 
 func (d *dashscope) onSentence(s *dsSentence) {
