@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
+	"github.com/rasonyang/ai-native-callcenter/internal/config"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
@@ -45,17 +46,15 @@ type NumberPlan interface {
 type Config struct {
 	// EndpointFormat renders a destination number into a dial string for the
 	// AI outbound leg, e.g. "sofia/gateway/pstn/%s". Only that path needs it:
-	// click-to-dial hands the destination to the dialplan instead. The
-	// default loops back into the local dialplan — pinned to the aicc context
-	// and to XML, because a loopback leg inherits the a-leg's dialplan and
-	// would otherwise read the number as an application name — which is what a
-	// dev box without a trunk can reach.
-	//
-	// That default is for development only. Loopback is not to be used in
-	// production (owner directive 2026-08-22): a deployment sets this to its
-	// own trunk, sofia/gateway/<gw>/%s, and the AI outbound path should stop
-	// depending on loopback altogether — tracked as W10.
+	// click-to-dial hands the destination to the dialplan instead. There is
+	// no default and the config layer guarantees it is a sofia/ dial string
+	// with one %s; loopback cannot carry this path (C47). Empty refuses the
+	// call with ErrNoOutboundEndpoint.
 	EndpointFormat string
+	// SIPHeaders are stamped on the AI outbound customer leg as sip_h_<Name>
+	// and nowhere else: not click-to-dial, not the bridge to the bot. Already
+	// validated by the config layer.
+	SIPHeaders []config.SIPHeader
 	// BotGateway is the gateway name the switch bridges AI legs through.
 	BotGateway string
 	// CallerID presented on click-to-dial customer legs; empty leaves the
@@ -490,6 +489,15 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 	}
 	endpoint := fmt.Sprintf(s.cfg.EndpointFormat, req.To)
 	pinCodecs(vars, endpoint)
+	for _, h := range s.cfg.SIPHeaders {
+		vars["sip_h_"+h.Name] = h.Value
+	}
+	if len(s.cfg.SIPHeaders) > 0 {
+		// mod_sofia copies every sip_h_ variable of a channel onto each sofia
+		// leg bridged from it, so without this the headers would also ride
+		// the bridge to the bot and any later transfer to an agent.
+		vars["sip_copy_custom_headers"] = "false"
+	}
 	if _, err := s.sw.Originate(customerLeg, endpoint, vars); err != nil {
 		if s.callData != nil {
 			s.callData.Drop(callID)

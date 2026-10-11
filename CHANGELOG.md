@@ -7,7 +7,22 @@ carries the one-line installer's files.
 
 ## Unreleased
 
+### Added
+
+- `AICC_OUTBOUND_SIP_HEADERS`: `Name=value` pairs, separated by `;`, added as SIP
+  headers to the AI outbound customer leg only (not click-to-dial, not the
+  bridge to the bot). A deployment behind FreeSBC sets `X-FSBC-Out=1` so the AI
+  leg carries the same loop marker the dialplan stamps on click-to-dial legs;
+  the application names no SBC vendor itself. Names must start with `X-`, stay
+  out of the `X-AICC-` namespace and be unique; values cannot contain `;`,
+  braces or control characters. A malformed value refuses startup and names the
+  pair (#62).
+
 ### Changed
+
+- The server now refuses to start when `AICC_OUTBOUND_ENDPOINT` is set to
+  anything but a `sofia/` dial string holding exactly one `%s` (loopback never
+  worked for AI outbound calls). Unset is still allowed.
 
 - Live transcription on the qwen recogniser now defaults to
   `qwen-audio-3.1-asr-flash-message` (was `qwen-audio-3.0-asr-flash-streaming`).

@@ -37,13 +37,11 @@
   is present fails the gate, which ends this extension before any of the
   break="never" conditions below can set anything or place a call.
 
-  Only calls this dialplan places carry X-FSBC-Out. An AI outbound call does
-  not come through here: the application originates it straight to
-  AICC_OUTBOUND_ENDPOINT (sofia/gateway/<gw>/%s), and the application names no
-  SBC vendor's header, so its INVITE carries no marker. That is by design. If
-  the carrier reflects such a call back, it arrives with X-FreeSBC-Carrier and
-  lands in the public context, so the first gate is the one that holds on that
-  path. Revisit this before outbound campaigns make that path the main one.
+  Calls this dialplan places carry X-FSBC-Out. An AI outbound call does not
+  come through here: the application originates it straight to
+  AICC_OUTBOUND_ENDPOINT (sofia/gateway/<gw>/%s) and names no SBC vendor's
+  header. It carries the marker when the deployment sets
+  AICC_OUTBOUND_SIP_HEADERS=X-FSBC-Out=1, so both gates hold on that path too.
 
   Then three conditions rather than one, because a fallback needs somewhere to be
   written before it can be overwritten: the first sets it, the second replaces
