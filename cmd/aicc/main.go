@@ -276,6 +276,7 @@ func run() error {
 	// Outbound: click-to-dial and the AI outbound leg share one originator.
 	outboundSvc := outbound.New(outbound.Config{
 		EndpointFormat: cfg.OutboundEndpoint,
+		SIPHeaders:     cfg.OutboundSIPHeaders,
 		CallerID:       cfg.OutboundCallerID,
 	}, adapter, catalogSvc, catalogSvc,
 		st.Ledger().HasCDR,

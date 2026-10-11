@@ -341,3 +341,22 @@ func TestFlushRegistrationNamesTheProfileAndTheDomain(t *testing.T) {
 		t.Errorf("command = %q, want %q", c.last(), want)
 	}
 }
+
+// A header value with a comma, a space and a quote must stay one variable in
+// the rendered originate line: a comma split here cancels the whole originate.
+func TestOriginateKeepsAHeaderValueWithCommaSpaceAndQuoteAsOneVariable(t *testing.T) {
+	t.Parallel()
+	a, c := newTestAdapter()
+	party := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	if _, err := a.Originate(party, "sofia/gateway/pstn/13912345678", map[string]string{
+		"sip_h_X-Note": "a,b c'd",
+		"sip_h_X-Site": "bj",
+	}); err != nil {
+		t.Fatalf("Originate: %v", err)
+	}
+	const want = `originate {ignore_early_media=true,origination_uuid=11111111-2222-3333-4444-555555555555,` +
+		`sip_h_X-Note='a,b c\'d',sip_h_X-Site=bj}sofia/gateway/pstn/13912345678 &park()`
+	if c.last() != want {
+		t.Errorf("command = %q, want %q", c.last(), want)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
+	"github.com/rasonyang/ai-native-callcenter/internal/config"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
@@ -631,5 +633,84 @@ func TestAClickToDialWithNoDefaultNumberIsRefusedRatherThanGuessed(t *testing.T)
 	if len(sw.originates) != 0 {
 		t.Errorf("the agent's phone was rung for a call that could not go out: %v",
 			sw.originates)
+	}
+}
+
+// The deployment's headers ride the AI outbound customer leg, in the shape
+// the originate block takes them, and nowhere else.
+func TestDialAIStampsTheConfiguredSIPHeadersOnTheCustomerLegOnly(t *testing.T) {
+	t.Parallel()
+	sw := &fakeSwitch{}
+	s := testService(t, sw, nil)
+	s.cfg.SIPHeaders = []config.SIPHeader{{Name: "X-FSBC-Out", Value: "1"}, {Name: "X-Site", Value: "bj"}}
+
+	if _, err := s.DialAI(context.Background(), AIDialRequest{To: "13912345678", DIDNumber: "95012"}); err != nil {
+		t.Fatal(err)
+	}
+	first := sw.lastOriginate()
+	if first.vars["sip_h_X-FSBC-Out"] != "1" || first.vars["sip_h_X-Site"] != "bj" {
+		t.Errorf("customer leg vars = %v, want both headers", first.vars)
+	}
+	// The switch would otherwise copy them onto every leg bridged from this one.
+	if first.vars["sip_copy_custom_headers"] != "false" {
+		t.Errorf("customer leg vars = %v, want sip_copy_custom_headers=false", first.vars)
+	}
+
+	answer(s, first.partyID.String())
+	waitBridges(t, sw, 1)
+	bridge := sw.lastBridge()
+	for k := range bridge.vars {
+		if k == "sip_h_X-FSBC-Out" || k == "sip_h_X-Site" {
+			t.Errorf("bot bridge carries %s", k)
+		}
+	}
+	want := map[string]string{
+		"aicc_call_id":                    bridge.vars["aicc_call_id"],
+		"aicc_did":                        "95012",
+		"aicc_language":                   "zh",
+		"sip_h_X-AICC-Call-ID":            bridge.vars["aicc_call_id"],
+		"sip_h_X-AICC-Channel-ID":         first.partyID.String(),
+		"sip_h_X-AICC-DID":                "95012",
+		"sip_h_X-AICC-Language":           "zh",
+		"sip_h_X-AICC-ANI":                "13912345678",
+		"sip_h_X-AICC-Call-Type":          "OUTBOUND",
+		"sip_h_X-AICC-Placed-To-Customer": "true",
+		"absolute_codec_string":           "PCMU",
+	}
+	if !reflect.DeepEqual(bridge.vars, want) {
+		t.Errorf("bridge vars = %v, want %v", bridge.vars, want)
+	}
+}
+
+func TestDialAIAddsNoHeadersWhenNoneAreConfigured(t *testing.T) {
+	t.Parallel()
+	sw := &fakeSwitch{}
+	s := testService(t, sw, nil)
+	if _, err := s.DialAI(context.Background(), AIDialRequest{To: "13912345678", DIDNumber: "95012"}); err != nil {
+		t.Fatal(err)
+	}
+	for k := range sw.lastOriginate().vars {
+		if strings.HasPrefix(k, "sip_h_") || k == "sip_copy_custom_headers" {
+			t.Errorf("customer leg carries %s with nothing configured", k)
+		}
+	}
+}
+
+func TestClickToDialCarriesNoConfiguredHeaders(t *testing.T) {
+	t.Parallel()
+	sw := &fakeSwitch{}
+	s := testService(t, sw, nil)
+	s.cfg.SIPHeaders = []config.SIPHeader{{Name: "X-FSBC-Out", Value: "1"}}
+	if _, err := s.Dial(context.Background(), AgentDialRequest{AgentExtension: "1001", To: "13912345678", CallcenterName: "agent-1001"}); err != nil {
+		t.Fatal(err)
+	}
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	for _, o := range sw.originates {
+		for k := range o.vars {
+			if strings.HasPrefix(k, "sip_h_") {
+				t.Errorf("click-to-dial originate carries %s", k)
+			}
+		}
 	}
 }

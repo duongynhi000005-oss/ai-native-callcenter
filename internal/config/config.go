@@ -92,6 +92,9 @@ type Config struct {
 	// OutboundEndpoint renders a destination number into a dial string for
 	// the AI outbound leg, %s standing for the number: sofia/gateway/<gw>/%s.
 	//
+	// It must be a sofia/ dial string with exactly one %s (validate refuses
+	// anything else at startup); empty is allowed.
+	//
 	// There is no default, and loopback is not one of the shapes this takes.
 	// Which endpoint reaches a carrier is a fact about the deployment, and a
 	// value that is right for one is wrong for the next; unset, placing an AI
@@ -101,6 +104,11 @@ type Config struct {
 	// is the loopback's own, gone by the time the bot has anything to say
 	// about the caller, so no stamp and no transfer can find the channel (C47).
 	OutboundEndpoint string
+	// OutboundSIPHeaders are appended to the AI outbound customer leg only
+	// (AICC_OUTBOUND_SIP_HEADERS); see ParseOutboundSIPHeaders. The
+	// application names no SBC vendor, a deployment sets its own marker.
+	OutboundSIPHeaders    []SIPHeader
+	outboundSIPHeadersErr error // a malformed value, refused by validate
 	// OutboundCallerID is presented on click-to-dial customer legs.
 	OutboundCallerID string
 	// IsBotEnabled turns the whole AI leg off, for deployments that only
@@ -289,6 +297,7 @@ func Load() (Config, error) {
 	if !isNoInputSet {
 		noInput = DefaultBotNoInputTimeout
 	}
+	outboundHeaders, outboundHeadersErr := ParseOutboundSIPHeaders(env(outboundHeadersVar, ""))
 	c := Config{
 		Env:                  env("AICC_ENV", "dev"),
 		HTTPAddr:             env("AICC_HTTP_ADDR", ":8080"),
@@ -330,6 +339,8 @@ func Load() (Config, error) {
 		ProviderEndpoint:        env("AICC_PROVIDER_ENDPOINT", ""),
 		ProviderModel:           env("AICC_PROVIDER_MODEL", ""),
 		OutboundEndpoint:        env("AICC_OUTBOUND_ENDPOINT", ""),
+		OutboundSIPHeaders:      outboundHeaders,
+		outboundSIPHeadersErr:   outboundHeadersErr,
 		OutboundCallerID:        env("AICC_OUTBOUND_CLID", ""),
 		RecordingBackend:        env("AICC_RECORDING_BACKEND", "FS"),
 		RecordingDir:            env("AICC_RECORDING_DIR", ""),
@@ -464,6 +475,14 @@ func (c Config) validate() error {
 		errs = append(errs, fmt.Errorf(
 			"AICC_BOT_GREETING_MEDIA_WAIT must be unset, 0 (wait for media) or a positive grace, got %s",
 			c.BotGreetingMediaWait))
+	}
+	if err := ValidateOutboundEndpoint(c.OutboundEndpoint); err != nil {
+		errs = append(errs, err)
+	}
+	if c.outboundSIPHeadersErr != nil {
+		errs = append(errs, c.outboundSIPHeadersErr)
+	} else if err := ValidateOutboundSIPHeaders(c.OutboundSIPHeaders); err != nil {
+		errs = append(errs, err)
 	}
 	if c.botNoInputErr != nil {
 		errs = append(errs, c.botNoInputErr)
