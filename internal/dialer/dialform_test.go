@@ -59,7 +59,7 @@ func TestTheDialFormChangesOnlyWhatTheTrunkIsSent(t *testing.T) {
 			r.start(c)
 
 			if n := r.placer.placedTo(tc.wantCN); n != 1 {
-				t.Errorf("placed to %s %d times, want 1 (all: %+v)", tc.wantCN, n, r.placer.calls)
+				t.Errorf("placed to %s %d times, want 1 (all: %+v)", tc.wantCN, n, r.placer.placedCalls())
 			}
 			if n := r.placer.placedTo(tc.wantForeign); n != 1 {
 				t.Errorf("placed to %s %d times, want 1", tc.wantForeign, n)
@@ -92,6 +92,6 @@ func TestNationalFormFallsBackToTheDeploymentCountryCode(t *testing.T) {
 	r.importContacts(c, []contactSpec{{number: "+8618688886666"}})
 	r.start(c)
 	if r.placer.placedTo("18688886666") != 1 {
-		t.Fatalf("calls = %+v, want one to 18688886666", r.placer.calls)
+		t.Fatalf("calls = %+v, want one to 18688886666", r.placer.placedCalls())
 	}
 }

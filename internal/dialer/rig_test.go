@@ -150,6 +150,22 @@ func (p *fakePlacer) isLive(id uuid.UUID) bool {
 	return ok
 }
 
+// placedCalls is every placement so far, copied under the lock: the dialer
+// goroutine appends to p.calls while a test reads it.
+func (p *fakePlacer) placedCalls() []placed {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]placed(nil), p.calls...)
+}
+
+// setFail swaps the failure hook under the lock, for a test that changes it
+// while the dialer runs.
+func (p *fakePlacer) setFail(fail func(outbound.AIDialRequest) error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fail = fail
+}
+
 func (p *fakePlacer) liveCalls() []placed {
 	p.mu.Lock()
 	defer p.mu.Unlock()
