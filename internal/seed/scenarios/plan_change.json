@@ -100,6 +100,18 @@
         {"exchange": "and the price?", "expect": {"phase": "finish"}}
       ],
       "expect": {"path": ["identity", "finish"]}
+    },
+    {
+      "name": "model: verified caller changes plan",
+      "description": "Tier 2. The caller gives the service number, passes the phone check and picks plan 2.",
+      "lang": "en",
+      "caller": "13700001111",
+      "callerPersona": {
+        "goal": "Move to the 500M plan. Give your service number when asked, answer the verification question, and choose the second plan offered.",
+        "persona": "Your broadband service number is 10086001. The registered phone ends in 3333.",
+        "behaviour": "Cooperative; say digits one by one."
+      },
+      "model": {"visits": ["done"], "avoids": ["need_transfer"]}
     }
   ]
 }

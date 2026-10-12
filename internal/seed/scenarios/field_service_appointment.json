@@ -92,6 +92,18 @@
         {"call": "appt_slots", "expect": {"phase": "need_transfer"}}
       ],
       "expect": {"path": ["welcome", "book", "need_transfer"]}
+    },
+    {
+      "name": "model: new caller books a repair visit",
+      "description": "Tier 2. A caller with no booking asks for a visit and takes the first offered slot.",
+      "lang": "en",
+      "caller": "13600001111",
+      "callerPersona": {
+        "goal": "Book a technician visit to repair a cracked phone screen. Take the first time slot offered.",
+        "persona": "Your address is 12 Lakeside Road. The item is a StarCom X1 phone with a cracked screen.",
+        "behaviour": "Cooperative; answer what you are asked and nothing more."
+      },
+      "model": {"visits": ["done_book"], "avoids": ["need_transfer"]}
     }
   ]
 }

@@ -50,7 +50,51 @@ type Scenario struct {
 	Steps []Step `json:"steps"`
 	// Expect is checked after the last step.
 	Expect Final `json:"expect,omitempty"`
+
+	// CallerPersona and Model make the scenario a tier 2 scenario: a text
+	// model plays this caller against a text model playing the bot. A scenario
+	// with Steps runs in tier 1; one with a CallerPersona runs in tier 2; one
+	// may have both.
+	CallerPersona *Persona     `json:"callerPersona,omitempty"`
+	Model         *ModelExpect `json:"model,omitempty"`
 }
+
+// Persona is who the simulated caller is and how they behave.
+type Persona struct {
+	// Goal is what the caller wants out of the call.
+	Goal string `json:"goal"`
+	// Persona is who they are: facts they know (an order number, a service
+	// number) and how they talk.
+	Persona string `json:"persona,omitempty"`
+	// Behaviour is how they act: cooperative, declining, off-topic, silent.
+	Behaviour string `json:"behaviour,omitempty"`
+	// MaxTurns caps the caller's turns for this scenario (default 20).
+	MaxTurns int `json:"maxTurns,omitempty"`
+}
+
+// ModelExpect is what a tier 2 run must end up with. A model varies, so it
+// states outcomes (where the call ended, what ended it, what it must have
+// passed through), not an exact path. Everything is optional.
+type ModelExpect struct {
+	// PassRate is the share of runs that must meet every expectation
+	// (default 0.67).
+	PassRate float64 `json:"passRate,omitempty"`
+	// Phase is the phase the call ends in.
+	Phase string `json:"phase,omitempty"`
+	// Ending is the last built-in that succeeded, as in Final.
+	Ending string `json:"ending,omitempty"`
+	// Transfer is the queue and reason of the last successful transfer.
+	Transfer *TransferExpect `json:"transfer,omitempty"`
+	// Visits are phases the call must have entered.
+	Visits []string `json:"visits,omitempty"`
+	// Avoids are phases the call must not have entered.
+	Avoids []string `json:"avoids,omitempty"`
+	// Slots is a subset of the final slots.
+	Slots map[string]any `json:"slots,omitempty"`
+}
+
+// IsModelOnly reports whether the scenario has nothing for tier 1 to replay.
+func (s Scenario) IsModelOnly() bool { return len(s.Steps) == 0 && s.CallerPersona != nil }
 
 // ActionResult scripts what a built-in tool answers.
 type ActionResult struct {
@@ -167,6 +211,18 @@ func ParseScenarios(data []byte) (*File, error) {
 			return nil, fmt.Errorf("flowsim: two scenarios are called %q", s.Name)
 		}
 		seen[s.Name] = true
+		if len(s.Steps) == 0 && s.CallerPersona == nil {
+			return nil, fmt.Errorf("flowsim: scenario %q has neither steps nor a callerPersona", s.Name)
+		}
+		if (s.CallerPersona == nil) != (s.Model == nil) {
+			return nil, fmt.Errorf("flowsim: scenario %q: callerPersona and model go together", s.Name)
+		}
+		if s.CallerPersona != nil && s.CallerPersona.Goal == "" {
+			return nil, fmt.Errorf("flowsim: scenario %q: callerPersona has no goal", s.Name)
+		}
+		if s.Model != nil && (s.Model.PassRate < 0 || s.Model.PassRate > 1) {
+			return nil, fmt.Errorf("flowsim: scenario %q: model.passRate is outside 0..1", s.Name)
+		}
 		for j, step := range s.Steps {
 			if err := step.validate(); err != nil {
 				return nil, fmt.Errorf("flowsim: scenario %q step %d: %w", s.Name, j+1, err)

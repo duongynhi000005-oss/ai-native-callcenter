@@ -111,6 +111,18 @@
           "expect": {"isOk": false, "phase": "need_transfer"}}
       ],
       "expect": {"path": ["greet", "remind", "need_transfer"]}
+    },
+    {
+      "name": "model: owner promises to pay on Friday",
+      "description": "Tier 2. A cooperative account owner is reminded of an overdue bill and gives a payment date.",
+      "lang": "en",
+      "caller": "92223333",
+      "callerPersona": {
+        "goal": "Confirm you are the account owner when asked, listen to the reminder, and promise to pay this Friday. Then say thanks and goodbye.",
+        "persona": "You are the owner of the account. You forgot to pay and are not upset.",
+        "behaviour": "Cooperative and brief."
+      },
+      "model": {"ending": "hangup", "visits": ["promised"], "avoids": ["need_transfer", "disputed"]}
     }
   ]
 }

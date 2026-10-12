@@ -387,7 +387,7 @@ Say these to the business rather than working around them in the prompt.
 | **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Supported: a slot tool records the fact, see 2.8. Tool arguments are also kept as `<tool>.args.<k>`, and an outbound call's business data as `userData.<k>` (2.6). Still absent: a list of values (the slot keeps only the latest, so "all the orders looked up" needs your backend's memory), and a start-of-call lookup (issue [#84](https://github.com/rasonyang/ai-native-callcenter/issues/84)). Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
 | **Collecting digits, a keypad menu, masked secrets.** | Not supported. Keypad input is not a flow event. Today each key reaches the model as a text cue (`(The caller pressed 5 on their keypad.)`), interrupts the bot, and asks for a reply; the model assembles the digits and follows your prompt. That is not deterministic, and digits pass through the model, the transcript and the logs. Do not collect PINs or card numbers this way. Issue [#91](https://github.com/rasonyang/ai-native-callcenter/issues/91). |
 | **Knowledge retrieval as a platform feature.** | Not provided. A knowledge tool is an ordinary HTTP tool (4.2) against a service you run. A neutral contract and store templates are planned in issue [#92](https://github.com/rasonyang/ai-native-callcenter/issues/92). |
-| **Testing a flow with a model in the loop.** | `aicc flowsim` replays scripted scenarios deterministically (8). A text model playing the bot and the caller (tier 2 of issue [#85](https://github.com/rasonyang/ai-native-callcenter/issues/85)) is not built yet. |
+| **Testing a flow with a model in the loop.** | `aicc flowsim` replays scripted scenarios deterministically (8). Tier 2 (a text model as the bot and another as the caller) is opt-in and spends money (8). |
 | **Expressions, derived slots, arithmetic.** | By design the DSL has none; use a decision field (4.1). |
 | **Asynchronous tools.** | A tool call is synchronous with a 5 second bound; there is no way to be notified when a background job finishes. Use submit and check, or a callback (4.3). |
 | **Transitions on what the caller said.** | The only events are `TOOL_RESULT` and `NO_INPUT`. To branch on the caller's intent, have the model call a tool whose result carries the branch. |
@@ -706,6 +706,27 @@ What to notice:
   What to cover: the main path, each failure (a tool answering `found: 0` or `ok: 0`, a refused transfer, an unknown queue), silence (`noInput` three times), the turn limits (`repeat` a tool past `maxTurns`; `exchange` past `maxTurnsWithoutTool`), and a tool called in a phase that does not allow it (`isRefused`). The run prints each scenario's phase path and ending, then the phases and phase-local transitions no scenario reached. Seed scenarios live in `internal/seed/scenarios/<flow>.json` (outside the embedded `flows/` directory), and `go test` requires a scenario file per seed flow that reaches every phase.
 
   The simulator checks the flow's logic: transitions, allowlists, slot rendering, built-in results, the guards. It is deterministic, so it cannot tell you what a model would say or whether it would call the tool you scripted; it does not exercise audio, barge-in, playback timing or provider quirks either. Passing it does not verify a call-path change.
+
+- **Model in the loop (tier 2, opt-in, spends money).** A scenario with a `callerPersona` and a `model` block is also run by a text model playing the bot against a second text model playing the caller. The bot's model sees what a real call's model sees, taken from the same public `Runtime` methods the voice path uses: `Instructions()` (the platform rules, persona, rules and the phase) as the system prompt, `Tools()` as the tool list, `Announce()` as the line said as written, and every tool call goes through `Dispatch`, so phase moves, hints, allowlist refusals and the guards are the real ones. The caller model sees only its persona and what the bot said.
+
+  ```json
+  {"name": "model: english caller asks for a person", "lang": "en", "caller": "8005550100",
+   "queues": ["support-en", "support-zh"],
+   "callerPersona": {"goal": "Your internet is down; ask for a human agent.", "behaviour": "Slightly impatient, but polite."},
+   "model": {"ending": "transfer_to_agent", "transfer": {"queue": "support-en"}, "phase": "finish_transfer", "passRate": 0.67}}
+  ```
+
+  `callerPersona` is `goal`, `persona` (facts the caller knows), `behaviour` (cooperative, declining, off-topic, or silent: the caller model answers `<silence>` and the engine gets a `NO_INPUT`) and an optional `maxTurns`. `model` states outcomes, because a model varies: `phase`, `ending`, `transfer`, `visits` (phases the call must enter), `avoids`, `slots`, and `passRate` (default 0.67). Each scenario is run `-runs N` times and passes when that share of runs meets every expectation. A scenario with `steps` still runs in tier 1; one with only a persona is skipped there.
+
+  ```sh
+  export ALIYUN_API_KEY=...            # exported, not read from .env
+  AICC_LIVE_FLOWSIM=1 aicc flowsim -tier 2 -runs 3 -flow my_flow.json -scenario my_flow.scenarios.json
+  AICC_LIVE_FLOWSIM=1 go test -count=1 -run Live -v ./internal/flowsim/    # every seed flow, 1 run each
+  ```
+
+  Settings, read by the simulator only (not by the server, so they are not in `.env.example`): `AICC_LIVE_FLOWSIM=1` (required; nothing is requested without it), `ALIYUN_API_KEY` (the qwen profile's key), `AICC_FLOWSIM_BOT_MODEL` (default `qwen-plus`), `AICC_FLOWSIM_CALLER_MODEL` (default `qwen-turbo`, the cheapest Qwen text tier, enough for a short persona), `AICC_FLOWSIM_ENDPOINT`. Without an endpoint it is the DashScope host of `AICC_PROVIDER_ENDPOINT` when that names one, else of the qwen realtime profile, with the OpenAI-compatible chat path. Flags override: `-bot-model`, `-caller-model`, `-endpoint`. Caps against a looping model: `-max-turns` (caller turns per run, default 20, and at most 6 model rounds inside one bot turn), `-max-calls` (model requests per invocation, default 300) and `-max-tokens` (default 1,000,000); the invocation stops at the first API error or when a cap is reached, and says what it did not run. Every tier 2 run (and every tier 1 scenario) gets a fresh in-process mock backend, so a booking one run makes is not found by the next. With `-backend URL` the simulator cannot reset the backend, so state carries between runs; it prints a warning when `-runs` is above 1 (tier 1: when the file has several scenarios). Output is stdout only: the phase path and ending of every run, the failure and transcript of a failing one (`-v` for all), and the requests and tokens spent.
+
+  A text model is not the deployment's voice provider, so a tier 2 pass predicts a call only as far as the two resemble each other. It catches an instruction the model misreads, a tool description it misuses, and a branch it never reaches; it still cannot see audio, barge-in or provider quirks.
 - **Live.** A flow is not verified until real calls have walked every branch, including the failure and transfer paths, and the logs and CDRs have been read. The number (DID) a caller dials picks the flow.
 
 ## 9. Checklist before publishing

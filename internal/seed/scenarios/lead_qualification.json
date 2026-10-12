@@ -78,6 +78,18 @@
         {"call": "transfer_to_agent", "args": {"queue": "sales-en", "reason": "FLOW_FALLBACK", "summary": "x"}, "expect": {"phase": "finish_transfer"}}
       ],
       "expect": {"path": ["greet", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent"}
+    },
+    {
+      "name": "model: interested lead answers the three questions",
+      "description": "Tier 2. The caller agrees to the follow-up and answers interest, budget and timeline.",
+      "lang": "en",
+      "caller": "13900001111",
+      "callerPersona": {
+        "goal": "Agree to the short follow-up and answer the questions truthfully.",
+        "persona": "You are keen to buy a new phone soon. Your budget is about 4000 yuan and you plan to buy next month.",
+        "behaviour": "Friendly; answer each question when asked."
+      },
+      "model": {"visits": ["done"], "avoids": ["need_transfer"]}
     }
   ]
 }
