@@ -89,7 +89,7 @@ carries the one-line installer's files.
 - API contract: `POST /agent/login` no longer accepts `extensionNumber`. The
   body is optional and a body carrying any property is refused with
   `VALIDATION_FAILED` (422); the agent is always signed in at the extension
-  bound to them. The web client never sent the field. `PUT /agents/{agentId}`
+  bound to them. `PUT /agents/{agentId}`
   that changes or clears the bound extension of a signed-in agent is now
   refused with `CONFLICT`; the agent signs out first. `Presence` gains the
   optional `sipDomain`. Nothing else was removed.
@@ -101,6 +101,18 @@ carries the one-line installer's files.
 - A bot call that receives no inbound media at all is now ended after 30
   seconds, not 5. A call whose media was flowing and stopped still ends after
   5 seconds.
+
+### Breaking (API)
+
+- `POST /agent/login` no longer accepts `extensionNumber` (#106, recorded as
+  breaking in #125). The body is optional and a body carrying any property is
+  refused with 422 `VALIDATION_FAILED`; the agent is always signed in at the
+  extension bound to them. An integration fixes this by dropping the field, or
+  by sending no body. Signing in at an extension other than your own is gone.
+  To move an agent, change the binding with `PUT /agents/{agentId}`
+  (`config:write`), which is refused with 409 `CONFLICT` while the agent is
+  signed in. This shipped without a deprecation release: the customer base is
+  small and each existing integration was told directly.
 
 ### Added
 
