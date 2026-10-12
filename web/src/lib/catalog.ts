@@ -22,6 +22,21 @@ export type DID = components['schemas']['DID']
 export type DIDWrite = components['schemas']['DIDWrite']
 export type DIDDraft = Partial<DID & DIDWrite>
 
+/**
+ * Sets the outbound line limit from what the operator typed. Empty means no
+ * limit, so the key is removed: the PUT carries the whole record, and a record
+ * without the key is one with no limit. Anything that is not a positive whole
+ * number leaves the draft as it was, for the server's own range check to speak
+ * to rather than a silent rewrite here.
+ */
+export function withMaxOutboundChannels(draft: DIDDraft, text: string): DIDDraft {
+  const { maxOutboundChannels: _previous, ...rest } = draft
+  const trimmed = text.trim()
+  if (trimmed === '') return rest
+  const value = Number(trimmed)
+  return Number.isInteger(value) && value > 0 ? { ...rest, maxOutboundChannels: value } : draft
+}
+
 export type QueueAgent = components['schemas']['QueueAgent']
 
 /** One staffing write. Position is the queue's own order, not the agent's id. */

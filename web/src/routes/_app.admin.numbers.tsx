@@ -10,7 +10,7 @@ import { ConfirmDelete } from '@/routes/_app.admin.extensions'
 import { describeError, fieldErrorText } from '@/lib/errors'
 import { useFlows } from '@/lib/flows'
 import { requireRole } from '@/lib/guards'
-import { useCatalogMutations, useDIDs, useQueues, type DIDDraft } from '@/lib/catalog'
+import { useCatalogMutations, useDIDs, useQueues, withMaxOutboundChannels, type DIDDraft } from '@/lib/catalog'
 
 /**
  * External numbers.
@@ -76,6 +76,7 @@ function NumbersPage() {
           <Th>{t('admin.number')}</Th>
           <Th>{t('admin.direction')}</Th>
           <Th>{t('admin.language')}</Th>
+          <Th align="right">{t('admin.maxOutboundChannels')}</Th>
           <Th>{t('admin.botFlow')}</Th>
           <Th>{t('admin.fallbackQueue')}</Th>
           <Th>{t('admin.recording')}</Th>
@@ -83,10 +84,10 @@ function NumbersPage() {
           <Th align="right">{t('supervisor.actions')}</Th>
         </THead>
         <TBody>
-          {isPending && <TableMessage colSpan={8}>{t('common.loading')}</TableMessage>}
-          {isError && <TableMessage colSpan={8}>{describeError(error, t)}</TableMessage>}
+          {isPending && <TableMessage colSpan={9}>{t('common.loading')}</TableMessage>}
+          {isError && <TableMessage colSpan={9}>{describeError(error, t)}</TableMessage>}
           {!isPending && rows.length === 0 && (
-            <TableMessage colSpan={8}>{t('admin.noNumbers')}</TableMessage>
+            <TableMessage colSpan={9}>{t('admin.noNumbers')}</TableMessage>
           )}
           {rows.map((row) => (
             <Tr key={row.id}>
@@ -98,6 +99,9 @@ function NumbersPage() {
                 )}
               </Td>
               <Td className="text-xs text-muted-foreground">{row.language}</Td>
+              <Td align="right" className="tabular text-xs text-muted-foreground">
+                {row.allowOutbound ? (row.maxOutboundChannels ?? t('admin.noChannelLimit')) : '—'}
+              </Td>
               <Td className="text-xs text-muted-foreground">
                 {/* Named, not an id fragment: the flow catalogue exists now. */}
                 {flowName(row.flowId)}
@@ -191,6 +195,22 @@ function NumbersPage() {
               )}
             </span>
           </Field>
+          {editing.allowOutbound && (
+            <Field
+              label={t('admin.maxOutboundChannels')}
+              error={fieldErrorText(saveDID.error, 'maxOutboundChannels', t)}
+              hint={t('admin.maxOutboundChannelsHint')}
+            >
+              <Input
+                type="number"
+                min={1}
+                max={100000}
+                placeholder={t('admin.noChannelLimit')}
+                value={editing.maxOutboundChannels ?? ''}
+                onChange={(e) => setEditing(withMaxOutboundChannels(editing, e.target.value))}
+              />
+            </Field>
+          )}
           {editing.allowInbound && (
             <Field label={t('admin.botFlow')} error={fieldErrorText(saveDID.error, 'flowId', t)} hint={t('admin.botFlowHint')}>
               <Select

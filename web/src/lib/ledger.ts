@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import type { components } from '@/generated/api'
 
-import { request } from './api'
+import { ApiError, request } from './api'
 
 /**
  * The finished-call ledger: CDRs, transcripts, recordings, callbacks and the
@@ -190,7 +190,13 @@ export function useMyDay(enabled: boolean) {
 }
 
 export function useCDR(callId: string) {
-  return useQuery({ queryKey: [...CDRS_KEY, callId], queryFn: () => ledgerApi.cdr(callId) })
+  return useQuery({
+    queryKey: [...CDRS_KEY, callId],
+    queryFn: () => ledgerApi.cdr(callId),
+    // A call with no record answers 404 at once and will go on doing so; the
+    // default retry would hold the page on "Loading" for seconds first.
+    retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 1,
+  })
 }
 
 export function useCallbacks(status?: string) {

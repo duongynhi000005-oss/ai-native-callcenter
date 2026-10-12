@@ -1,6 +1,6 @@
 import {
   Activity, BarChart3, Bot, BookUser, FileClock, Headphones, KeyRound, LayoutDashboard,
-  ListChecks, Phone, PhoneCall, PhoneForwarded, ScrollText, ShieldCheck, Users, Webhook,
+  ListChecks, Megaphone, Phone, PhoneOff, PhoneCall, PhoneForwarded, ScrollText, ShieldCheck, Users, Webhook,
 } from 'lucide-react'
 
 
@@ -75,6 +75,11 @@ export const NAV: NavGroup[] = [
       { to: '/admin/routing', labelKey: 'nav.routing', icon: ListChecks, roles: ['ADMIN'], isReady: true },
       { to: '/admin/numbers', labelKey: 'nav.numbers', icon: ScrollText, roles: ['ADMIN'], isReady: true },
       { to: '/admin/bots', labelKey: 'nav.bots', icon: Bot, roles: ['ADMIN'], isReady: true },
+      // Outbound lists the bot works through. Supervisors run them (the scope
+      // map grants campaigns:read and :write from the supervisor floor up), so
+      // the pair belongs to both senior roles, like the ledger.
+      { to: '/admin/campaigns', labelKey: 'nav.campaigns', icon: Megaphone, roles: ['ADMIN', 'SUPERVISOR'], isReady: true },
+      { to: '/admin/dnc', labelKey: 'nav.dnc', icon: PhoneOff, roles: ['ADMIN', 'SUPERVISOR'], isReady: true },
     ],
   },
   {
