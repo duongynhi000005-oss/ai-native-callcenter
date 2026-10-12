@@ -124,8 +124,9 @@ HTTP API 是**契约先行**的：[`docs/openapi.json`](docs/openapi.json) 是�
 
 * **新增语音厂商**加的是一个 profile，而不是一个新客户端：
   [`docs/provider-extension.md`](docs/provider-extension.md)。
-* **新增流程**是一份加载时校验的 JSON，可参考
-  [`internal/seed/flows/`](internal/seed/flows/) 里那条双语流程。
+* **新增流程**是一份加载时校验的 JSON，写法见
+  [`docs/flow-authoring.md`](docs/flow-authoring.md)（英文），可参考
+  [`internal/seed/flows/`](internal/seed/flows/) 里的双语流程。
 * **新增页面**遵循 [`web/CLAUDE.md`](web/CLAUDE.md) 里的设计系统——那是硬性约束，
   不是建议。
 * **对接其他产品**是一个部署在流程后端地址之后的独立服务，不进入本仓库：

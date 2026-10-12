@@ -141,7 +141,8 @@ Never the other way round.
 * **A new voice provider** is a profile, not a client:
   [`docs/provider-extension.md`](docs/provider-extension.md).
 * **A new flow** is a JSON document validated at load — see
-  [`internal/seed/flows/`](internal/seed/flows/) for a working bilingual one.
+  [`docs/flow-authoring.md`](docs/flow-authoring.md) for how to write one and
+  [`internal/seed/flows/`](internal/seed/flows/) for working bilingual ones.
 * **A new screen** follows the design system in
   [`web/CLAUDE.md`](web/CLAUDE.md), which is binding rather than advisory.
 * **An integration with another product** is a service behind the flow's
