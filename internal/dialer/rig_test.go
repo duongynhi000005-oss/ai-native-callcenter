@@ -404,6 +404,7 @@ type camSpec struct {
 	ring   int
 	policy *campaign.RetryPolicy
 	didID  uuid.UUID
+	cc     string
 }
 
 // newCampaign stores a DRAFT campaign; nil edit takes the defaults: New York,
@@ -420,7 +421,7 @@ func (r *rig) newCampaign(name string, edit func(*camSpec)) campaign.Campaign {
 	c := campaign.Campaign{
 		ID: uuid.Must(uuid.NewV7()), Name: s.name, DIDID: s.didID, TimeZone: s.zone,
 		CallingWindow: s.window, MaxConcurrent: s.max, RingTimeoutSec: s.ring,
-		RetryPolicy: campaign.DefaultRetryPolicy(),
+		RetryPolicy: campaign.DefaultRetryPolicy(), DefaultCountryCode: s.cc,
 	}
 	if s.policy != nil {
 		c.RetryPolicy = *s.policy

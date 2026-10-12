@@ -13,6 +13,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
 	"github.com/rasonyang/ai-native-callcenter/internal/outbound"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
 // maxRefills bounds how many batches one campaign may defer in one pass; a
@@ -287,7 +288,7 @@ func (d *Dialer) admit(ctx context.Context, c campaign.Campaign, ct campaign.Con
 	pctx, cancel := context.WithTimeout(ctx, d.cfg.DialTimeout)
 	defer cancel()
 	placed, err := d.pl.PlaceAI(pctx, outbound.AIDialRequest{
-		CallID: att.CallID, LegID: att.LegID, To: ct.Number, DIDNumber: c.DIDNumber,
+		CallID: att.CallID, LegID: att.LegID, To: d.dialString(c, ct.Number), DIDNumber: c.DIDNumber,
 		UserData: ct.Slots, RingTimeout: ring, CampaignID: c.ID, AttemptID: att.ID,
 	})
 	if err == nil {
@@ -484,4 +485,24 @@ func (d *Dialer) publish() {
 		view[id] = p
 	}
 	d.view.Store(&view)
+}
+
+// dialString writes the contact's canonical number in the form the trunk
+// expects (AICC_OUTBOUND_DIAL_FORM). The attempt and the contact keep the
+// canonical number; only the placement carries the dialled string. When the
+// NATIONAL form cannot apply (the number is from another country than the
+// campaign's), the number is dialled as E.164 and the campaign is warned
+// about once.
+func (d *Dialer) dialString(c campaign.Campaign, number string) string {
+	cc := c.DefaultCountryCode
+	if cc == "" {
+		cc = d.cfg.DefaultCountryCode
+	}
+	out, ok := phonenum.DialString(number, d.cfg.DialForm, cc)
+	if !ok && d.cfg.DialForm == phonenum.FormNational && !d.warnedCC[c.ID] {
+		d.warnedCC[c.ID] = true
+		d.log.Warn("dialer: a number is outside the campaign's country code and is dialled as E.164",
+			"campaignId", c.ID, "countryCode", cc)
+	}
+	return out
 }

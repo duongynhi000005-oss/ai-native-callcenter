@@ -98,3 +98,19 @@ func TestNoListInstalledMeansNothingIsChecked(t *testing.T) {
 		t.Fatalf("DialAI: %v", err)
 	}
 }
+
+// A campaign attempt dialled in the NATIONAL form reaches DialAI as a national
+// string; the check completes it with the deployment's country code, so a
+// listed number is still caught.
+func TestANationalDialStringOfAListedNumberIsStillRefused(t *testing.T) {
+	t.Parallel()
+	sw := &fakeSwitch{}
+	dnc := &fakeDNC{listed: map[string]bool{"+8618688886666": true}}
+	s := dncService(t, sw, "86", dnc)
+	if _, err := s.DialAI(context.Background(), AIDialRequest{To: "18688886666", DIDNumber: "95012"}); !errors.Is(err, ErrNumberOnDNC) {
+		t.Fatalf("DialAI(national) = %v, want ErrNumberOnDNC", err)
+	}
+	if len(sw.originates) != 0 {
+		t.Errorf("%d originates for a listed number", len(sw.originates))
+	}
+}

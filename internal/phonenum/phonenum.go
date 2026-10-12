@@ -106,3 +106,65 @@ func IsCanonical(s string) bool {
 	}
 	return true
 }
+
+// DialForm is how a trunk wants a number written on the wire
+// (AICC_OUTBOUND_DIAL_FORM). The campaign store and every comparison stay
+// canonical E.164; only the string handed to the switch changes.
+type DialForm string
+
+const (
+	// FormE164 dials "+<cc><number>": the canonical form, unchanged.
+	FormE164 DialForm = "E164"
+	// FormE164NoPlus dials "<cc><number>".
+	FormE164NoPlus DialForm = "E164_NO_PLUS"
+	// FormNational dials the number without "+<cc>". A trunk prefix a
+	// national number may need (the 0 of a Chinese landline area code, which
+	// the canonical form drops) is not restored: that is a known limit.
+	FormNational DialForm = "NATIONAL"
+)
+
+// ParseDialForm validates a setting; empty means FormE164.
+func ParseDialForm(s string) (DialForm, error) {
+	switch DialForm(s) {
+	case "":
+		return FormE164, nil
+	case FormE164, FormE164NoPlus, FormNational:
+		return DialForm(s), nil
+	}
+	return "", errors.New("AICC_OUTBOUND_DIAL_FORM must be E164, E164_NO_PLUS or NATIONAL, got " + `"` + s + `"`)
+}
+
+// DialString writes a canonical E.164 number in the form a trunk expects.
+// countryCode is digits only ("86"). The second result says whether the form
+// was applied: it is false, and the number is returned as E.164, when the
+// input is not canonical, or for FormNational when countryCode is empty or
+// the number does not start with it. An unknown form behaves as FormE164.
+func DialString(e164 string, form DialForm, countryCode string) (string, bool) {
+	if !isCanonical(e164) {
+		return e164, false
+	}
+	switch form {
+	case FormE164NoPlus:
+		return e164[1:], true
+	case FormNational:
+		prefix := "+" + countryCode
+		if countryCode == "" || !strings.HasPrefix(e164, prefix) || len(e164) == len(prefix) {
+			return e164, false
+		}
+		return e164[len(prefix):], true
+	}
+	return e164, true
+}
+
+// isCanonical reports whether s is "+", a digit 1-9, then 7 to 14 digits.
+func isCanonical(s string) bool {
+	if len(s) < 1+1+minTail || len(s) > 1+1+maxTail || s[0] != '+' || s[1] == '0' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}

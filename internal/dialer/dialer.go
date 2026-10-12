@@ -29,6 +29,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/dayrange"
 	"github.com/rasonyang/ai-native-callcenter/internal/outbound"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 	"github.com/rasonyang/ai-native-callcenter/internal/voice"
 )
 
@@ -110,6 +111,12 @@ type Config struct {
 	// TrunkBreakerCount and ProviderBreakerCount are the breakers' thresholds.
 	TrunkBreakerCount    int
 	ProviderBreakerCount int
+	// DialForm is how a number is written to the trunk
+	// (AICC_OUTBOUND_DIAL_FORM); empty is E164. DefaultCountryCode
+	// (AICC_DEFAULT_COUNTRY_CODE) is the NATIONAL form's fallback when a
+	// campaign names none.
+	DialForm           phonenum.DialForm
+	DefaultCountryCode string
 	// SafetyScan is the longest the actor sleeps. Default 60s.
 	SafetyScan time.Duration
 	// BackstopMargin is how long past its ring timeout an attempt may stay
@@ -195,6 +202,7 @@ type Dialer struct {
 	halted   map[uuid.UUID]bool      // paused by a breaker this pass, not yet re-read
 	since    map[uuid.UUID]time.Time // breaker run starts
 	rearm    map[uuid.UUID]bool
+	warnedCC map[uuid.UUID]bool // campaigns already warned about a national dial fallback
 	progress map[uuid.UUID]campaign.Progress
 	schedule map[string]campaign.Schedule
 	timer    Timer
@@ -230,6 +238,7 @@ func New(cfg Config, d Deps) *Dialer {
 		halted:   map[uuid.UUID]bool{},
 		since:    map[uuid.UUID]time.Time{},
 		rearm:    map[uuid.UUID]bool{},
+		warnedCC: map[uuid.UUID]bool{},
 		progress: map[uuid.UUID]campaign.Progress{},
 		schedule: map[string]campaign.Schedule{},
 		isDirty:  true, dncDirty: true,

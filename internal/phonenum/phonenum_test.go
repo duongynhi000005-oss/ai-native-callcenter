@@ -62,3 +62,49 @@ func TestReasonOfIgnoresOtherErrors(t *testing.T) {
 		t.Errorf("ReasonOf(nil) = %q", got)
 	}
 }
+
+func TestDialString(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, in string
+		form     DialForm
+		cc       string
+		want     string
+		applied  bool
+	}{
+		{"e164 mobile", "+8618688886666", FormE164, "86", "+8618688886666", true},
+		{"unknown form is e164", "+8618688886666", "BOGUS", "86", "+8618688886666", true},
+		{"no plus mobile", "+8618688886666", FormE164NoPlus, "86", "8618688886666", true},
+		{"national mobile", "+8618688886666", FormNational, "86", "18688886666", true},
+		{"national landline loses no digit but gains no 0", "+862166668888", FormNational, "86", "2166668888", true},
+		{"other country falls back", "+14155550123", FormNational, "86", "+14155550123", false},
+		{"other country matches its own code", "+14155550123", FormNational, "1", "4155550123", true},
+		{"national without a country code", "+8618688886666", FormNational, "", "+8618688886666", false},
+		{"no plus other country", "+14155550123", FormE164NoPlus, "86", "14155550123", true},
+		{"invalid: no plus", "8618688886666", FormNational, "86", "8618688886666", false},
+		{"invalid: short", "+1234", FormE164NoPlus, "1", "+1234", false},
+		{"invalid: letters", "+86186abc86666", FormNational, "86", "+86186abc86666", false},
+		{"invalid: empty", "", FormNational, "86", "", false},
+		{"invalid: leading zero", "+0123456789", FormNational, "86", "+0123456789", false},
+	}
+	for _, c := range cases {
+		got, ok := DialString(c.in, c.form, c.cc)
+		if got != c.want || ok != c.applied {
+			t.Errorf("%s: DialString(%q,%s,%q) = %q,%v want %q,%v", c.name, c.in, c.form, c.cc, got, ok, c.want, c.applied)
+		}
+	}
+}
+
+func TestParseDialForm(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]DialForm{"": FormE164, "E164": FormE164, "E164_NO_PLUS": FormE164NoPlus, "NATIONAL": FormNational} {
+		if got, err := ParseDialForm(in); err != nil || got != want {
+			t.Errorf("ParseDialForm(%q) = %q,%v", in, got, err)
+		}
+	}
+	for _, in := range []string{"national", "E.164", "PLUS"} {
+		if _, err := ParseDialForm(in); err == nil {
+			t.Errorf("ParseDialForm(%q) accepted", in)
+		}
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/dayrange"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
 // Config is the complete runtime configuration of the application.
@@ -152,6 +153,10 @@ type Config struct {
 	// compared with the do-not-call list. Empty means national numbers cannot
 	// be completed (see internal/outbound DNC check).
 	DefaultCountryCode string
+	// OutboundDialForm (AICC_OUTBOUND_DIAL_FORM) is how the campaign dialer
+	// writes a number to the trunk: E164 (default), E164_NO_PLUS or NATIONAL.
+	OutboundDialForm    phonenum.DialForm
+	outboundDialFormErr error // a malformed value, refused by validate
 	// IsBotEnabled turns the whole AI leg off, for deployments that only
 	// route to people.
 	IsBotEnabled bool
@@ -359,6 +364,7 @@ func Load() (Config, error) {
 	if !isRingSet {
 		ringTimeout = DefaultOutboundRingTimeout
 	}
+	dialForm, dialFormErr := phonenum.ParseDialForm(env("AICC_OUTBOUND_DIAL_FORM", ""))
 	outboundHeaders, outboundHeadersErr := ParseOutboundSIPHeaders(env(outboundHeadersVar, ""))
 	outboundHours, outboundHoursErr := ParseOutboundHours(env("AICC_OUTBOUND_HOURS", DefaultOutboundHours))
 	c := Config{
@@ -425,6 +431,8 @@ func Load() (Config, error) {
 		outboundSIPHeadersErr:         outboundHeadersErr,
 		OutboundCallerID:              env("AICC_OUTBOUND_CLID", ""),
 		DefaultCountryCode:            env("AICC_DEFAULT_COUNTRY_CODE", ""),
+		OutboundDialForm:              dialForm,
+		outboundDialFormErr:           dialFormErr,
 		RecordingBackend:              env("AICC_RECORDING_BACKEND", "FS"),
 		RecordingDir:                  env("AICC_RECORDING_DIR", ""),
 		S3Endpoint:                    env("AICC_S3_ENDPOINT", ""),
@@ -618,6 +626,9 @@ func (c Config) validate() error {
 	}
 	if err := ValidateDefaultCountryCode(c.DefaultCountryCode); err != nil {
 		errs = append(errs, err)
+	}
+	if c.outboundDialFormErr != nil {
+		errs = append(errs, c.outboundDialFormErr)
 	}
 	if c.outboundSIPHeadersErr != nil {
 		errs = append(errs, c.outboundSIPHeadersErr)

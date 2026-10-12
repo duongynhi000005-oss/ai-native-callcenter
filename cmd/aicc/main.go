@@ -331,6 +331,8 @@ func run() error {
 			MaxRinging:           cfg.OutboundMaxRinging,
 			Frequency:            cfg.CampaignFrequencyWindow,
 			OutboundHours:        cfg.OutboundHours,
+			DialForm:             cfg.OutboundDialForm,
+			DefaultCountryCode:   cfg.DefaultCountryCode,
 			TrunkBreakerCount:    cfg.TrunkBreakerCount,
 			ProviderBreakerCount: cfg.ProviderBreakerCount,
 		}, dialer.Deps{
