@@ -1,0 +1,160 @@
+-- SPDX-License-Identifier: Apache-2.0
+
+-- What the dialer reads and writes (docs/design/10-campaigns.md sections 4.1,
+-- 5.2, 7.4 and 8.2). Every time that decides something is a parameter, never
+-- now(): the dialer owns the clock.
+
+-- name: ListRunningCampaigns :many
+SELECT sqlc.embed(c), d.number AS did_number
+FROM campaigns c
+JOIN dids d ON d.id = c.did_id
+WHERE c.status = 'RUNNING'
+ORDER BY c.started_at, c.id;
+
+-- The admission query of section 5.2, less the calling window (which depends
+-- on the contact's zone and runs in Go). A number on the do-not-call list, one
+-- being dialled anywhere, and one another campaign reached within the
+-- frequency window are all left out here; the last is moved by
+-- HeldByFrequency.
+-- name: DueCampaignContacts :many
+SELECT c.* FROM campaign_contacts c
+WHERE c.campaign_id = sqlc.arg('campaign_id')
+  AND c.status = 'ACTIVE'
+  AND c.next_attempt_at <= sqlc.arg('now')::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM dnc_numbers d WHERE d.number_e164 = c.number_e164)
+  AND NOT EXISTS (SELECT 1 FROM campaign_attempts a
+                  WHERE a.number_e164 = c.number_e164 AND a.state = 'DIALING')
+  AND NOT EXISTS (SELECT 1 FROM campaign_attempts a
+                  WHERE a.number_e164 = c.number_e164
+                    AND a.campaign_id <> c.campaign_id
+                    AND a.is_touched
+                    AND a.started_at > sqlc.arg('now')::timestamptz
+                        - make_interval(secs => sqlc.arg('frequency_sec')::float8))
+ORDER BY c.next_attempt_at, c.id
+LIMIT sqlc.arg('row_limit');
+
+-- Due contacts another campaign reached lately, with the time of the latest
+-- touch. They wait out the frequency window in their own campaign.
+-- name: HeldByFrequency :many
+SELECT c.id, c.time_zone, t.last_touch::timestamptz AS last_touch
+FROM campaign_contacts c
+JOIN LATERAL (
+    SELECT max(a.started_at) AS last_touch
+    FROM campaign_attempts a
+    WHERE a.number_e164 = c.number_e164
+      AND a.campaign_id <> c.campaign_id
+      AND a.is_touched
+      AND a.started_at > sqlc.arg('now')::timestamptz
+          - make_interval(secs => sqlc.arg('frequency_sec')::float8)
+) t ON t.last_touch IS NOT NULL
+WHERE c.campaign_id = sqlc.arg('campaign_id')
+  AND c.status = 'ACTIVE'
+  AND c.next_attempt_at <= sqlc.arg('now')::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM dnc_numbers d WHERE d.number_e164 = c.number_e164)
+  AND NOT EXISTS (SELECT 1 FROM campaign_attempts a
+                  WHERE a.number_e164 = c.number_e164 AND a.state = 'DIALING')
+ORDER BY c.next_attempt_at, c.id
+LIMIT sqlc.arg('row_limit');
+
+-- Moves contacts to a later due time (outside their calling window, or held by
+-- the frequency window). Never earlier, and never a contact that was claimed
+-- for a dial in the meantime.
+-- name: DeferContacts :execrows
+UPDATE campaign_contacts c
+SET next_attempt_at = v.at, updated_at = now()
+FROM (SELECT unnest(sqlc.arg('ids')::uuid[]) AS id, unnest(sqlc.arg('ats')::timestamptz[]) AS at) AS v
+WHERE c.id = v.id AND c.status = 'ACTIVE'
+  AND c.next_attempt_at IS NOT NULL AND c.next_attempt_at < v.at;
+
+-- A calling window or the outer hours changed: contacts that have never been
+-- tried were deferred to the old window's opening, so they are due again now
+-- and are judged against the new one. A contact with a history keeps the retry
+-- time its policy gave it.
+-- name: RearmUntriedContacts :execrows
+UPDATE campaign_contacts
+SET next_attempt_at = sqlc.arg('now')::timestamptz, updated_at = now()
+WHERE campaign_id = sqlc.arg('campaign_id') AND status = 'ACTIVE'
+  AND last_outcome IS NULL AND next_attempt_at > sqlc.arg('now')::timestamptz;
+
+-- Where a campaign stands: how many contacts are still ACTIVE (including those
+-- being dialled), how many are due, and when the next one will be.
+-- name: CampaignPending :one
+SELECT count(*)::bigint AS active_total,
+       (count(*) FILTER (WHERE cc.next_attempt_at <= sqlc.arg('now')::timestamptz))::bigint AS due_now,
+       min(cc.next_attempt_at) FILTER (WHERE cc.next_attempt_at > sqlc.arg('now')::timestamptz)::timestamptz AS next_future,
+       (SELECT count(*) FROM campaign_contacts t WHERE t.campaign_id = sqlc.arg('campaign_id'))::bigint AS all_total
+FROM campaign_contacts cc
+WHERE cc.campaign_id = sqlc.arg('campaign_id') AND cc.status = 'ACTIVE';
+
+-- name: EarliestPendingContact :one
+SELECT * FROM campaign_contacts
+WHERE campaign_id = $1 AND status = 'ACTIVE' AND next_attempt_at IS NOT NULL
+ORDER BY next_attempt_at, id
+LIMIT 1;
+
+-- RUNNING to COMPLETED: only when nothing is ACTIVE any more (so nothing is
+-- due or in flight) and the campaign had contacts at all.
+-- name: CompleteCampaign :execrows
+UPDATE campaigns
+SET status = 'COMPLETED', finished_at = sqlc.arg('at')::timestamptz, updated_at = now()
+WHERE campaigns.id = sqlc.arg('campaign_id') AND campaigns.status = 'RUNNING'
+  AND EXISTS (SELECT 1 FROM campaign_contacts x WHERE x.campaign_id = campaigns.id)
+  AND NOT EXISTS (SELECT 1 FROM campaign_contacts y
+                  WHERE y.campaign_id = campaigns.id AND y.status = 'ACTIVE');
+
+-- A breaker stopped the campaign.
+-- name: PauseCampaignFor :execrows
+UPDATE campaigns
+SET status = 'PAUSED', pause_reason = sqlc.arg('reason'), updated_at = now()
+WHERE id = sqlc.arg('campaign_id') AND status = 'RUNNING';
+
+-- Contacts on the do-not-call list that are waiting for a dial (due now or
+-- later): they are skipped, not dialled.
+-- name: DueDNCContacts :many
+SELECT c.id FROM campaign_contacts c
+JOIN campaigns ca ON ca.id = c.campaign_id
+WHERE ca.status = 'RUNNING' AND c.status = 'ACTIVE' AND c.next_attempt_at IS NOT NULL
+  AND EXISTS (SELECT 1 FROM dnc_numbers d WHERE d.number_e164 = c.number_e164)
+LIMIT sqlc.arg('row_limit');
+
+-- A contact whose call is already in flight is not hung up. It becomes DNC
+-- now so that, when the call ends, no retry follows.
+-- name: MarkDialingContactsDNC :execrows
+UPDATE campaign_contacts c
+SET status = 'DNC', next_attempt_at = NULL, updated_at = now()
+WHERE c.status = 'ACTIVE' AND c.next_attempt_at IS NULL
+  AND EXISTS (SELECT 1 FROM dnc_numbers d WHERE d.number_e164 = c.number_e164)
+  AND EXISTS (SELECT 1 FROM campaign_attempts a
+              WHERE a.campaign_contact_id = c.id AND a.state = 'DIALING');
+
+-- Every attempt in flight, with the ring timeout of its campaign: what a
+-- restart reconciles and the backstop watches.
+-- name: ListDialingAttempts :many
+SELECT sqlc.embed(a), c.ring_timeout_sec
+FROM campaign_attempts a
+JOIN campaigns c ON c.id = a.campaign_id
+WHERE a.state = 'DIALING'
+ORDER BY a.started_at, a.id;
+
+-- A campaign's finished attempts since a time, newest first: the breakers read
+-- the run that began at the campaign's last resume.
+-- name: RecentAttemptOutcomesSince :many
+SELECT outcome FROM campaign_attempts
+WHERE campaign_id = sqlc.arg('campaign_id') AND state = 'FINISHED'
+  AND finished_at >= sqlc.arg('since')::timestamptz
+ORDER BY finished_at DESC, id DESC
+LIMIT sqlc.arg('row_limit');
+
+-- name: ListCampaignAttempts :many
+SELECT * FROM campaign_attempts
+WHERE campaign_id = sqlc.arg('campaign_id')
+  AND (sqlc.narg('contact_id')::uuid IS NULL OR campaign_contact_id = sqlc.narg('contact_id')::uuid)
+  AND (sqlc.arg('outcome')::text = '' OR outcome = sqlc.arg('outcome'))
+ORDER BY started_at DESC, id DESC
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: CountCampaignAttempts :one
+SELECT count(*) FROM campaign_attempts
+WHERE campaign_id = sqlc.arg('campaign_id')
+  AND (sqlc.narg('contact_id')::uuid IS NULL OR campaign_contact_id = sqlc.narg('contact_id')::uuid)
+  AND (sqlc.arg('outcome')::text = '' OR outcome = sqlc.arg('outcome'));

@@ -25,12 +25,15 @@ import (
 // The SIP headers the dialplan attaches to a bot leg. They are the only thing
 // correlating the SIP dialog with the call the rest of the system knows.
 const (
-	headerCallID    = "X-Aicc-Call-Id"
-	headerDID       = "X-Aicc-Did"
-	headerLanguage  = "X-Aicc-Language"
-	headerANI       = "X-Aicc-Ani"
-	headerChannelID = "X-Aicc-Channel-Id"
-	headerCallType  = "X-Aicc-Call-Type"
+	headerCallID = "X-Aicc-Call-Id"
+	headerDID    = "X-Aicc-Did"
+	// Sent only on a campaign call: the campaign and the attempt that placed it.
+	headerCampaignID = "X-Aicc-Campaign-Id"
+	headerAttemptID  = "X-Aicc-Attempt-Id"
+	headerLanguage   = "X-Aicc-Language"
+	headerANI        = "X-Aicc-Ani"
+	headerChannelID  = "X-Aicc-Channel-Id"
+	headerCallType   = "X-Aicc-Call-Type"
 	// Sent only by the AI-outbound bridge: the platform placed this call to a
 	// customer, so the ANI is the person answering and the DID is our number.
 	headerPlacedToCustomer = "X-Aicc-Placed-To-Customer"
@@ -153,6 +156,9 @@ type Orchestrator struct {
 type activeCall struct {
 	session *Session
 	cancel  context.CancelFunc
+	// callID is the ledger identity the switch stamped on the INVITE; Nil
+	// when the header is missing or unreadable.
+	callID uuid.UUID
 }
 
 // NewOrchestrator prepares the AI side. Nothing listens until Start.
@@ -213,11 +219,29 @@ func (o *Orchestrator) ActiveCalls() int {
 	return len(o.calls)
 }
 
+// HasSession reports whether a conversation is running here for the call with
+// this ledger identity. A bot leg on the switch with no session behind it is a
+// leg whose conversation went with a restart.
+func (o *Orchestrator) HasSession(callID uuid.UUID) bool {
+	if callID == uuid.Nil {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, call := range o.calls {
+		if call.callID == callID {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *Orchestrator) onCallStarted(dialog *voice.Dialog) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o.mu.Lock()
-	o.calls[dialog.CallID] = &activeCall{cancel: cancel}
+	ledgerID, _ := uuid.Parse(dialog.CustomHeaders[headerCallID])
+	o.calls[dialog.CallID] = &activeCall{cancel: cancel, callID: ledgerID}
 	o.mu.Unlock()
 	obs.CallStarted(obs.CallKindBot)
 
@@ -320,6 +344,8 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		fallbackQueue: did.FallbackQueueID,
 		recorder:      recorder,
 		facts:         facts,
+		campaignID:    headers[headerCampaignID],
+		attemptID:     headers[headerAttemptID],
 	}
 	// An agent who hangs up first leaves the bot no chance to say what it ran,
 	// and it is their call's row the human path writes, so the flow and the
@@ -331,6 +357,9 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	}
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(o.cfg.BackendBase),
 		o.queueNames(ctx, did.FallbackQueueID), log)
+	if actions.isCampaign() {
+		runtime.Deny(campaignDeniedTools...)
+	}
 
 	profile := o.cfg.Profile
 	model, err := o.cfg.Sessions(profile, log)

@@ -36,6 +36,12 @@ const (
 	KindRecordStop      SwitchEventKind = "RECORD_STOP"
 )
 
+// The switch's account of a background command, which is how an originate that
+// never made a channel is heard about at all.
+const (
+	KindBackgroundJob SwitchEventKind = "BACKGROUND_JOB"
+)
+
 // Endpoint registration, observed from sofia.
 const (
 	KindDeviceRegistered   SwitchEventKind = "DEVICE_REGISTERED"
@@ -259,6 +265,14 @@ type SwitchEvent struct {
 	Digit      string
 	DurationMs int
 
+	// Background job result (KindBackgroundJob only). JobID is the Job-UUID
+	// bgapi returned. A job that succeeded has IsJobOK; one that failed has
+	// JobCause, the bare cause name ("USER_BUSY", "GATEWAY_DOWN"). A body that
+	// says neither leaves both zero.
+	JobID    string
+	IsJobOK  bool
+	JobCause string
+
 	// Recording.
 	RecordingPath string
 
@@ -296,7 +310,7 @@ type SwitchEvent struct {
 var Subscriptions = []string{
 	"CHANNEL_CREATE", "CHANNEL_ANSWER", "CHANNEL_PARK", "CHANNEL_BRIDGE",
 	"CHANNEL_UNBRIDGE", "CHANNEL_HOLD", "CHANNEL_UNHOLD",
-	"CHANNEL_HANGUP_COMPLETE", "DTMF", "RECORD_START", "RECORD_STOP",
+	"CHANNEL_HANGUP_COMPLETE", "BACKGROUND_JOB", "DTMF", "RECORD_START", "RECORD_STOP",
 	"CUSTOM", "sofia::register", "sofia::unregister", "sofia::expire",
 	"sofia::sip_user_state",
 	"callcenter::info",
@@ -378,6 +392,9 @@ func Normalize(ev *esl.Event) (SwitchEvent, bool) {
 	if ev.Name() == "CUSTOM" {
 		return normalizeCustom(ev, out)
 	}
+	if ev.Name() == "BACKGROUND_JOB" {
+		return normalizeBackgroundJob(ev, out)
+	}
 	return normalizeChannel(ev, out)
 }
 
@@ -442,6 +459,12 @@ func normalizeChannel(ev *esl.Event, out SwitchEvent) (SwitchEvent, bool) {
 	case "CHANNEL_HANGUP_COMPLETE":
 		out.Kind = KindChannelHangup
 		out.HangupCause = ev.GetFirst("Hangup-Cause", "variable_hangup_cause")
+		// A cause of this platform's own (OVERFLOW) cannot ride uuid_kill, which
+		// speaks the switch's vocabulary only, so the originator stamps it on
+		// the leg first and it replaces the switch's word here.
+		if own := ev.Variable(VarHangupCause); own != "" {
+			out.HangupCause = own
+		}
 		if q850, ok := ev.GetInt("variable_hangup_cause_q850"); ok {
 			out.HangupCauseQ850 = int(q850)
 		}

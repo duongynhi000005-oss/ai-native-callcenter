@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,8 +21,10 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/agents"
 	"github.com/rasonyang/ai-native-callcenter/internal/aicall"
 	"github.com/rasonyang/ai-native-callcenter/internal/auth"
+	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
+	"github.com/rasonyang/ai-native-callcenter/internal/dialer"
 	"github.com/rasonyang/ai-native-callcenter/internal/esl"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/httpapi"
@@ -36,6 +39,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcribe"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcript"
+	"github.com/rasonyang/ai-native-callcenter/internal/voice"
 	"github.com/rasonyang/ai-native-callcenter/internal/webhook"
 	"github.com/rasonyang/ai-native-callcenter/web"
 )
@@ -146,6 +150,23 @@ func run() error {
 	// A callback learns how its last attempt went when that call's CDR lands;
 	// every screen that can act on one is told the same moment.
 	st.OnCallbackSettled = settledCallback(ctx, hub)
+	// A campaign contact's retry stays inside the outer calling hours. The
+	// dialer (a later slice) sets st.OnAttemptFinished to wake itself.
+	st.OutboundHours = cfg.OutboundHours
+	// The dialer is built further down, after the services it depends on; what
+	// the store tells it is forwarded once it exists. Events before then are
+	// not lost: the dialer reads the database when it starts.
+	var campaignDialer atomic.Pointer[dialer.Dialer]
+	st.OnAttemptFinished = func(f campaign.Finished) {
+		if d := campaignDialer.Load(); d != nil {
+			d.AttemptFinished(f)
+		}
+	}
+	st.OnDNCAdded = func() {
+		if d := campaignDialer.Load(); d != nil {
+			d.DNCAdded()
+		}
+	}
 	hub.OnDropped = func(sub events.Subscriber) {
 		slog.Warn("sse subscriber dropped", "userId", sub.UserID)
 	}
@@ -268,6 +289,81 @@ func run() error {
 	if postCall != nil {
 		cdrAssembler.SetRecordingOffer(postCall)
 	}
+	// The bot's capacity, one number for the UAS and for the outbound
+	// originator, which reserves a slot on answer.
+	botSlots, err := voice.NewBotSlots(voice.BotSlotsConfig{
+		Cap: cfg.BotMaxCalls, InboundReserve: cfg.BotInboundReserve,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Outbound: click-to-dial and the AI outbound leg share one originator.
+	outboundSvc := outbound.New(outbound.Config{
+		Slots:          botSlots,
+		OverflowHold:   cfg.OverflowHold,
+		EndpointFormat: cfg.OutboundEndpoint,
+		SIPHeaders:     cfg.OutboundSIPHeaders,
+		CallerID:       cfg.OutboundCallerID,
+		RingTimeout:    cfg.OutboundRingTimeout,
+
+		DefaultCountryCode: cfg.DefaultCountryCode,
+	}, adapter, catalogSvc, catalogSvc,
+		st.Ledger().HasCDR,
+		func(callID uuid.UUID) bool {
+			_, err := registry.Snapshot(callID)
+			return err == nil
+		}, slog.Default()).WithDNC(st.DNC())
+
+	// Nothing is dialled until the switch has been read for the calls that
+	// outlived a restart (internal/outbound/adopt.go).
+	outboundSvc.HoldUntilReconciled()
+
+	// The campaign dialer: one actor owning admission and campaign
+	// transitions. It needs the bot to talk to anyone who answers, so a
+	// deployment with the AI path off runs no dialer and its campaigns, if
+	// any are started, dial nothing.
+	var campaignController campaign.Controller
+	var campaignProgress campaign.ProgressSource
+	var campaignObserver campaign.Observer
+	if cfg.IsBotEnabled {
+		dlr := dialer.New(dialer.Config{
+			MaxRinging:           cfg.OutboundMaxRinging,
+			Frequency:            cfg.CampaignFrequencyWindow,
+			OutboundHours:        cfg.OutboundHours,
+			DialForm:             cfg.OutboundDialForm,
+			DefaultCountryCode:   cfg.DefaultCountryCode,
+			TrunkBreakerCount:    cfg.TrunkBreakerCount,
+			ProviderBreakerCount: cfg.ProviderBreakerCount,
+		}, dialer.Deps{
+			Store:  st.Dialer(),
+			Placer: outboundSvc,
+			Slots:  botSlots,
+			IsLive: func(callID uuid.UUID) bool {
+				_, err := registry.Snapshot(callID)
+				return err == nil
+			},
+			Reconciled: outboundSvc.Reconciled(),
+			Log:        slog.Default(),
+		})
+		outboundSvc.SetAnswerObserver(dlr.Answered)
+		botSlots.SetOnFree(dlr.SlotFreed)
+		campaignDialer.Store(dlr)
+		campaignController, campaignProgress, campaignObserver = dlr, dlr, dlr
+		go dlr.Run(ctx)
+	} else {
+		slog.Warn("the AI path is off (AICC_BOT_ENABLED): campaigns are not dialled")
+	}
+
+	// The bot's sessions, for the reconcile that runs on every connect. Set
+	// once the orchestrator exists; until then no conversation can be running,
+	// which is also the truth of a cold start.
+	var botSessions atomic.Pointer[aicall.Orchestrator]
+	hasBotSession := func(callID uuid.UUID) bool {
+		o := botSessions.Load()
+		return o != nil && o.HasSession(callID)
+	}
+
 	// Every connection between the parts, in one place that a test can drive
 	// with fakes. Nothing above this line joins two services together.
 	composition{
@@ -287,25 +383,18 @@ func run() error {
 		},
 		Events: hub,
 		Log:    slog.Default(),
+		Reconcile: reconcileLive(coordinator, outboundSvc, hasBotSession,
+			link.IsUp, slog.Default(), reconcileBackoffMin),
 	}.connect()
-
-	// Outbound: click-to-dial and the AI outbound leg share one originator.
-	outboundSvc := outbound.New(outbound.Config{
-		EndpointFormat: cfg.OutboundEndpoint,
-		SIPHeaders:     cfg.OutboundSIPHeaders,
-		CallerID:       cfg.OutboundCallerID,
-		RingTimeout:    cfg.OutboundRingTimeout,
-	}, adapter, catalogSvc, catalogSvc,
-		st.Ledger().HasCDR,
-		func(callID uuid.UUID) bool {
-			_, err := registry.Snapshot(callID)
-			return err == nil
-		}, slog.Default())
 
 	// Business data a request attached to a call reaches the call itself here,
 	// and the bot's own session below. It deliberately never goes through the
 	// switch, so these two readers are the only ways it travels.
 	coordinator.AttachCallData(outboundSvc.Data())
+	outboundSvc.SetBotAbandoner(coordinator.AbandonBot)
+	// An originate that never makes a channel is recorded through the same
+	// single CDR write path as every other call.
+	outboundSvc.SetFailureLedger(st.Ledger())
 
 	go link.Run(ctx)
 	go dispatchSwitchEvents(ctx, link, coordinator, agentSvc, outboundSvc)
@@ -323,7 +412,7 @@ func run() error {
 		reportMissingProviderKey(slog.Default(), profile, os.Getenv)
 
 		orchestrator, err := aicall.NewOrchestrator(botConfig(
-			botUAS(cfg),
+			botUAS(cfg, botSlots),
 			catalogSvc,
 			st.Flows(),
 			adapter,
@@ -345,6 +434,7 @@ func run() error {
 			return fmt.Errorf("start ai voice leg: %w", err)
 		}
 		defer orchestrator.Stop()
+		botSessions.Store(orchestrator)
 		slog.Info("ai voice leg listening",
 			"sipPort", cfg.BotSIPPort, "maxCalls", cfg.BotMaxCalls)
 	}
@@ -368,6 +458,12 @@ func run() error {
 			transcripts,
 			catalogSvc,
 			st.Contacts(),
+			st.DNC(),
+			campaign.NewService(st.Campaigns(), campaignController, campaign.Env{
+				OutboundHours:      cfg.OutboundHours,
+				AnswerWindow:       config.OutboundAnswerWindow,
+				DefaultCountryCode: cfg.DefaultCountryCode,
+			}).WithDialer(campaignProgress, campaignObserver),
 			st.Ledger(),
 			st.Flows(),
 			st.Accounts(),
@@ -509,6 +605,9 @@ func dispatchSwitchEvents(ctx context.Context, link *esl.Link, coordinator *tele
 					signal = agents.SignalUnreachable
 				}
 				agentSvc.ObserveDevice(ctx, ev.Extension, signal)
+			case telephony.KindBackgroundJob:
+				// A command's result belongs to whoever issued the command;
+				// outbound below is the one that issues originates.
 			default:
 				coordinator.Handle(ctx, ev)
 			}

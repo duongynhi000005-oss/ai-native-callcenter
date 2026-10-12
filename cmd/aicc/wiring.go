@@ -97,6 +97,10 @@ type composition struct {
 	Registrations func() ([]telephony.Registration, error)
 	Events        systemPublisher
 	Log           *slog.Logger
+	// Reconcile adopts the channels the switch holds and settles the ones
+	// nobody is looking after. It runs on every connect, last: the screens are
+	// told the link is up first, and nothing above depends on it.
+	Reconcile func(context.Context)
 }
 
 // systemPublisher is the slice of the hub used to announce facts about the
@@ -147,6 +151,12 @@ func (c composition) connect() {
 	// only sign of it was that nothing happened any more.
 	c.Link.OnConnect(func(ctx context.Context) { c.announceLink(ctx, true) })
 	c.Link.OnLost(func() { c.announceLink(context.Background(), false) })
+
+	// What the switch is holding that this process knows nothing about: calls
+	// that outlived a restart, and whatever happened while the link was down.
+	if c.Reconcile != nil {
+		c.Link.OnConnect(c.Reconcile)
+	}
 
 	// Who may see a call's live transcript is decided from who is on the call,
 	// which only this side knows. Without it every transcript event falls
@@ -341,6 +351,8 @@ func apiDeps(
 	transcripts httpapi.TranscriptStates,
 	catalogSvc httpapi.CatalogService,
 	contacts httpapi.ContactService,
+	dnc httpapi.DNCService,
+	campaigns httpapi.CampaignService,
 	ledger *store.LedgerStore,
 	flows httpapi.FlowService,
 	accounts httpapi.AccountService,
@@ -363,6 +375,8 @@ func apiDeps(
 		Transcripts: transcripts,
 		Catalog:     catalogSvc,
 		Contacts:    contacts,
+		DNC:         dnc,
+		Campaigns:   campaigns,
 		Ledger:      ledger,
 		Flows:       flows,
 		Accounts:    accounts,
@@ -421,7 +435,7 @@ func flowPublishRules(cfg config.Config, profile provider.Profile) []flow.Rule {
 // the zero value — which for RTPDeadTimeout means the dead-media check is off
 // and for RTCPInterval means no reporting at all. Overriding a default cannot
 // fail that way.
-func botUAS(cfg config.Config) voice.Config {
+func botUAS(cfg config.Config, slots *voice.BotSlots) voice.Config {
 	uas := voice.DefaultConfig()
 	uas.SIPHost = cfg.BotSIPHost
 	uas.SIPPort = cfg.BotSIPPort
@@ -431,6 +445,9 @@ func botUAS(cfg config.Config) voice.Config {
 	uas.AdvertiseIP = cfg.BotAdvertiseIP
 	uas.RTPPortRange = [2]int{cfg.BotRTPPortLow, cfg.BotRTPPortHigh}
 	uas.MaxCalls = cfg.BotMaxCalls
+	// The counter the outbound originator reserves from; MaxCalls above is
+	// only what a UAS without one would build for itself.
+	uas.Slots = slots
 	uas.RTPDeadTimeout = cfg.BotRTPDeadTimeout
 	uas.FirstMediaTimeout = cfg.BotFirstMediaTimeout
 	return uas

@@ -21,6 +21,8 @@ import (
 
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
+	"github.com/rasonyang/ai-native-callcenter/internal/obs"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
@@ -30,7 +32,19 @@ type Switch interface {
 	BridgeToEndpoint(channelID string, newPartyID uuid.UUID, endpoint string, vars map[string]string) error
 	TransferToExtension(channelID, extension, context string) error
 	Hangup(channelID, cause string) error
+	SetVariable(channelID, name, value string) error
 	Endpoint(extensionNumber string) string
+}
+
+// BotSlots is the bot-capacity counter an answered AI outbound leg takes a slot
+// from before it is bridged (voice.BotSlots). One number is shared with the
+// UAS, which consumes the reservation when the bridge's INVITE arrives.
+type BotSlots interface {
+	// ReserveWait reserves a slot under key, parking for up to hold until one
+	// frees, and gives up early when ctx is done.
+	ReserveWait(ctx context.Context, key string, hold time.Duration) (ok bool, waited time.Duration)
+	// Release gives back a reservation the INVITE has not consumed.
+	Release(key string)
 }
 
 // DIDSource answers which numbers exist and which flow serves them.
@@ -42,6 +56,11 @@ type DIDSource interface {
 // provisioned extension or a queue's extension number.
 type NumberPlan interface {
 	IsInternalNumber(ctx context.Context, number string) (bool, error)
+}
+
+// DNCList answers whether a canonical E.164 number is on the do-not-call list.
+type DNCList interface {
+	Contains(ctx context.Context, number string) (bool, error)
 }
 
 // Config shapes how the outside world is dialed.
@@ -73,6 +92,16 @@ type Config struct {
 	// config layer validates it; a request is checked again at call time).
 	// Default config.DefaultOutboundRingTimeout (45s).
 	RingTimeout time.Duration
+	// Slots is the bot-capacity counter. Nil bridges without reserving, which
+	// is only right for a deployment that never fills its bot.
+	Slots BotSlots
+	// OverflowHold is how long an answered leg waits for a slot before it is
+	// hung up as OverflowCause. Zero waits not at all.
+	OverflowHold time.Duration
+	// DefaultCountryCode (digits, no "+") completes a national destination
+	// before the do-not-call check. Empty: a national number cannot be
+	// completed and is not checked.
+	DefaultCountryCode string
 }
 
 func (c Config) withDefaults() Config {
@@ -108,18 +137,56 @@ type Service struct {
 	sw      Switch
 	dids    DIDSource
 	numbers NumberPlan
+	dnc     DNCList
 	hasCDR  func(ctx context.Context, callID uuid.UUID) (bool, error)
 	isLive  func(callID uuid.UUID) bool
 	limiter *Limiter
 	log     *slog.Logger
+	// abandonBot hands a call whose bot session died to the telephony CDR path.
+	abandonBot func(uuid.UUID)
 	// callData holds what a placed call was asked to carry until the call
 	// itself exists to hold it.
 	callData *CallData
 
 	mu      sync.Mutex
 	pending map[string]*pendingLeg // by channel id
-	now     func() time.Time       // the clock; replaced in tests
+	// ready is the admission gate (adopt.go): nil is open. isReady records
+	// that it was opened. answered and reaped are short memories that keep a
+	// recovery pass from deciding twice about one channel.
+	ready   chan struct{}
+	isReady bool
+	// readyWait overrides reconcileWait; tests shorten it.
+	readyWait time.Duration
+	answered  map[string]time.Time
+	reaped    map[string]time.Time
+	now       func() time.Time // the clock; replaced in tests
+	// onAnswered, when set, hears every answered AI outbound leg.
+	onAnswered func(callID uuid.UUID)
+
+	// Originates awaiting their BACKGROUND_JOB result (jobs.go), guarded by mu.
+	jobs      map[string]*trackedJob // by Job-UUID
+	legJobs   map[string]*trackedJob // by leg channel id, from before the originate
+	early     map[string]earlyResult
+	jobMargin time.Duration
+	failures  FailureLedger
+
+	// holds are the answered AI legs that took, or are waiting for, a bot slot,
+	// by channel id; guarded by mu. A hangup cancels the wait and releases the
+	// reservation.
+	holds map[string]*slotHold
 }
+
+// slotHold is one answered leg's claim on a bot slot.
+type slotHold struct {
+	key    string
+	cancel context.CancelFunc
+	since  time.Time
+}
+
+// OverflowCause is the hangupCause of an answered AI outbound call that no bot
+// slot could take. It is this platform's own word, not the switch's: the leg
+// is stamped with it (telephony.VarHangupCause) before it is hung up.
+const OverflowCause = "OVERFLOW"
 
 // LateAnswerCause is the hangup cause stamped on a leg that was answered after
 // its window closed. It reaches the CDR's hangupCause (a free string) as the
@@ -172,8 +239,46 @@ func New(cfg Config, sw Switch, dids DIDSource, numbers NumberPlan,
 		callData: NewCallData(),
 		log:      log,
 		pending:  map[string]*pendingLeg{},
+		holds:    map[string]*slotHold{},
 		now:      time.Now,
 	}
+}
+
+// WithDNC installs the do-not-call list. Without one nothing is checked.
+func (s *Service) WithDNC(dnc DNCList) *Service {
+	s.dnc = dnc
+	return s
+}
+
+// checkDNC is the one choke point for the do-not-call list: Dial (click-to-dial)
+// and DialAI both call it before any state is created or any command is sent.
+//
+// The list holds canonical E.164, so the destination is canonicalised first,
+// with the deployment's default country code. KNOWN GAP: when that code is not
+// configured (AICC_DEFAULT_COUNTRY_CODE) a national number cannot be completed,
+// the check cannot match it, and the call goes through; that is logged at
+// debug. A destination written with "+" or "00" is always checked. A failing
+// lookup refuses the call: dialling a number we could not prove is allowed is
+// the worse error.
+func (s *Service) checkDNC(ctx context.Context, destination string) error {
+	if s.dnc == nil {
+		return nil
+	}
+	number, err := phonenum.Canonical(destination, s.cfg.DefaultCountryCode)
+	if err != nil {
+		s.log.DebugContext(ctx, "do-not-call check skipped: destination cannot be canonicalised",
+			"to", destination, "reason", phonenum.ReasonOf(err),
+			"hasDefaultCountryCode", s.cfg.DefaultCountryCode != "")
+		return nil
+	}
+	isListed, err := s.dnc.Contains(ctx, number)
+	if err != nil {
+		return fmt.Errorf("outbound: do-not-call lookup: %w", err)
+	}
+	if isListed {
+		return ErrNumberOnDNC
+	}
+	return nil
 }
 
 // Errors the API layer translates.
@@ -192,6 +297,10 @@ var (
 	ErrUnknownDID        = fmt.Errorf("outbound: no such DID")
 	ErrFlowless          = fmt.Errorf("outbound: the DID has no published flow")
 	ErrAlreadyPlaced     = fmt.Errorf("outbound: this call was already placed")
+	// ErrNumberOnDNC means the destination is on the do-not-call list. The
+	// call is refused before anything is recorded or sent: the CDR is the
+	// ledger of calls placed, and this one was not.
+	ErrNumberOnDNC = fmt.Errorf("outbound: the number is on the do-not-call list")
 	// ErrBadRingTimeout means a ring timeout that would let the leg ring past
 	// the answer window.
 	ErrBadRingTimeout = fmt.Errorf("outbound: ring timeout must be positive and strictly below the answer window")
@@ -297,6 +406,11 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	if err != nil {
 		return uuid.Nil, err
 	}
+	// Before anything that consults what is live: until the first reconcile
+	// the registry does not know the calls that outlived a restart.
+	if err := s.awaitReconciled(ctx); err != nil {
+		return uuid.Nil, err
+	}
 
 	callID := req.CallID
 	if callID == uuid.Nil {
@@ -314,6 +428,11 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		if s.isLive != nil && s.isLive(callID) {
 			return callID, ErrAlreadyPlaced
 		}
+	}
+	// After the idempotency check: a call already placed is reported as
+	// placed, even if its number joined the list since.
+	if err := s.checkDNC(ctx, destination); err != nil {
+		return uuid.Nil, err
 	}
 
 	if err := s.limiter.Take(ctx); err != nil {
@@ -338,6 +457,9 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 
 	vars := map[string]string{
 		"aicc_call_id": callID.String(),
+		// What this leg is for, so a process that did not place it (after a
+		// restart, say) can tell (telephony.AdoptLiveChannels).
+		telephony.VarPlacedBy: telephony.PlacedByDial,
 		// The identity crosses the bridge with the leg. The trunk leg the
 		// dialplan raises next inherits aicc_call_id, so it is adopted into
 		// this call the moment it exists — not merged later at the bridge,
@@ -444,19 +566,28 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		return uuid.Nil, err
 	}
 	vars["effective_caller_id_number"] = clid
-	if _, err := s.sw.Originate(agentLeg, s.sw.Endpoint(agentExtension), vars); err != nil {
+	// Registered before the originate: the leg's CHANNEL_CREATE can be
+	// dispatched before the bgapi reply is (jobs.go).
+	job := &trackedJob{
+		callID: callID, legID: agentLeg.String(), placedAt: time.Now().UTC(),
+		callType: callType, from: agentExtension, to: destination,
+		legKind: "AGENT", legLabel: agentExtension,
+	}
+	s.expectLeg(job)
+	jobID, err := s.sw.Originate(agentLeg, s.sw.Endpoint(agentExtension), vars)
+	if err != nil {
+		s.abandonLeg(job)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
 		return uuid.Nil, err
 	}
 
-	s.arm(agentLeg.String(), func() {
-		if err := s.sw.TransferToExtension(agentLeg.String(), destination, "aicc"); err != nil {
-			s.log.Error("click-to-dial transfer failed",
-				"callId", callID, "destination", destination, "error", err)
-		}
-	})
+	s.arm(agentLeg.String(), s.transferOnAnswer(callID, agentLeg.String(), destination))
+
+	// After arming: a failure already on record is applied at once, and it
+	// must find the continuation there to drop.
+	s.attachJob(job, jobID)
 
 	s.log.Info("click-to-dial placed", "callId", callID,
 		"agentExtension", agentExtension, "destination", destination)
@@ -485,26 +616,56 @@ type AIDialRequest struct {
 	// campaign's per-attempt value); zero uses the default. Must be strictly
 	// below the answer window.
 	RingTimeout time.Duration
+	// LegID pins the customer leg's origination uuid; zero mints one. A
+	// campaign attempt mints its leg id with its call id, before the originate,
+	// so the row and the channel are the same thing.
+	LegID uuid.UUID
+	// CampaignID and AttemptID mark the call as a campaign attempt: they ride
+	// the leg as channel variables (so a recovery after a restart can arm the
+	// bridge with them again) and the bridge to the bot as X-AICC-Campaign-ID
+	// and X-AICC-Attempt-ID, which is how the orchestrator knows to withhold
+	// a way to a person (design 10 section 10). Both zero for a single call.
+	CampaignID uuid.UUID
+	AttemptID  uuid.UUID
+}
+
+// Placement is what an accepted AI outbound request came to.
+type Placement struct {
+	CallID uuid.UUID
+	// JobID is the Job-UUID the switch's bgapi returned for the originate; the
+	// key its BACKGROUND_JOB result will carry. Empty when the switch gave none.
+	JobID string
 }
 
 // DialAI is the inbound AI path reversed: originate towards the customer,
 // park; when they answer, transfer their leg into a bridge to the bot
 // gateway with the same correlation headers an inbound call carries.
 func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, error) {
+	p, err := s.PlaceAI(ctx, req)
+	return p.CallID, err
+}
+
+// PlaceAI is DialAI that also says which originate job it started. On an error
+// the CallID is set only for ErrAlreadyPlaced.
+func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, error) {
 	if s.cfg.EndpointFormat == "" {
-		return uuid.Nil, ErrNoOutboundEndpoint
+		return Placement{}, ErrNoOutboundEndpoint
 	}
 	if !isDialable(req.To) {
-		return uuid.Nil, ErrBadNumber
+		return Placement{}, ErrBadNumber
 	}
 	ring, err := s.ringTimeout(req.RingTimeout)
 	if err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
+	}
+
+	if err := s.awaitReconciled(ctx); err != nil {
+		return Placement{}, err
 	}
 
 	did, err := s.findDID(ctx, req.DIDNumber)
 	if err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 	language := req.Language
 	if language == "" {
@@ -518,17 +679,22 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		// The ledger is the idempotency record: a finished call stays
 		// finished, a running call keeps running, and neither redials.
 		if done, err := s.hasCDR(ctx, callID); err != nil {
-			return uuid.Nil, err
+			return Placement{}, err
 		} else if done {
-			return callID, ErrAlreadyPlaced
+			return Placement{CallID: callID}, ErrAlreadyPlaced
 		}
 		if s.isLive != nil && s.isLive(callID) {
-			return callID, ErrAlreadyPlaced
+			return Placement{CallID: callID}, ErrAlreadyPlaced
 		}
+	}
+	// After the idempotency check: a call already placed is reported as
+	// placed, even if its number joined the list since.
+	if err := s.checkDNC(ctx, req.To); err != nil {
+		return Placement{}, err
 	}
 
 	if err := s.limiter.Take(ctx); err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
 	// Before the originate, because the call can exist before this returns:
@@ -539,10 +705,18 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		s.callData.Put(callID, req.UserData)
 	}
 
-	customerLeg := uuid.New()
+	customerLeg := req.LegID
+	if customerLeg == uuid.Nil {
+		customerLeg = uuid.New()
+	}
 	vars := map[string]string{
 		"aicc_call_id":  callID.String(),
 		"aicc_language": language,
+		// What this leg is for and whom it dialled: enough, with the DID and
+		// the language above, for a process that did not place it to bridge
+		// the bot when the customer answers (adopt.go).
+		telephony.VarPlacedBy: telephony.PlacedByDialAI,
+		telephony.VarPlacedTo: req.To,
 		// The number this call goes out from, on the leg from the moment it
 		// exists rather than only on the bridge to the bot. A call nobody
 		// answers never reaches that bridge, so its row had neither the number
@@ -558,6 +732,10 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		// Explicit and below the answer window; see Dial.
 		"originate_timeout": ringTimeoutVar(ring),
 	}
+	if req.CampaignID != uuid.Nil {
+		vars[telephony.VarCampaignID] = req.CampaignID.String()
+		vars[telephony.VarAttemptID] = req.AttemptID.String()
+	}
 	endpoint := fmt.Sprintf(s.cfg.EndpointFormat, req.To)
 	pinCodecs(vars, endpoint)
 	for _, h := range s.cfg.SIPHeaders {
@@ -569,38 +747,163 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		// the bridge to the bot and any later transfer to an agent.
 		vars["sip_copy_custom_headers"] = "false"
 	}
-	if _, err := s.sw.Originate(customerLeg, endpoint, vars); err != nil {
+	job := &trackedJob{
+		callID: callID, legID: customerLeg.String(), placedAt: time.Now().UTC(),
+		callType: "OUTBOUND", from: did.Number, to: req.To, did: did.Number,
+		language: language, flowID: did.FlowID,
+		legKind: "TRUNK", legLabel: req.To,
+	}
+	s.expectLeg(job)
+	jobID, err := s.sw.Originate(customerLeg, endpoint, vars)
+	if err != nil {
+		s.abandonLeg(job)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
-	s.arm(customerLeg.String(), func() {
-		botLeg := uuid.New()
-		bridgeVars := map[string]string{
-			"aicc_call_id":                    callID.String(),
-			"aicc_did":                        did.Number,
-			"aicc_language":                   language,
-			"sip_h_X-AICC-Call-ID":            callID.String(),
-			"sip_h_X-AICC-Channel-ID":         customerLeg.String(),
-			"sip_h_X-AICC-DID":                did.Number,
-			"sip_h_X-AICC-Language":           language,
-			"sip_h_X-AICC-ANI":                req.To,
-			"sip_h_X-AICC-Call-Type":          "OUTBOUND",
-			"sip_h_X-AICC-Placed-To-Customer": "true",
-		}
-		target := "sofia/gateway/" + s.cfg.BotGateway + "/" + did.Number
-		pinCodecs(bridgeVars, target)
-		if err := s.sw.BridgeToEndpoint(customerLeg.String(), botLeg, target, bridgeVars); err != nil {
-			s.log.Error("ai outbound bridge to bot failed",
-				"callId", callID, "to", req.To, "error", err)
-		}
-	})
+	s.arm(customerLeg.String(), s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To,
+		campaignRef{campaignID: req.CampaignID, attemptID: req.AttemptID}))
+
+	s.attachJob(job, jobID) // after arming, for the same reason as click-to-dial
 
 	s.log.Info("ai outbound placed", "callId", callID,
 		"to", req.To, "did", did.Number, "language", language)
-	return callID, nil
+	return Placement{CallID: callID, JobID: jobID}, nil
+}
+
+// campaignRef names the campaign attempt a call belongs to; zero for a single
+// call.
+type campaignRef struct{ campaignID, attemptID uuid.UUID }
+
+// SetAnswerObserver installs a function told, once per call, that the
+// customer answered and the bridge to the bot is being made (before any bot
+// slot is taken). It runs on the event goroutine and must not block. Set
+// before the service is used.
+func (s *Service) SetAnswerObserver(f func(callID uuid.UUID)) { s.onAnswered = f }
+
+// bridgeToBot is what an answered AI outbound leg does: transfer into a bridge
+// to the bot gateway with the correlation headers an inbound call carries.
+// Placing a call and adopting one that outlived a restart arm the same thing.
+func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string, ref campaignRef) func() {
+	return func() {
+		if s.onAnswered != nil {
+			s.onAnswered(callID)
+		}
+		key := callID.String()
+		if s.cfg.Slots != nil && !s.takeSlot(callID, customerLeg, to) {
+			return
+		}
+		botLeg := uuid.New()
+		bridgeVars := map[string]string{
+			"aicc_call_id":                    callID.String(),
+			"aicc_did":                        didNumber,
+			"aicc_language":                   language,
+			"sip_h_X-AICC-Call-ID":            callID.String(),
+			"sip_h_X-AICC-Channel-ID":         customerLeg,
+			"sip_h_X-AICC-DID":                didNumber,
+			"sip_h_X-AICC-Language":           language,
+			"sip_h_X-AICC-ANI":                to,
+			"sip_h_X-AICC-Call-Type":          "OUTBOUND",
+			"sip_h_X-AICC-Placed-To-Customer": "true",
+		}
+		if ref.campaignID != uuid.Nil {
+			bridgeVars["sip_h_X-AICC-Campaign-ID"] = ref.campaignID.String()
+			bridgeVars["sip_h_X-AICC-Attempt-ID"] = ref.attemptID.String()
+		}
+		target := "sofia/gateway/" + s.cfg.BotGateway + "/" + didNumber
+		pinCodecs(bridgeVars, target)
+		if err := s.sw.BridgeToEndpoint(customerLeg, botLeg, target, bridgeVars); err != nil {
+			s.log.Error("ai outbound bridge to bot failed",
+				"callId", callID, "to", to, "error", err)
+			s.dropHold(customerLeg, key)
+		}
+	}
+}
+
+// takeSlot reserves a bot slot for an answered leg, parking it for up to the
+// overflow hold when none is free. It reports whether the bridge may go ahead.
+// When it may not, the leg has already been dealt with: hung up as OVERFLOW,
+// or gone because the customer hung up first.
+func (s *Service) takeSlot(callID uuid.UUID, customerLeg, to string) bool {
+	key := callID.String()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	now := s.now()
+	for id, h := range s.holds { // a hangup that raced the answer left these
+		if now.Sub(h.since) > time.Minute {
+			delete(s.holds, id)
+		}
+	}
+	s.holds[customerLeg] = &slotHold{key: key, cancel: cancel, since: now}
+	s.mu.Unlock()
+
+	ok, waited := s.cfg.Slots.ReserveWait(ctx, key, s.cfg.OverflowHold)
+	isGone := ctx.Err() != nil
+	switch {
+	case isGone:
+		// The customer hung up while parked (or between reserving and now);
+		// the hangup handler has released or will release the reservation.
+		s.cfg.Slots.Release(key)
+		if waited > 0 {
+			obs.RecordBotHold(obs.BotHoldAbandoned, waited.Milliseconds())
+		}
+		s.log.Info("customer hung up while waiting for a bot slot",
+			"callId", callID, "waitedMs", waited.Milliseconds())
+		s.dropHold(customerLeg, key)
+		return false
+	case ok:
+		if waited > 0 {
+			obs.RecordBotHold(obs.BotHoldReserved, waited.Milliseconds())
+		}
+		s.log.Info("bot slot reserved for the answered leg",
+			"callId", callID, "waitedMs", waited.Milliseconds())
+		return true
+	}
+
+	obs.RecordBotHold(obs.BotHoldOverflow, waited.Milliseconds())
+	s.log.Warn("no bot slot freed within the overflow hold; hanging up the answered leg",
+		"callId", callID, "to", to, "heldMs", waited.Milliseconds(), "cause", OverflowCause)
+	s.dropHold(customerLeg, key)
+	// The stamp first: uuid_kill takes the switch's causes only, so the
+	// platform's own word rides a channel variable the normalizer reads.
+	if err := s.sw.SetVariable(customerLeg, telephony.VarHangupCause, OverflowCause); err != nil {
+		s.log.Error("could not stamp the overflow cause on the leg",
+			"callId", callID, "channelId", customerLeg, "error", err)
+	}
+	if err := s.sw.Hangup(customerLeg, "NORMAL_CLEARING"); err != nil {
+		s.log.Error("hangup of an overflowed leg failed",
+			"callId", callID, "channelId", customerLeg, "error", err)
+	}
+	return false
+}
+
+// dropHold forgets a leg's slot claim and cancels any wait for it.
+func (s *Service) dropHold(customerLeg, key string) {
+	s.mu.Lock()
+	h := s.holds[customerLeg]
+	delete(s.holds, customerLeg)
+	s.mu.Unlock()
+	if h != nil {
+		h.cancel()
+	}
+	// Whatever was reserved and not consumed goes back; a no-op when nothing
+	// was or the INVITE took it.
+	if s.cfg.Slots != nil {
+		s.cfg.Slots.Release(key)
+	}
+}
+
+// transferOnAnswer is what an answered click-to-dial agent leg does: go on to
+// the destination through the dialplan.
+func (s *Service) transferOnAnswer(callID uuid.UUID, agentLeg, destination string) func() {
+	return func() {
+		if err := s.sw.TransferToExtension(agentLeg, destination, "aicc"); err != nil {
+			s.log.Error("click-to-dial transfer failed",
+				"callId", callID, "destination", destination, "error", err)
+		}
+	}
 }
 
 // defaultOutboundNumber is the number a call this platform places comes from.
@@ -654,19 +957,35 @@ func (s *Service) arm(channelID string, onAnswer func()) {
 	}
 }
 
+// armUntil is arm for a leg whose window began earlier than now.
+func (s *Service) armUntil(channelID string, expiresAt time.Time, onAnswer func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending[channelID] = &pendingLeg{onAnswer: onAnswer, expiresAt: expiresAt}
+}
+
 // HandleSwitchEvent follows originated legs: an answer fires the armed
 // continuation, a hangup (busy, declined, expired) discards it. Fed from the
 // same dispatch loop as the coordinator.
 func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
+	if ev.Kind == telephony.KindBackgroundJob {
+		s.handleJob(ev)
+		return
+	}
 	if ev.ChannelID == "" {
 		return
 	}
 	switch ev.Kind {
+	case telephony.KindChannelCreate:
+		s.noteChannel(ev.ChannelID)
 	case telephony.KindChannelAnswer:
 		s.mu.Lock()
 		leg := s.pending[ev.ChannelID]
 		delete(s.pending, ev.ChannelID)
 		expired := leg != nil && s.now().After(leg.expiresAt)
+		if leg != nil {
+			s.noteAnswered(ev.ChannelID)
+		}
 		s.mu.Unlock()
 		if leg == nil {
 			return
@@ -692,7 +1011,16 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 	case telephony.KindChannelHangup:
 		s.mu.Lock()
 		delete(s.pending, ev.ChannelID)
+		h := s.holds[ev.ChannelID]
+		delete(s.holds, ev.ChannelID)
 		s.mu.Unlock()
+		// The customer is gone: stop waiting for a slot, and give back one
+		// that was reserved for a bridge that no longer has anyone to carry.
+		// A reservation the INVITE already consumed is untouched.
+		if h != nil {
+			h.cancel()
+			s.cfg.Slots.Release(h.key)
+		}
 	}
 }
 

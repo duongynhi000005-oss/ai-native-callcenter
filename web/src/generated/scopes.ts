@@ -16,10 +16,14 @@ export type Scope =
     | 'calls:monitor'
     | 'calls:read:all'
     | 'calls:read:own'
+    | 'campaigns:read'
+    | 'campaigns:write'
     | 'config:read'
     | 'config:write'
     | 'contacts:read'
     | 'contacts:write'
+    | 'dnc:read'
+    | 'dnc:write'
     | 'history:read:all'
     | 'history:read:own'
     | 'keys:manage'
@@ -39,10 +43,14 @@ export const SCOPES: readonly Scope[] = [
     'calls:monitor',
     'calls:read:all',
     'calls:read:own',
+    'campaigns:read',
+    'campaigns:write',
     'config:read',
     'config:write',
     'contacts:read',
     'contacts:write',
+    'dnc:read',
+    'dnc:write',
     'history:read:all',
     'history:read:own',
     'keys:manage',
@@ -63,10 +71,14 @@ export const SCOPE_DESCRIPTIONS: Record<Scope, string> = {
     'calls:monitor': "Listen in on, whisper to or barge into a call in progress. Separate from calls:control because it reaches a conversation the subject is not a party to.",
     'calls:read:all': "Read every live call on the floor, and receive every call's events on the stream. Widens calls:read:own rather than replacing it.",
     'calls:read:own': "Read the live calls this subject is a party to. For a key, that is the calls of the agent named in X-AICC-Agent-ID.",
+    'campaigns:read': "Read AI outbound campaigns and their contact lists.",
+    'campaigns:write': "Create and change campaigns, start, pause, resume and cancel them, and import contacts. Separate from config:write because starting a campaign places calls to customers.",
     'config:read': "Read the platform's configuration: extensions, queues, numbers, flows, webhook subscriptions, accounts and system health.",
     'config:write': "Change the platform's configuration, and reveal an extension's SIP password.",
     'contacts:read': "Read the customer record book.",
     'contacts:write': "Add, edit and remove customer records.",
+    'dnc:read': "Read the do-not-call list.",
+    'dnc:write': "Add numbers to the do-not-call list and take them off it. Separate from config:write because removing a number is what makes it dialable again, a compliance decision rather than a setting.",
     'history:read:all': "Read what happened on every call, whoever took it. Widens history:read:own rather than replacing it.",
     'history:read:own': "Read what happened on this subject's own calls: CDRs, recordings, transcripts and their own day's numbers.",
     'keys:manage': "Create, disable and revoke API keys.",

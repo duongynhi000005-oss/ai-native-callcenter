@@ -315,6 +315,9 @@ func checkUserData(data map[string]string) error {
 
 func writeOutboundError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, outbound.ErrNumberOnDNC):
+		writeError(w, http.StatusUnprocessableEntity, CodeNumberOnDNC,
+			"that number is on the do-not-call list", nil)
 	case errors.Is(err, outbound.ErrBadNumber):
 		writeError(w, http.StatusBadRequest, CodeValidationFailed, "not a dialable number", nil)
 	case errors.Is(err, outbound.ErrNoDefaultOutbound):
@@ -325,6 +328,12 @@ func writeOutboundError(w http.ResponseWriter, err error) {
 	case errors.Is(err, outbound.ErrNoOutboundEndpoint):
 		writeError(w, http.StatusServiceUnavailable, CodeStorageDown,
 			"this deployment has no outbound endpoint configured", nil)
+	case errors.Is(err, outbound.ErrNotReady):
+		// Starting up: the calls that outlived a restart are still being
+		// accounted for, and dialling before that could double-dial one.
+		// Retryable, and the 503 is declared for these operations.
+		writeError(w, http.StatusServiceUnavailable, CodeSwitchDown,
+			"the switch is still being reconciled; retry shortly", nil)
 	case errors.Is(err, outbound.ErrUnknownDID):
 		writeError(w, http.StatusBadRequest, CodeValidationFailed, "no such DID", nil)
 	case errors.Is(err, outbound.ErrFlowless):

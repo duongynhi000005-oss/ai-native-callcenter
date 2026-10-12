@@ -17,6 +17,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/rasonyang/ai-native-callcenter/internal/dayrange"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
 // Config is the complete runtime configuration of the application.
@@ -70,6 +73,26 @@ type Config struct {
 	BotRTPPortLow  int
 	BotRTPPortHigh int
 	BotMaxCalls    int
+	// BotInboundReserve is how many of BotMaxCalls an outbound reservation may
+	// not take, kept for inbound calls. 0 (the default) reserves nothing.
+	BotInboundReserve int
+	// OverflowHold is how long an answered outbound call waits for a bot slot
+	// before it is hung up as OVERFLOW (AICC_OVERFLOW_HOLD). 0 waits not at all.
+	OverflowHold time.Duration
+	// TrunkBreakerCount is how many consecutive TRANSIENT or ORIGINATE_FAILED
+	// attempts pause a campaign as TRUNK_FAILURE (AICC_TRUNK_BREAKER_COUNT).
+	TrunkBreakerCount int
+	// ProviderBreakerCount is how many consecutive answered calls ending
+	// BOT_FAILED pause a campaign as PROVIDER_FAILURE
+	// (AICC_PROVIDER_BREAKER_COUNT).
+	ProviderBreakerCount int
+	// OutboundMaxRinging caps the AI outbound legs ringing at once across every
+	// campaign (AICC_OUTBOUND_MAX_RINGING). It bounds what the trunk carries
+	// unanswered; the bot-capacity rule bounds the rest.
+	OutboundMaxRinging int
+	// CampaignFrequencyWindow is how long after any campaign reached a number
+	// no other campaign may dial it (AICC_CAMPAIGN_FREQUENCY_WINDOW).
+	CampaignFrequencyWindow time.Duration
 	// BotRTPDeadTimeout ends a bot call whose inbound media was flowing and
 	// stopped. BotFirstMediaTimeout ends one that never received any. Zero
 	// disables either; negative is refused.
@@ -111,6 +134,13 @@ type Config struct {
 	// unreachable by construction; validate refuses anything else.
 	OutboundRingTimeout    time.Duration
 	outboundRingTimeoutErr error // a malformed value, refused by validate
+	// OutboundHours (AICC_OUTBOUND_HOURS) are the outer calling hours: the
+	// callee's local time of day outside which no campaign dials, whatever
+	// its own calling window says (docs/design/10-campaigns.md section 8.1).
+	// A campaign's window must lie wholly inside them. A range, "HH:MM-HH:MM",
+	// that may cross midnight.
+	OutboundHours    dayrange.Range
+	outboundHoursErr error // a malformed value, refused by validate
 	// OutboundSIPHeaders are appended to the AI outbound customer leg only
 	// (AICC_OUTBOUND_SIP_HEADERS); see ParseOutboundSIPHeaders. The
 	// application names no SBC vendor, a deployment sets its own marker.
@@ -118,6 +148,15 @@ type Config struct {
 	outboundSIPHeadersErr error // a malformed value, refused by validate
 	// OutboundCallerID is presented on click-to-dial customer legs.
 	OutboundCallerID string
+	// DefaultCountryCode (AICC_DEFAULT_COUNTRY_CODE) is the country calling
+	// code, digits without "+", that completes a national number before it is
+	// compared with the do-not-call list. Empty means national numbers cannot
+	// be completed (see internal/outbound DNC check).
+	DefaultCountryCode string
+	// OutboundDialForm (AICC_OUTBOUND_DIAL_FORM) is how the campaign dialer
+	// writes a number to the trunk: E164 (default), E164_NO_PLUS or NATIONAL.
+	OutboundDialForm    phonenum.DialForm
+	outboundDialFormErr error // a malformed value, refused by validate
 	// IsBotEnabled turns the whole AI leg off, for deployments that only
 	// route to people.
 	IsBotEnabled bool
@@ -325,35 +364,43 @@ func Load() (Config, error) {
 	if !isRingSet {
 		ringTimeout = DefaultOutboundRingTimeout
 	}
+	dialForm, dialFormErr := phonenum.ParseDialForm(env("AICC_OUTBOUND_DIAL_FORM", ""))
 	outboundHeaders, outboundHeadersErr := ParseOutboundSIPHeaders(env(outboundHeadersVar, ""))
+	outboundHours, outboundHoursErr := ParseOutboundHours(env("AICC_OUTBOUND_HOURS", DefaultOutboundHours))
 	c := Config{
-		Env:                  env("AICC_ENV", "dev"),
-		HTTPAddr:             env("AICC_HTTP_ADDR", ":8080"),
-		MetricsAddr:          env("AICC_METRICS_ADDR", "127.0.0.1:9090"),
-		DatabaseURL:          env("AICC_DATABASE_URL", "postgres://aicc:aicc@127.0.0.1:5432/aicc?sslmode=disable"),
-		DatabaseMaxConns:     int32(envInt("AICC_DATABASE_MAX_CONNS", 10)),
-		ESLAddr:              env("AICC_ESL_ADDR", "127.0.0.1:18021"),
-		ESLPassword:          env("AICC_ESL_PASSWORD", "ClueCon"),
-		SwitchDomain:         env("AICC_SWITCH_DOMAIN", "127.0.0.1"),
-		SIPProfile:           env("AICC_SIP_PROFILE", "internal"),
-		SIPDomain:            env("AICC_SIP_DOMAIN", ""),
-		SIPWSSURL:            env("AICC_SIP_WSS_URL", ""),
-		BotSIPHost:           env("AICC_BOT_SIP_HOST", "0.0.0.0"),
-		BotSIPPort:           envInt("AICC_BOT_SIP_PORT", 6060),
-		BotAllowedPeers:      env("AICC_BOT_ALLOWED_PEERS", ""),
-		BotAdvertiseIP:       env("AICC_BOT_ADVERTISE_IP", ""),
-		BotRTPPortLow:        envInt("AICC_BOT_RTP_PORT_LOW", 40000),
-		BotRTPPortHigh:       envInt("AICC_BOT_RTP_PORT_HIGH", 40999),
-		BotMaxCalls:          envInt("AICC_BOT_MAX_CALLS", 220),
-		BotRTPDeadTimeout:    envDuration("AICC_BOT_RTP_DEAD_TIMEOUT", 5*time.Second),
-		BotFirstMediaTimeout: envDuration("AICC_BOT_FIRST_MEDIA_TIMEOUT", 30*time.Second),
-		IsBotGreetingGated:   isGreetingGated,
-		BotGreetingMediaWait: greetingWait,
-		botGreetingWaitErr:   greetingErr,
-		BotNoInputTimeout:    noInput,
-		botNoInputErr:        noInputErr,
-		BotBackendBase:       env("AICC_BOT_BACKEND_BASE", ""),
-		IsBotEnabled:         envBool("AICC_BOT_ENABLED", true),
+		Env:                     env("AICC_ENV", "dev"),
+		HTTPAddr:                env("AICC_HTTP_ADDR", ":8080"),
+		MetricsAddr:             env("AICC_METRICS_ADDR", "127.0.0.1:9090"),
+		DatabaseURL:             env("AICC_DATABASE_URL", "postgres://aicc:aicc@127.0.0.1:5432/aicc?sslmode=disable"),
+		DatabaseMaxConns:        int32(envInt("AICC_DATABASE_MAX_CONNS", 10)),
+		ESLAddr:                 env("AICC_ESL_ADDR", "127.0.0.1:18021"),
+		ESLPassword:             env("AICC_ESL_PASSWORD", "ClueCon"),
+		SwitchDomain:            env("AICC_SWITCH_DOMAIN", "127.0.0.1"),
+		SIPProfile:              env("AICC_SIP_PROFILE", "internal"),
+		SIPDomain:               env("AICC_SIP_DOMAIN", ""),
+		SIPWSSURL:               env("AICC_SIP_WSS_URL", ""),
+		BotSIPHost:              env("AICC_BOT_SIP_HOST", "0.0.0.0"),
+		BotSIPPort:              envInt("AICC_BOT_SIP_PORT", 6060),
+		BotAllowedPeers:         env("AICC_BOT_ALLOWED_PEERS", ""),
+		BotAdvertiseIP:          env("AICC_BOT_ADVERTISE_IP", ""),
+		BotRTPPortLow:           envInt("AICC_BOT_RTP_PORT_LOW", 40000),
+		BotRTPPortHigh:          envInt("AICC_BOT_RTP_PORT_HIGH", 40999),
+		BotMaxCalls:             envInt("AICC_BOT_MAX_CALLS", 220),
+		BotInboundReserve:       envInt("AICC_BOT_INBOUND_RESERVE", 0),
+		OverflowHold:            envDuration("AICC_OVERFLOW_HOLD", DefaultOverflowHold),
+		TrunkBreakerCount:       envInt("AICC_TRUNK_BREAKER_COUNT", DefaultTrunkBreakerCount),
+		ProviderBreakerCount:    envInt("AICC_PROVIDER_BREAKER_COUNT", DefaultProviderBreakerCount),
+		OutboundMaxRinging:      envInt("AICC_OUTBOUND_MAX_RINGING", DefaultOutboundMaxRinging),
+		CampaignFrequencyWindow: envDuration("AICC_CAMPAIGN_FREQUENCY_WINDOW", DefaultCampaignFrequencyWindow),
+		BotRTPDeadTimeout:       envDuration("AICC_BOT_RTP_DEAD_TIMEOUT", 5*time.Second),
+		BotFirstMediaTimeout:    envDuration("AICC_BOT_FIRST_MEDIA_TIMEOUT", 30*time.Second),
+		IsBotGreetingGated:      isGreetingGated,
+		BotGreetingMediaWait:    greetingWait,
+		botGreetingWaitErr:      greetingErr,
+		BotNoInputTimeout:       noInput,
+		botNoInputErr:           noInputErr,
+		BotBackendBase:          env("AICC_BOT_BACKEND_BASE", ""),
+		IsBotEnabled:            envBool("AICC_BOT_ENABLED", true),
 
 		IsTranscriptionEnabled:  envBool("AICC_TRANSCRIPTION_ENABLED", false),
 		StreamAddr:              env("AICC_STREAM_ADDR", "127.0.0.1:8090"),
@@ -378,9 +425,14 @@ func Load() (Config, error) {
 		OutboundEndpoint:              env("AICC_OUTBOUND_ENDPOINT", ""),
 		OutboundRingTimeout:           ringTimeout,
 		outboundRingTimeoutErr:        ringErr,
+		OutboundHours:                 outboundHours,
+		outboundHoursErr:              outboundHoursErr,
 		OutboundSIPHeaders:            outboundHeaders,
 		outboundSIPHeadersErr:         outboundHeadersErr,
 		OutboundCallerID:              env("AICC_OUTBOUND_CLID", ""),
+		DefaultCountryCode:            env("AICC_DEFAULT_COUNTRY_CODE", ""),
+		OutboundDialForm:              dialForm,
+		outboundDialFormErr:           dialFormErr,
 		RecordingBackend:              env("AICC_RECORDING_BACKEND", "FS"),
 		RecordingDir:                  env("AICC_RECORDING_DIR", ""),
 		S3Endpoint:                    env("AICC_S3_ENDPOINT", ""),
@@ -520,6 +572,34 @@ func (c Config) validate() error {
 	if _, err := c.BotAllowedPeerPrefixes(); err != nil {
 		errs = append(errs, fmt.Errorf("AICC_BOT_ALLOWED_PEERS: %w", err))
 	}
+	if c.BotMaxCalls < 1 {
+		errs = append(errs, fmt.Errorf("AICC_BOT_MAX_CALLS must be at least 1, got %d", c.BotMaxCalls))
+	} else if c.BotInboundReserve < 0 || c.BotInboundReserve >= c.BotMaxCalls {
+		errs = append(errs, fmt.Errorf(
+			"AICC_BOT_INBOUND_RESERVE must be 0 or more and below AICC_BOT_MAX_CALLS (%d), got %d",
+			c.BotMaxCalls, c.BotInboundReserve))
+	}
+	if c.OverflowHold < 0 || c.OverflowHold > MaxOverflowHold {
+		errs = append(errs, fmt.Errorf(
+			"AICC_OVERFLOW_HOLD must be between 0 and %s, got %s", MaxOverflowHold, c.OverflowHold))
+	}
+	if c.TrunkBreakerCount < 1 || c.TrunkBreakerCount > MaxBreakerCount {
+		errs = append(errs, fmt.Errorf(
+			"AICC_TRUNK_BREAKER_COUNT must be between 1 and %d, got %d", MaxBreakerCount, c.TrunkBreakerCount))
+	}
+	if c.ProviderBreakerCount < 1 || c.ProviderBreakerCount > MaxBreakerCount {
+		errs = append(errs, fmt.Errorf(
+			"AICC_PROVIDER_BREAKER_COUNT must be between 1 and %d, got %d", MaxBreakerCount, c.ProviderBreakerCount))
+	}
+	if c.OutboundMaxRinging < 1 || c.OutboundMaxRinging > MaxOutboundMaxRinging {
+		errs = append(errs, fmt.Errorf(
+			"AICC_OUTBOUND_MAX_RINGING must be between 1 and %d, got %d", MaxOutboundMaxRinging, c.OutboundMaxRinging))
+	}
+	if c.CampaignFrequencyWindow < 0 || c.CampaignFrequencyWindow > MaxCampaignFrequencyWindow {
+		errs = append(errs, fmt.Errorf(
+			"AICC_CAMPAIGN_FREQUENCY_WINDOW must be between 0 (off) and %s, got %s",
+			MaxCampaignFrequencyWindow, c.CampaignFrequencyWindow))
+	}
 	if c.BotRTPDeadTimeout < 0 || c.BotFirstMediaTimeout < 0 {
 		errs = append(errs, fmt.Errorf(
 			"AICC_BOT_RTP_DEAD_TIMEOUT and AICC_BOT_FIRST_MEDIA_TIMEOUT must be 0 (off) or more, got %s and %s",
@@ -540,6 +620,15 @@ func (c Config) validate() error {
 		errs = append(errs, c.outboundRingTimeoutErr)
 	} else if err := ValidateOutboundRingTimeout(c.OutboundRingTimeout); err != nil {
 		errs = append(errs, err)
+	}
+	if c.outboundHoursErr != nil {
+		errs = append(errs, c.outboundHoursErr)
+	}
+	if err := ValidateDefaultCountryCode(c.DefaultCountryCode); err != nil {
+		errs = append(errs, err)
+	}
+	if c.outboundDialFormErr != nil {
+		errs = append(errs, c.outboundDialFormErr)
 	}
 	if c.outboundSIPHeadersErr != nil {
 		errs = append(errs, c.outboundSIPHeadersErr)
@@ -614,6 +703,33 @@ func env(key, def string) string {
 	}
 	return def
 }
+
+// DefaultOverflowHold is how long an answered outbound call may wait for a bot
+// slot; MaxOverflowHold bounds it, since the customer is listening to nothing.
+const (
+	DefaultOverflowHold = 1500 * time.Millisecond
+	MaxOverflowHold     = 10 * time.Second
+)
+
+// The campaign breakers (design 10 section 7.4): how many consecutive
+// failures pause a campaign, and the largest value accepted.
+const (
+	DefaultTrunkBreakerCount    = 20
+	DefaultProviderBreakerCount = 5
+	MaxBreakerCount             = 1000
+)
+
+// The dialer's own limits. 100 ringing legs is what one trunk is commonly
+// asked to carry unanswered; the bot-capacity rule is the tighter bound on a
+// default deployment (220 bot sessions), so this one only matters where the
+// trunk, not the bot, is the scarce thing. The frequency window keeps one
+// number from being worked by two campaigns in the same day.
+const (
+	DefaultOutboundMaxRinging      = 100
+	MaxOutboundMaxRinging          = 100000
+	DefaultCampaignFrequencyWindow = 24 * time.Hour
+	MaxCampaignFrequencyWindow     = 30 * 24 * time.Hour
+)
 
 func envInt(key string, def int) int {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
@@ -693,4 +809,21 @@ func (c Config) TranscribeProviderName() string {
 		return c.TranscribeProvider
 	}
 	return c.Provider
+}
+
+// ValidateDefaultCountryCode accepts empty (unset) or 1 to 3 ASCII digits with
+// no "+" and no leading zero: a country calling code.
+func ValidateDefaultCountryCode(code string) error {
+	if code == "" {
+		return nil
+	}
+	if len(code) > 3 || code[0] == '0' {
+		return fmt.Errorf("AICC_DEFAULT_COUNTRY_CODE must be 1 to 3 digits without a leading zero or +, got %q", code)
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			return fmt.Errorf("AICC_DEFAULT_COUNTRY_CODE must be 1 to 3 digits without a leading zero or +, got %q", code)
+		}
+	}
+	return nil
 }
