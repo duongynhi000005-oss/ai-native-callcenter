@@ -11,7 +11,8 @@
 //
 // Fixtures are deliberately the reference ones, so a walkthrough has a
 // determinate right answer: RMA1001 is in repair, 92223333 is 8 days overdue,
-// 10086002 is inside its contract and cannot change plan. Somebody reading the
+// 18688886666 (the dev trunk's external caller) is 16 days overdue, 10086002
+// is inside its contract and cannot change plan. Somebody reading the
 // walkthrough can tell "the bot said the wrong thing" from "the bot said what
 // the data says".
 //
@@ -295,6 +296,9 @@ func (s *store) billOverdue(b map[string]any) (any, string) {
 	case "90000000":
 		return map[string]any{"found": "1", "amount": "196.00",
 			"due_date": "上月15日", "days_overdue": "21"}, ""
+	case "18688886666":
+		return map[string]any{"found": "1", "amount": "128.50",
+			"due_date": "上月20日", "days_overdue": "16"}, ""
 	}
 	return map[string]any{"found": "0", "amount": "", "due_date": "", "days_overdue": ""}, ""
 }

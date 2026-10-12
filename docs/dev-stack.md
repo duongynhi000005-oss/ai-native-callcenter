@@ -108,8 +108,10 @@ AICC_BOT_BACKEND_BASE=http://127.0.0.1:8770 /tmp/aicc   # or set it in .env
 ```
 
 Its fixtures are the reference ones, so a walkthrough has a determinate right
-answer — RMA1001 is in repair, 92223333 is eight days overdue, 10086002 is
-inside its contract and cannot change plan. That is what lets a reader tell
+answer — RMA1001 is in repair, 92223333 is eight days overdue, 18688886666
+(the external caller on the dev trunk) is sixteen days overdue, so
+early_collections can be walked from a real handset, and 10086002 is inside
+its contract and cannot change plan. That is what lets a reader tell
 "the bot said the wrong thing" from "the bot said what the data says". State
 lives in memory and only where a flow observes its own writes (an appointment
 booked, rescheduled, then confirmed); restarting resets it, which is what a
