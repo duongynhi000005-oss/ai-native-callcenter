@@ -68,6 +68,10 @@ type BotSlots struct {
 	// (a waiter takes the channel under the same lock as its failed attempt).
 	changed chan struct{}
 	stats   SlotStats
+	// onFree, when set, is told that capacity may have appeared. It runs with
+	// the counter's lock held, so it must only signal (the dialer's is a
+	// non-blocking channel send).
+	onFree func()
 }
 
 type reservation struct{ stop func() bool }
@@ -200,6 +204,35 @@ func (b *BotSlots) expire(key string, r *reservation) {
 func (b *BotSlots) wakeLocked() {
 	close(b.changed)
 	b.changed = make(chan struct{})
+	if b.onFree != nil {
+		b.onFree()
+	}
+}
+
+// SetOnFree installs the function told whenever capacity may have appeared: a
+// session ended, a reservation was released or expired. f runs under the
+// counter's lock and must not block. Set once, before the counter is used.
+func (b *BotSlots) SetOnFree(f func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onFree = f
+}
+
+// Usage is what the counter holds right now, for a reader that decides
+// something from it (the dialer's admission rule).
+type Usage struct {
+	// InUse and Reserved are the slots held by accepted dialogs and by
+	// reservations awaiting their INVITE.
+	InUse, Reserved int
+	// Cap is AICC_BOT_MAX_CALLS and InboundReserve AICC_BOT_INBOUND_RESERVE.
+	Cap, InboundReserve int
+}
+
+// Usage reads the counter consistently.
+func (b *BotSlots) Usage() Usage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return Usage{InUse: b.inUse, Reserved: len(b.reserved), Cap: b.cfg.Cap, InboundReserve: b.cfg.InboundReserve}
 }
 
 // ReserveWait reserves a slot under key, waiting up to hold for one to free.

@@ -43,6 +43,11 @@ const (
 	// the request gave it. The destination number the switch reports back may
 	// have been rewritten by the dial string; this is what the bot is told.
 	VarPlacedTo = "aicc_placed_to"
+	// VarCampaignID and VarAttemptID mark the customer leg of a campaign
+	// attempt, so a recovery that re-arms the bridge to the bot can stamp the
+	// campaign on it again.
+	VarCampaignID = "aicc_campaign_id"
+	VarAttemptID  = "aicc_attempt_id"
 	// VarHangupCause carries a hangup cause of this platform's own, which the
 	// switch's uuid_kill cannot (OVERFLOW). When set it replaces the switch's
 	// cause on the leg's hangup, and so in the CDR's hangupCause.
@@ -99,6 +104,10 @@ type LiveChannel struct {
 	// number a click-to-dial agent leg is to be sent on to.
 	PlacedTo    string
 	Destination string
+	// CampaignID and AttemptID are set on the customer leg of a campaign
+	// attempt (VarCampaignID, VarAttemptID); empty otherwise.
+	CampaignID string
+	AttemptID  string
 }
 
 // ErrChannelGone reports that the switch no longer has the channel asked about.
@@ -519,6 +528,8 @@ func liveChannelOf(d dumped, callID uuid.UUID, byID map[string]dumped) LiveChann
 		PlacedBy:      d.variable(VarPlacedBy),
 		PlacedTo:      d.variable(VarPlacedTo),
 		Destination:   d.variable("aicc_destination"),
+		CampaignID:    d.variable(VarCampaignID),
+		AttemptID:     d.variable(VarAttemptID),
 	}
 	now := d.switchNow()
 	if created := d.createdAt(); !now.IsZero() && !created.IsZero() && !now.Before(created) {

@@ -89,6 +89,20 @@ func (s *Service) MarkReconciled() {
 	close(s.ready)
 }
 
+// Reconciled returns a channel that is closed once the first reconciliation
+// has finished (at once when the service was never gated). The dialer waits on
+// it before it admits anything or settles the attempts a restart left behind.
+func (s *Service) Reconciled() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ready == nil || s.isReady {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return s.ready
+}
+
 // awaitReconciled blocks until the gate is open, the request is cancelled, or
 // the wait is spent.
 func (s *Service) awaitReconciled(ctx context.Context) error {
@@ -302,7 +316,7 @@ func (s *Service) recoverRinging(ctx context.Context, ch telephony.LiveChannel, 
 		if language == "" {
 			language = did.Language
 		}
-		onAnswer = s.bridgeToBot(ch.CallID, ch.ChannelID, did.Number, language, ch.PlacedTo)
+		onAnswer = s.bridgeToBot(ch.CallID, ch.ChannelID, did.Number, language, ch.PlacedTo, campaignRefOf(ch))
 	case telephony.PlacedByDial:
 		if !isDialable(ch.Destination) {
 			s.log.Warn("recovery: click-to-dial leg has no destination to go on to; hanging up",
@@ -322,6 +336,18 @@ func (s *Service) recoverRinging(ctx context.Context, ch telephony.LiveChannel, 
 		"channelId", ch.ChannelID, "callId", ch.CallID, "placedBy", ch.PlacedBy,
 		"remainingMs", expiresAt.Sub(s.now()).Milliseconds())
 	rep.Rearmed++
+}
+
+// campaignRefOf reads the campaign attempt a recovered leg was placed for. A
+// stamp that does not parse is no stamp: the call is then bridged as a single
+// call, which only costs it the campaign's withheld tools.
+func campaignRefOf(ch telephony.LiveChannel) campaignRef {
+	campaignID, err1 := uuid.Parse(ch.CampaignID)
+	attemptID, err2 := uuid.Parse(ch.AttemptID)
+	if err1 != nil || err2 != nil {
+		return campaignRef{}
+	}
+	return campaignRef{campaignID: campaignID, attemptID: attemptID}
 }
 
 // holdsLeg reports whether this process is already waiting on the channel or

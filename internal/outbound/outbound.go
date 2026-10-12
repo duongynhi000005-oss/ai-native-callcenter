@@ -160,6 +160,8 @@ type Service struct {
 	answered  map[string]time.Time
 	reaped    map[string]time.Time
 	now       func() time.Time // the clock; replaced in tests
+	// onAnswered, when set, hears every answered AI outbound leg.
+	onAnswered func(callID uuid.UUID)
 
 	// Originates awaiting their BACKGROUND_JOB result (jobs.go), guarded by mu.
 	jobs      map[string]*trackedJob // by Job-UUID
@@ -614,30 +616,56 @@ type AIDialRequest struct {
 	// campaign's per-attempt value); zero uses the default. Must be strictly
 	// below the answer window.
 	RingTimeout time.Duration
+	// LegID pins the customer leg's origination uuid; zero mints one. A
+	// campaign attempt mints its leg id with its call id, before the originate,
+	// so the row and the channel are the same thing.
+	LegID uuid.UUID
+	// CampaignID and AttemptID mark the call as a campaign attempt: they ride
+	// the leg as channel variables (so a recovery after a restart can arm the
+	// bridge with them again) and the bridge to the bot as X-AICC-Campaign-ID
+	// and X-AICC-Attempt-ID, which is how the orchestrator knows to withhold
+	// a way to a person (design 10 section 10). Both zero for a single call.
+	CampaignID uuid.UUID
+	AttemptID  uuid.UUID
+}
+
+// Placement is what an accepted AI outbound request came to.
+type Placement struct {
+	CallID uuid.UUID
+	// JobID is the Job-UUID the switch's bgapi returned for the originate; the
+	// key its BACKGROUND_JOB result will carry. Empty when the switch gave none.
+	JobID string
 }
 
 // DialAI is the inbound AI path reversed: originate towards the customer,
 // park; when they answer, transfer their leg into a bridge to the bot
 // gateway with the same correlation headers an inbound call carries.
 func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, error) {
+	p, err := s.PlaceAI(ctx, req)
+	return p.CallID, err
+}
+
+// PlaceAI is DialAI that also says which originate job it started. On an error
+// the CallID is set only for ErrAlreadyPlaced.
+func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, error) {
 	if s.cfg.EndpointFormat == "" {
-		return uuid.Nil, ErrNoOutboundEndpoint
+		return Placement{}, ErrNoOutboundEndpoint
 	}
 	if !isDialable(req.To) {
-		return uuid.Nil, ErrBadNumber
+		return Placement{}, ErrBadNumber
 	}
 	ring, err := s.ringTimeout(req.RingTimeout)
 	if err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
 	if err := s.awaitReconciled(ctx); err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
 	did, err := s.findDID(ctx, req.DIDNumber)
 	if err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 	language := req.Language
 	if language == "" {
@@ -651,22 +679,22 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		// The ledger is the idempotency record: a finished call stays
 		// finished, a running call keeps running, and neither redials.
 		if done, err := s.hasCDR(ctx, callID); err != nil {
-			return uuid.Nil, err
+			return Placement{}, err
 		} else if done {
-			return callID, ErrAlreadyPlaced
+			return Placement{CallID: callID}, ErrAlreadyPlaced
 		}
 		if s.isLive != nil && s.isLive(callID) {
-			return callID, ErrAlreadyPlaced
+			return Placement{CallID: callID}, ErrAlreadyPlaced
 		}
 	}
 	// After the idempotency check: a call already placed is reported as
 	// placed, even if its number joined the list since.
 	if err := s.checkDNC(ctx, req.To); err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
 	if err := s.limiter.Take(ctx); err != nil {
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
 	// Before the originate, because the call can exist before this returns:
@@ -677,7 +705,10 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		s.callData.Put(callID, req.UserData)
 	}
 
-	customerLeg := uuid.New()
+	customerLeg := req.LegID
+	if customerLeg == uuid.Nil {
+		customerLeg = uuid.New()
+	}
 	vars := map[string]string{
 		"aicc_call_id":  callID.String(),
 		"aicc_language": language,
@@ -700,6 +731,10 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		"origination_caller_id_number": did.Number,
 		// Explicit and below the answer window; see Dial.
 		"originate_timeout": ringTimeoutVar(ring),
+	}
+	if req.CampaignID != uuid.Nil {
+		vars[telephony.VarCampaignID] = req.CampaignID.String()
+		vars[telephony.VarAttemptID] = req.AttemptID.String()
 	}
 	endpoint := fmt.Sprintf(s.cfg.EndpointFormat, req.To)
 	pinCodecs(vars, endpoint)
@@ -725,23 +760,37 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
-		return uuid.Nil, err
+		return Placement{}, err
 	}
 
-	s.arm(customerLeg.String(), s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To))
+	s.arm(customerLeg.String(), s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To,
+		campaignRef{campaignID: req.CampaignID, attemptID: req.AttemptID}))
 
 	s.attachJob(job, jobID) // after arming, for the same reason as click-to-dial
 
 	s.log.Info("ai outbound placed", "callId", callID,
 		"to", req.To, "did", did.Number, "language", language)
-	return callID, nil
+	return Placement{CallID: callID, JobID: jobID}, nil
 }
+
+// campaignRef names the campaign attempt a call belongs to; zero for a single
+// call.
+type campaignRef struct{ campaignID, attemptID uuid.UUID }
+
+// SetAnswerObserver installs a function told, once per call, that the
+// customer answered and the bridge to the bot is being made (before any bot
+// slot is taken). It runs on the event goroutine and must not block. Set
+// before the service is used.
+func (s *Service) SetAnswerObserver(f func(callID uuid.UUID)) { s.onAnswered = f }
 
 // bridgeToBot is what an answered AI outbound leg does: transfer into a bridge
 // to the bot gateway with the correlation headers an inbound call carries.
 // Placing a call and adopting one that outlived a restart arm the same thing.
-func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string) func() {
+func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string, ref campaignRef) func() {
 	return func() {
+		if s.onAnswered != nil {
+			s.onAnswered(callID)
+		}
 		key := callID.String()
 		if s.cfg.Slots != nil && !s.takeSlot(callID, customerLeg, to) {
 			return
@@ -758,6 +807,10 @@ func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language
 			"sip_h_X-AICC-ANI":                to,
 			"sip_h_X-AICC-Call-Type":          "OUTBOUND",
 			"sip_h_X-AICC-Placed-To-Customer": "true",
+		}
+		if ref.campaignID != uuid.Nil {
+			bridgeVars["sip_h_X-AICC-Campaign-ID"] = ref.campaignID.String()
+			bridgeVars["sip_h_X-AICC-Attempt-ID"] = ref.attemptID.String()
 		}
 		target := "sofia/gateway/" + s.cfg.BotGateway + "/" + didNumber
 		pinCodecs(bridgeVars, target)
