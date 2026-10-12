@@ -166,6 +166,11 @@ type Deps struct {
 	Reconciled <-chan struct{}
 	Clock      Clock
 	Log        *slog.Logger
+	// OnChange is told that something a campaign's supervisors watch may have
+	// moved: its status, what it is doing, its in-flight count or its contact
+	// counters. It is a hint, not a fact (the receiver compares), and it must
+	// not block. Nil: nobody is told.
+	OnChange func(campaignID uuid.UUID)
 }
 
 // Dialer is the actor.
@@ -179,6 +184,7 @@ type Dialer struct {
 	reconciled <-chan struct{}
 	clock      Clock
 	log        *slog.Logger
+	onChange   func(uuid.UUID)
 
 	// inbox is the mailbox; wake tells the actor it is not empty.
 	mu    sync.Mutex
@@ -231,7 +237,7 @@ func New(cfg Config, d Deps) *Dialer {
 	}
 	x := &Dialer{
 		cfg: cfg.withDefaults(), st: d.Store, pl: d.Placer, sl: d.Slots,
-		isLive: d.IsLive, reconciled: d.Reconciled, clock: d.Clock, log: d.Log,
+		isLive: d.IsLive, reconciled: d.Reconciled, clock: d.Clock, log: d.Log, onChange: d.OnChange,
 		wake:     make(chan struct{}, 1),
 		flights:  map[uuid.UUID]*flight{},
 		inflight: map[uuid.UUID]int{},
@@ -297,6 +303,7 @@ func (d *Dialer) Wake() { d.post(wakeMsg{}) }
 // window, so the never-tried contacts that were deferred to the old window's
 // opening are judged again.
 func (d *Dialer) Updated(before, after campaign.Campaign) {
+	d.touch(after.ID)
 	if before.Status == campaign.StatusRunning && windowKey(before) != windowKey(after) {
 		d.post(wakeMsg{rearmFor: after.ID})
 		return
@@ -305,7 +312,17 @@ func (d *Dialer) Updated(before, after campaign.Campaign) {
 }
 
 // Imported implements campaign.Observer: new contacts are due.
-func (d *Dialer) Imported(uuid.UUID) { d.post(wakeMsg{}) }
+func (d *Dialer) Imported(id uuid.UUID) {
+	d.touch(id)
+	d.post(wakeMsg{})
+}
+
+// touch tells the change hook that a campaign may have moved.
+func (d *Dialer) touch(id uuid.UUID) {
+	if d.onChange != nil {
+		d.onChange(id)
+	}
+}
 
 // Progress implements campaign.ProgressSource.
 func (d *Dialer) Progress(id uuid.UUID) (campaign.Progress, bool) {
@@ -378,6 +395,9 @@ func (d *Dialer) move(ctx context.Context, f func(context.Context) (campaign.Cam
 	if rerr := d.run(ctx, func(c context.Context) {
 		cam, err = f(c)
 		d.isDirty = true
+		if err == nil {
+			d.touch(cam.ID)
+		}
 	}); rerr != nil {
 		return campaign.Campaign{}, rerr
 	}

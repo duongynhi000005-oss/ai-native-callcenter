@@ -157,6 +157,18 @@ func run() error {
 	// the store tells it is forwarded once it exists. Events before then are
 	// not lost: the dialer reads the database when it starts.
 	var campaignDialer atomic.Pointer[dialer.Dialer]
+	// The reporter turns the dialer's "this campaign may have moved" into
+	// CAMPAIGN_UPDATED events; it reads campaigns through the service, which
+	// is built after the dialer it wraps.
+	var campaignService atomic.Pointer[campaign.Service]
+	campaignReporter := campaign.NewReporter(func(ctx context.Context, id uuid.UUID) (campaign.Campaign, error) {
+		svc := campaignService.Load()
+		if svc == nil {
+			return campaign.Campaign{}, errors.New("campaign service not ready")
+		}
+		return svc.Get(ctx, id)
+	}, announceCampaign(ctx, hub), nil, slog.Default())
+	defer campaignReporter.Close()
 	st.OnAttemptFinished = func(f campaign.Finished) {
 		if d := campaignDialer.Load(); d != nil {
 			d.AttemptFinished(f)
@@ -345,6 +357,7 @@ func run() error {
 			},
 			Reconciled: outboundSvc.Reconciled(),
 			Log:        slog.Default(),
+			OnChange:   campaignReporter.Touch,
 		})
 		outboundSvc.SetAnswerObserver(dlr.Answered)
 		botSlots.SetOnFree(dlr.SlotFreed)
@@ -440,6 +453,13 @@ func run() error {
 			"sipPort", cfg.BotSIPPort, "maxCalls", cfg.BotMaxCalls)
 	}
 
+	campaignSvc := campaign.NewService(st.Campaigns(), campaignController, campaign.Env{
+		OutboundHours:      cfg.OutboundHours,
+		AnswerWindow:       config.OutboundAnswerWindow,
+		DefaultCountryCode: cfg.DefaultCountryCode,
+	}).WithDialer(campaignProgress, campaignObserver)
+	campaignService.Store(campaignSvc)
+
 	var spa http.Handler
 	if dist, err := web.Dist(); err == nil {
 		spa = httpapi.SPAHandler(dist)
@@ -460,11 +480,7 @@ func run() error {
 			catalogSvc,
 			st.Contacts(),
 			st.DNC(),
-			campaign.NewService(st.Campaigns(), campaignController, campaign.Env{
-				OutboundHours:      cfg.OutboundHours,
-				AnswerWindow:       config.OutboundAnswerWindow,
-				DefaultCountryCode: cfg.DefaultCountryCode,
-			}).WithDialer(campaignProgress, campaignObserver),
+			campaignSvc,
 			st.Ledger(),
 			st.Flows(),
 			st.Accounts(),

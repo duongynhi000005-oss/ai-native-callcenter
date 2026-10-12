@@ -256,6 +256,9 @@ func (o *Orchestrator) onCallStarted(dialog *voice.Dialog) {
 	ledgerID, _ := uuid.Parse(dialog.CustomHeaders[headerCallID])
 	o.calls[dialog.CallID] = &activeCall{cancel: cancel, callID: ledgerID}
 	o.mu.Unlock()
+	// Stage 1 of an AI outbound call's time to the first word; a no-op for any
+	// call the application did not place.
+	obs.OutboundInvited(ledgerID, dialog.InviteAt)
 	obs.CallStarted(obs.CallKindBot)
 
 	go func() {
@@ -274,6 +277,7 @@ func (o *Orchestrator) onCallEnded(dialog *voice.Dialog) {
 	o.mu.Unlock()
 	if call != nil {
 		call.cancel()
+		obs.OutboundForget(call.callID)
 	}
 
 	obs.CallEnded(obs.CallKindBot)
@@ -394,6 +398,7 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		return err
 	}
 	actions.session = session
+	session.ledgerCallID = ledgerCallID
 
 	o.mu.Lock()
 	if call := o.calls[dialog.CallID]; call != nil {
@@ -404,6 +409,7 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	if err := session.Start(ctx); err != nil {
 		return err
 	}
+	obs.OutboundSessionReady(ledgerCallID, time.Now())
 	log.Info("ai conversation started", "flowId", spec.ID,
 		"provider", profile.Name, "language", language)
 	// Only now. Everything before this point could still have ended with the

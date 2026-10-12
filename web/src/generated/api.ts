@@ -2554,6 +2554,11 @@ export interface components {
             legs: components["schemas"]["Leg"][];
             /** @description The after-call work filed for this call: the requesting agent's own on GET /cdrs/mine, the primary agent's (else the latest) elsewhere. Absent when nobody filed one. */
             wrapUp?: components["schemas"]["WrapUp"];
+            /**
+             * Format: uuid
+             * @description The campaign this call was placed for. Absent for every other call. Set when the call's record is written (and again when a fuller record replaces it), from the campaign attempt that carries the call's id.
+             */
+            campaignId?: string;
         };
         /** @description One agent's after-call work for one call. The platform opens it when the call ends — a default disposition, an empty note — and the agent confirms it; isConfirmed is what separates a record somebody looked at from one nobody has. The label is captured at filing time so the record survives later edits to the vocabulary. */
         WrapUp: {
@@ -2815,10 +2820,10 @@ export interface components {
             trunks?: components["schemas"]["Trunk"][];
         };
         /**
-         * @description Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
+         * @description Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, CAMPAIGN_* describe an outbound campaign (supervision only). SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
          * @enum {string}
          */
-        SseEventType: "PARTY_DIALING" | "PARTY_RINGING" | "PARTY_ESTABLISHED" | "PARTY_HELD" | "PARTY_RETRIEVED" | "PARTY_RELEASED" | "PARTY_CHANGED" | "PARTY_DTMF" | "CALL_USER_DATA" | "CALL_RECORDING_STARTED" | "CALL_RECORDING_STOPPED" | "CALL_CDR" | "CALL_TRANSCRIPT" | "CALL_TRANSCRIPTION_STATE" | "QUEUE_JOINED" | "QUEUE_LEFT" | "QUEUE_COUNT" | "QUEUE_AGENT_OFFERED" | "AGENT_LOGGED_IN" | "AGENT_LOGGED_OUT" | "AGENT_READY" | "AGENT_NOT_READY" | "AGENT_AVAILABILITY" | "DEVICE_REGISTERED" | "DEVICE_UNREGISTERED" | "DEVICE_REACHABLE" | "DEVICE_UNREACHABLE" | "BOT_SESSION_STARTED" | "CALLBACK_CREATED" | "CALLBACK_UPDATED" | "SYSTEM_LINK" | "SYSTEM_RESET";
+        SseEventType: "PARTY_DIALING" | "PARTY_RINGING" | "PARTY_ESTABLISHED" | "PARTY_HELD" | "PARTY_RETRIEVED" | "PARTY_RELEASED" | "PARTY_CHANGED" | "PARTY_DTMF" | "CALL_USER_DATA" | "CALL_RECORDING_STARTED" | "CALL_RECORDING_STOPPED" | "CALL_CDR" | "CALL_TRANSCRIPT" | "CALL_TRANSCRIPTION_STATE" | "QUEUE_JOINED" | "QUEUE_LEFT" | "QUEUE_COUNT" | "QUEUE_AGENT_OFFERED" | "AGENT_LOGGED_IN" | "AGENT_LOGGED_OUT" | "AGENT_READY" | "AGENT_NOT_READY" | "AGENT_AVAILABILITY" | "DEVICE_REGISTERED" | "DEVICE_UNREGISTERED" | "DEVICE_REACHABLE" | "DEVICE_UNREACHABLE" | "BOT_SESSION_STARTED" | "CALLBACK_CREATED" | "CALLBACK_UPDATED" | "CAMPAIGN_UPDATED" | "SYSTEM_LINK" | "SYSTEM_RESET";
         /** @description One envelope on the event stream. Call events repeat enough context (callType, userData) for a screen-pop without further requests. In SSE framing the envelope is the data: line, the event: line carries type, and the id: line carries seq. */
         SseEvent: {
             version: number;
@@ -2868,6 +2873,22 @@ export interface components {
         /** @description Payload of CALLBACK_CREATED and CALLBACK_UPDATED. */
         SseCallbackEventPayload: {
             callback: components["schemas"]["Callback"];
+        };
+        /** @description Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published only when something in it changed, at most once per second per campaign (the latest state wins; a final status is never dropped). Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields. */
+        SseCampaignUpdatedPayload: {
+            /** Format: uuid */
+            campaignId: string;
+            status: components["schemas"]["CampaignStatus"];
+            pauseReason?: components["schemas"]["CampaignPauseReason"];
+            activity?: components["schemas"]["CampaignActivity"];
+            /**
+             * Format: date-time
+             * @description As on Campaign: absent unless RUNNING and a future dial time is known.
+             */
+            nextDialAt?: string;
+            /** @description Calls ringing or talking right now. Absent unless RUNNING. */
+            inFlight?: number;
+            contacts: components["schemas"]["CampaignContactCounts"];
         };
         /** @description Payload of BOT_SESSION_STARTED: the conversation is running, which is not the same as the bot's leg being up. The leg answers first and the model session is opened afterwards, and it can fail — the caller is then rescued to a queue. Until this arrives, a caller on an answered bot leg may be talking to nothing. */
         SseBotSessionStartedPayload: {
@@ -3076,6 +3097,8 @@ export interface components {
             status?: string[];
             /** @description Calls the bot handled without ever reaching a person. */
             isContained?: boolean[];
+            /** @description Calls placed for one of these campaigns. A call that belongs to no campaign matches no campaign filter. */
+            campaignId?: string[];
         };
         /** @description Create or update a subscription. authToken is write-only: send it to set or replace it, omit it to leave it as it is, send an empty string to clear it. */
         WebhookSubscriptionWrite: {
@@ -5343,6 +5366,8 @@ export interface operations {
                 /** @description RFC 3339 window end. */
                 to?: string;
                 queueId?: string;
+                /** @description Only calls placed for this campaign. */
+                campaignId?: string;
                 agentId?: string;
                 limit?: number;
                 offset?: number;

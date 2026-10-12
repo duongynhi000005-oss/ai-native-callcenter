@@ -99,3 +99,8 @@ SELECT outcome FROM campaign_attempts
 WHERE campaign_id = $1 AND state = 'FINISHED'
 ORDER BY finished_at DESC, id DESC
 LIMIT sqlc.arg('row_limit');
+
+-- The campaign a call was placed for, within the CDR's transaction, so the
+-- webhook filter and the delivered payload agree with the row just written.
+-- name: CampaignOfCall :one
+SELECT campaign_id FROM campaign_attempts WHERE call_id = $1;

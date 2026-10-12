@@ -4,7 +4,10 @@ package obs
 
 import (
 	"context"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -172,6 +175,14 @@ func init() {
 	dialerBlocked, _ = meter.Int64Counter("aicc_dialer_admission_blocked_total",
 		metric.WithDescription("Times the dialer had a contact to dial and did not, by "+
 			"reason: CAMPAIGN_CONCURRENCY, OUTBOUND_RINGING or BOT_CAPACITY."))
+	outboundFirstAudio, _ = meter.Float64Histogram("aicc_outbound_first_audio_seconds",
+		metric.WithDescription("Time to the first word of an AI outbound call, by stage "+
+			"(design 10 section 13.1): ANSWER_TO_INVITE is the customer leg answering to the "+
+			"bridge INVITE reaching the SIP server, INVITE_TO_SESSION_READY the INVITE to the "+
+			"provider session being ready, SESSION_READY_TO_FIRST_AUDIO that to the first "+
+			"bot audio frame queued. Each stage is recorded once per call."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10))
 	transcribeFramesSent, _ = meter.Int64Counter("aicc_transcribe_frames_sent_total",
 		metric.WithDescription("Audio frames handed to a recognition session, by speaker."))
 	transcribeFramesDropped, _ = meter.Int64Counter("aicc_transcribe_frames_dropped_total",
@@ -484,4 +495,108 @@ func RecordCampaignUnmappedCause(cause string) {
 	}
 	campaignUnmappedCause.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("cause", string(label))))
+}
+
+// The stages of the time to the first word of an AI outbound call, the label
+// values of aicc_outbound_first_audio_seconds.
+const (
+	OutboundStageAnswerToInvite    = "ANSWER_TO_INVITE"
+	OutboundStageInviteToReady     = "INVITE_TO_SESSION_READY"
+	OutboundStageReadyToFirstAudio = "SESSION_READY_TO_FIRST_AUDIO"
+	outboundStageTrackedCalls      = 4096
+	outboundStageStaleAfter        = 5 * time.Minute
+	outboundStageSweepThreshold    = 256
+)
+
+var outboundFirstAudio metric.Float64Histogram
+
+// outboundStages remembers, per AI outbound call, how far toward the first
+// word it has got. Only calls the application placed are entered (at the
+// answer), so every other bot call costs a map miss once per stage and never
+// a frame: the first-audio hook runs once per call, not per frame.
+var outboundStages = struct {
+	sync.Mutex
+	calls map[uuid.UUID]*outboundStage
+}{calls: map[uuid.UUID]*outboundStage{}}
+
+type outboundStage struct {
+	answeredAt time.Time
+	invitedAt  time.Time
+	readyAt    time.Time
+}
+
+// OutboundAnswered starts the clock: the customer leg of an AI outbound call
+// answered and is being bridged to the bot.
+func OutboundAnswered(callID uuid.UUID, at time.Time) {
+	outboundStages.Lock()
+	defer outboundStages.Unlock()
+	if len(outboundStages.calls) >= outboundStageSweepThreshold {
+		for id, st := range outboundStages.calls {
+			if at.Sub(st.answeredAt) > outboundStageStaleAfter {
+				delete(outboundStages.calls, id)
+			}
+		}
+	}
+	if len(outboundStages.calls) >= outboundStageTrackedCalls {
+		return
+	}
+	outboundStages.calls[callID] = &outboundStage{answeredAt: at}
+}
+
+// OutboundInvited records the bridge INVITE reaching the SIP server (stage 1).
+// Calls that were not entered at the answer are ignored.
+func OutboundInvited(callID uuid.UUID, at time.Time) {
+	outboundStages.Lock()
+	defer outboundStages.Unlock()
+	st := outboundStages.calls[callID]
+	if st == nil || !st.invitedAt.IsZero() {
+		return
+	}
+	st.invitedAt = at
+	recordOutboundStage(OutboundStageAnswerToInvite, at.Sub(st.answeredAt))
+}
+
+// OutboundSessionReady records the provider session being ready (stage 2).
+func OutboundSessionReady(callID uuid.UUID, at time.Time) {
+	outboundStages.Lock()
+	defer outboundStages.Unlock()
+	st := outboundStages.calls[callID]
+	if st == nil || st.invitedAt.IsZero() || !st.readyAt.IsZero() {
+		return
+	}
+	st.readyAt = at
+	recordOutboundStage(OutboundStageInviteToReady, at.Sub(st.invitedAt))
+}
+
+// OutboundFirstAudio records the first bot audio frame (stage 3) and ends the
+// call's tracking. A provider may speak before its session start returns; then
+// the session counts as ready at that frame and stage 3 is zero.
+func OutboundFirstAudio(callID uuid.UUID, at time.Time) {
+	outboundStages.Lock()
+	defer outboundStages.Unlock()
+	st := outboundStages.calls[callID]
+	if st == nil || st.invitedAt.IsZero() {
+		return
+	}
+	if st.readyAt.IsZero() {
+		st.readyAt = at
+		recordOutboundStage(OutboundStageInviteToReady, at.Sub(st.invitedAt))
+	}
+	recordOutboundStage(OutboundStageReadyToFirstAudio, at.Sub(st.readyAt))
+	delete(outboundStages.calls, callID)
+}
+
+// OutboundForget drops a call that ended before its first word.
+func OutboundForget(callID uuid.UUID) {
+	outboundStages.Lock()
+	delete(outboundStages.calls, callID)
+	outboundStages.Unlock()
+}
+
+func recordOutboundStage(stage string, d time.Duration) {
+	if outboundFirstAudio == nil {
+		return
+	}
+	outboundFirstAudio.Record(context.Background(), max(d, 0).Seconds(),
+		metric.WithAttributes(attribute.String("stage", stage)))
 }

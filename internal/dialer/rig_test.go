@@ -234,6 +234,8 @@ type opts struct {
 	held bool
 	// start is the fake clock's first reading; default Monday 2026-06-01 10:00 New York.
 	start time.Time
+	// onChange receives the dialer's change hints.
+	onChange func(uuid.UUID)
 }
 
 type rig struct {
@@ -320,7 +322,7 @@ func newRig(t *testing.T, o opts) *rig {
 	if o.frequency == 0 {
 		r.cfg.Frequency = 24 * time.Hour
 	}
-	r.dep = Deps{Store: st.Dialer(), Placer: r.placer, IsLive: r.placer.isLive, Clock: clock, Log: slog.New(slog.DiscardHandler)}
+	r.dep = Deps{Store: st.Dialer(), Placer: r.placer, IsLive: r.placer.isLive, Clock: clock, Log: slog.New(slog.DiscardHandler), OnChange: o.onChange}
 	if o.slots != nil {
 		r.dep.Slots = o.slots
 	}

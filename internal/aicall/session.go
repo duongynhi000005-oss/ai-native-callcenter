@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rasonyang/ai-native-callcenter/internal/media"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
@@ -159,6 +161,9 @@ type Session struct {
 	log   *slog.Logger
 	// providerName labels latency measurements.
 	providerName string
+	// ledgerCallID is the call's ledger identity, set before Start; it keys
+	// the stages of an AI outbound call's time to the first word.
+	ledgerCallID uuid.UUID
 
 	cfg      Config
 	uplink   *media.Converter
@@ -420,6 +425,7 @@ func (s *Session) watchFirstMedia(ctx context.Context, gate chan struct{}) {
 // queueFrame under mu, once per call; every later frame costs one bool test.
 func (s *Session) recordFirstAudio() {
 	s.isFirstAudioRecorded = true
+	obs.OutboundFirstAudio(s.ledgerCallID, time.Now())
 	answered := s.leg.AnsweredAt()
 	if answered.IsZero() {
 		return

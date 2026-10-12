@@ -40,6 +40,7 @@ type WebhookFilter struct {
 	QueueID     []uuid.UUID `json:"queueId,omitempty"`
 	Status      []string    `json:"status,omitempty"`
 	IsContained []bool      `json:"isContained,omitempty"`
+	CampaignID  []uuid.UUID `json:"campaignId,omitempty"`
 }
 
 // webhookFilterKeys is that closed list, spelled as it travels on the wire.
@@ -48,7 +49,7 @@ type WebhookFilter struct {
 // docs/openapi.json, which declares `additionalProperties: false`; the
 // contract states the closed list and this is what enforces it at runtime.
 // TestTheFilterKeysAreTheOnesTheContractDeclares joins the two.
-var webhookFilterKeys = []string{"callType", "did", "queueId", "status", "isContained"}
+var webhookFilterKeys = []string{"callType", "did", "queueId", "status", "isContained", "campaignId"}
 
 // WebhookFilterKeys returns the keys a filter may carry.
 func WebhookFilterKeys() []string { return slices.Clone(webhookFilterKeys) }
@@ -82,6 +83,12 @@ func (f WebhookFilter) Matches(cdr CDR) bool {
 	}
 	if len(f.IsContained) > 0 && !slices.Contains(f.IsContained, cdr.IsContained) {
 		return false
+	}
+	// A call placed for no campaign matches no campaign filter, as with queues.
+	if len(f.CampaignID) > 0 {
+		if cdr.CampaignID == nil || !slices.Contains(f.CampaignID, *cdr.CampaignID) {
+			return false
+		}
 	}
 	if len(f.QueueID) > 0 {
 		// A call that never reached a queue matches no queue filter. Said

@@ -14,6 +14,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/agents"
 	"github.com/rasonyang/ai-native-callcenter/internal/aicall"
 	"github.com/rasonyang/ai-native-callcenter/internal/auth"
+	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
@@ -607,4 +608,39 @@ func announceCallback(ctx context.Context, pub callbackPublisher) func(store.Cal
 			Payload: map[string]any{"callback": callback},
 		}, events.Scope{IsBroadcast: true})
 	}
+}
+
+// announceCampaign tells the live event stream how a campaign stands.
+//
+// Supervision only: the zero Scope reaches the subjects that see every call
+// (calls:read:all) and nobody else, so an agent's stream never carries it. It
+// is called by campaign.Reporter, which publishes only when something moved
+// and at most once a second per campaign.
+func announceCampaign(ctx context.Context, pub callbackPublisher) func(campaign.Snapshot) {
+	return func(s campaign.Snapshot) {
+		pub.Publish(ctx, events.Event{
+			Type:    events.TypeCampaignUpdated,
+			Payload: campaignUpdatedPayload(s),
+		}, events.Scope{})
+	}
+}
+
+// campaignUpdatedPayload is SseCampaignUpdatedPayload.
+func campaignUpdatedPayload(s campaign.Snapshot) map[string]any {
+	p := map[string]any{
+		"campaignId": s.CampaignID,
+		"status":     s.Status,
+		"contacts":   s.Contacts,
+	}
+	if s.PauseReason != "" {
+		p["pauseReason"] = s.PauseReason
+	}
+	if s.Activity != "" {
+		p["activity"] = s.Activity
+		p["inFlight"] = s.InFlight
+	}
+	if s.NextDialAt != nil {
+		p["nextDialAt"] = s.NextDialAt
+	}
+	return p
 }

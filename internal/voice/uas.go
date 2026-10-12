@@ -111,6 +111,9 @@ type Dialog struct {
 	// OnCallStarted runs, and read-only after.
 	AnsweredAt time.Time
 
+	// InviteAt is when the INVITE that opened the dialog was received.
+	InviteAt time.Time
+
 	// Stopped closes when the dialog ends, whichever side ended it.
 	Stopped chan struct{}
 
@@ -524,6 +527,7 @@ func (u *UAS) send(data []byte, addr *net.UDPAddr) {
 }
 
 func (u *UAS) handleInvite(msg *sipMessage, addr *net.UDPAddr) {
+	receivedAt := time.Now()
 	callID := msg.callID()
 
 	u.mu.Lock()
@@ -615,6 +619,7 @@ func (u *UAS) handleInvite(msg *sipMessage, addr *net.UDPAddr) {
 		LocalIP:       localIP,
 		LocalSIPPort:  u.localPort,
 		RTP:           u.newRTPSession(localRTPPort, law, dtmfPayloadType),
+		InviteAt:      receivedAt,
 		Stopped:       make(chan struct{}),
 		rtcpInterval:  u.cfg.RTCPInterval,
 		log:           u.log,

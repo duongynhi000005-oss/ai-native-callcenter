@@ -61,7 +61,7 @@ export function connectEvents(handlers: {
     'AGENT_AVAILABILITY', 'DEVICE_REGISTERED', 'DEVICE_UNREGISTERED',
     'DEVICE_REACHABLE', 'DEVICE_UNREACHABLE', 'BOT_SESSION_STARTED',
     'CALLBACK_CREATED',
-    'CALLBACK_UPDATED', 'SYSTEM_LINK', 'SYSTEM_RESET',
+    'CALLBACK_UPDATED', 'CAMPAIGN_UPDATED', 'SYSTEM_LINK', 'SYSTEM_RESET',
   ]
   for (const type of types) source.addEventListener(type, dispatch)
 

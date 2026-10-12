@@ -213,7 +213,7 @@ are the CDR's own, which are far richer than the SSE envelope's.
 ```
 
 A key present means the CDR's field must be in the list; keys are ANDed; an absent key does
-not constrain. Filterable, first cut: `callType`, `did`, `queueId`, `status`, `isContained` —
+not constrain. Filterable, first cut: `callType`, `did`, `queueId`, `status`, `isContained`, and since campaigns `campaignId` (a call placed for none matches no campaign filter) —
 all real columns on `store.CDR` (`ledgerstore.go:31-63`).
 
 > Note against the previous draft, which listed `did` as filterable on the SSE envelope: it is

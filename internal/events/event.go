@@ -88,6 +88,11 @@ const (
 	TypeCallbackUpdated   Type = "CALLBACK_UPDATED"
 )
 
+// Campaign scope: an outbound campaign's progress, for supervision.
+const (
+	TypeCampaignUpdated Type = "CAMPAIGN_UPDATED"
+)
+
 // System events describe the server itself.
 const (
 	TypeSystemLink  Type = "SYSTEM_LINK"

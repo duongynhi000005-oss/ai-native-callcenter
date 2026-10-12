@@ -788,6 +788,8 @@ func (s *Service) SetAnswerObserver(f func(callID uuid.UUID)) { s.onAnswered = f
 // Placing a call and adopting one that outlived a restart arm the same thing.
 func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string, ref campaignRef) func() {
 	return func() {
+		// The first stage of the time to the first word starts here.
+		obs.OutboundAnswered(callID, time.Now())
 		if s.onAnswered != nil {
 			s.onAnswered(callID)
 		}

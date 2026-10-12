@@ -3630,6 +3630,15 @@
             }
           },
           {
+            "name": "campaignId",
+            "in": "query",
+            "description": "Only calls placed for this campaign.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "agentId",
             "in": "query",
             "schema": {
@@ -8945,6 +8954,11 @@
           "wrapUp": {
             "$ref": "#/components/schemas/WrapUp",
             "description": "The after-call work filed for this call: the requesting agent's own on GET /cdrs/mine, the primary agent's (else the latest) elsewhere. Absent when nobody filed one."
+          },
+          "campaignId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The campaign this call was placed for. Absent for every other call. Set when the call's record is written (and again when a fuller record replaces it), from the campaign attempt that carries the call's id."
           }
         },
         "required": [
@@ -9737,7 +9751,7 @@
       },
       "SseEventType": {
         "type": "string",
-        "description": "Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.",
+        "description": "Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, CAMPAIGN_* describe an outbound campaign (supervision only). SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.",
         "enum": [
           "PARTY_DIALING",
           "PARTY_RINGING",
@@ -9769,6 +9783,7 @@
           "BOT_SESSION_STARTED",
           "CALLBACK_CREATED",
           "CALLBACK_UPDATED",
+          "CAMPAIGN_UPDATED",
           "SYSTEM_LINK",
           "SYSTEM_RESET"
         ]
@@ -9883,6 +9898,43 @@
         },
         "required": [
           "callback"
+        ]
+      },
+      "SseCampaignUpdatedPayload": {
+        "type": "object",
+        "description": "Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published only when something in it changed, at most once per second per campaign (the latest state wins; a final status is never dropped). Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields.",
+        "properties": {
+          "campaignId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CampaignStatus"
+          },
+          "pauseReason": {
+            "$ref": "#/components/schemas/CampaignPauseReason"
+          },
+          "activity": {
+            "$ref": "#/components/schemas/CampaignActivity"
+          },
+          "nextDialAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "As on Campaign: absent unless RUNNING and a future dial time is known."
+          },
+          "inFlight": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls ringing or talking right now. Absent unless RUNNING."
+          },
+          "contacts": {
+            "$ref": "#/components/schemas/CampaignContactCounts"
+          }
+        },
+        "required": [
+          "campaignId",
+          "status",
+          "contacts"
         ]
       },
       "SseBotSessionStartedPayload": {
@@ -10397,6 +10449,14 @@
               "type": "boolean"
             },
             "description": "Calls the bot handled without ever reaching a person."
+          },
+          "campaignId": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Calls placed for one of these campaigns. A call that belongs to no campaign matches no campaign filter."
           }
         },
         "additionalProperties": false
