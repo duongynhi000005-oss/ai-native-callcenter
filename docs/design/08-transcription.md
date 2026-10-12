@@ -2895,12 +2895,28 @@ POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/mul
 - The OpenAI-compatible endpoint rejects the model (400) and the WebSocket run-task endpoint
   never sends `task-finished`, so neither is used. `-filetrans` (async, needs a URL the vendor
   can reach) is not used either: chunking keeps the audio inside this process.
-- The response parser accepts `output.text` and `output.sentence` or `output.sentences`
-  (`text`, `begin_time`, `end_time` in ms). **Still unsettled:** no request has returned
-  speech yet (see below), so the exact sentence shape of a successful, non-diarized response
-  is unconfirmed. The parser stays tolerant (a single object, a list, or text alone) and
-  falls back to one segment spanning the clip. When the first real speech clip succeeds,
-  compare the stored segments with the raw response and tighten the parser and its test.
+- **Response shape `[MEASURED 2026-10-12]`.** HTTP 200, one clip with speech:
+
+  ```
+  {"sentence": {...}, "text": "...", "request_id": "...",
+   "output": {"sentence": {...}, "text": "...", "request_id": "..."},
+   "usage": {"duration": 6, "input_tokens": 430, "output_tokens": 15, "total_tokens": 445}}
+  ```
+
+  `sentence` is **one object**, not a list: `{"sentence_id": 3, "begin_time": 2760,
+  "end_time": 6280, "text": "...", "channel_id": 0, "speaker_id": null, "sentence_end": true,
+  "words": [{"begin_time", "end_time", "text", "punctuation", "fixed", "speaker_id"}, ...]}`.
+  Times are milliseconds from the start of the clip. `text` is the clip's text and equals the
+  sentence's. The top level and `output` carry identical copies; the parser reads `output`.
+  Text can carry stray spaces and a trailing full stop `。` on English. The response names no
+  language, so stored segments have none. The parser takes `output.sentence` (an object) or
+  `output.sentences` (a list of the same objects, which the vendor documents for diarization;
+  not observed). Any other shape is a permanent error rather than silently dropped words.
+  Only one sentence per clip has been observed, so if the sentences do not add up to `text`
+  the text wins and becomes one segment spanning them.
+- `AICC_TRANSCRIBE_WIRE` (diagnosis only, shared with the streaming client) also writes each
+  batch response, status line then body, to `batch-<time>.log`. Responses carry no audio and
+  no key.
 
 **Probe 2026-10-12 (the first real run failed on both calls with 3 requests; then 4 probe requests and a 3-request re-run).** A clip with
 nothing the model recognises as speech is answered `HTTP 400`,
@@ -2919,11 +2935,22 @@ Evidence, all from the two dev recordings used for the run:
 
 The clips we encode are valid (afinfo: mono, 8000 Hz, Int16, the expected length; header
 `RIFF/WAVE/fmt /data`, 44 bytes), and neither the sample-rate parameter nor a 16 kHz file
-changed the answer. A recording with real speech (a dev call whose live transcript has
-`BOT` and `CUSTOMER` lines shows speech as bursts with pauses, unlike these two) was **not**
-sent, because the probe budget was limited to these two recordings. So "the encoding is
-right" rests on the clips being valid and on the issue's earlier HTTP 200 measurements, not
-on a speech control in this run. The first run over a call with spoken audio settles it.
+changed the answer. A speech control then settled it: call `01a0bd18-...` (en, 29.8 s, bot greeting and a caller
+line, 2 requests, one per channel) returned HTTP 200 for both clips through the same encoder,
+at 8 kHz with `sample_rate` "8000". The encoding is right; the first two recordings had no
+speech.
+
+| Channel | Segment (offset-end ms, stored text) | Live transcript (`transcripts`, MODEL) |
+|---|---|---|
+| FAR_END | 2760-6280 "Thanks for calling Novanet. How can I help you today? 。" | BOT, offset 3737: "Thanks for calling NovaNet, how can I help you today?" (the flow's greeting) |
+| CUSTOMER | 7040-11120 "I don't like to ask about the internet service." | CUSTOMER, offset 16844: "I'd like to activate the internet service." |
+
+The bot line matches the flow's greeting but for punctuation and the brand's capitals. The
+caller line is misheard by the batch model on 8 kHz telephone audio ("I don't like to ask
+about" for "I'd like to activate"); it is one call and says nothing about accuracy in
+general. The two sets of offsets differ in kind: the batch ones are positions in the
+recording (the bot started speaking about 2.8 s in), the live ones are when each line was
+recorded in the transcript, after the speech and the model had finished.
 
 Hold music and line noise are therefore billed (they are audio minutes sent) and return
 nothing. The silence filter only drops digital silence; it cannot tell music from speech.

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -187,18 +189,36 @@ func (c *DashScopeBatch) Recognize(ctx context.Context, req BatchRequest) (Batch
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("batch recognition: reading the response: %w", err)
 	}
+	logBatchResponse(resp.StatusCode, raw)
 	return parseBatchResponse(resp.StatusCode, raw)
 }
 
-// batchWireResponse is the part of the response this client reads. The sentences key
-// is `sentence` on a plain request and `sentences` with diarization, so both
-// are accepted; times are milliseconds.
+// logBatchResponse writes a response to AICC_TRANSCRIBE_WIRE, the diagnosis
+// directory the streaming client also honours: one file per response, status
+// line then body. Responses carry no audio and no credential. Empty writes
+// nothing.
+func logBatchResponse(status int, raw []byte) {
+	dir := os.Getenv("AICC_TRANSCRIBE_WIRE")
+	if dir == "" {
+		return
+	}
+	name := filepath.Join(dir, fmt.Sprintf("batch-%d.log", time.Now().UnixNano()))
+	_ = os.WriteFile(name, append([]byte(fmt.Sprintf("HTTP %d\n", status)), raw...), 0o600)
+}
+
+// batchWireResponse is the part of a successful response this client reads.
+//
+// Measured 2026-10-12 (design 08 section 18.1): the body carries `text` and
+// `sentence` at the top level and the same two again under `output`; this
+// reads `output`, the documented place. `sentence` is ONE object, not a list,
+// with times in milliseconds from the start of the clip and a `words` array
+// that is ignored. With diarization the vendor documents `sentences`, a list
+// of the same objects. The response names no language.
 type batchWireResponse struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Output  struct {
 		Text      string          `json:"text"`
-		Language  string          `json:"language"`
 		Sentence  json.RawMessage `json:"sentence"`
 		Sentences json.RawMessage `json:"sentences"`
 	} `json:"output"`
@@ -208,7 +228,6 @@ type batchWireSentence struct {
 	Text      string   `json:"text"`
 	BeginTime *float64 `json:"begin_time"`
 	EndTime   *float64 `json:"end_time"`
-	Language  string   `json:"language"`
 }
 
 func parseBatchResponse(status int, raw []byte) (BatchResult, error) {
@@ -232,36 +251,49 @@ func parseBatchResponse(status int, raw []byte) (BatchResult, error) {
 		return BatchResult{}, be
 	}
 
-	out := BatchResult{Text: strings.TrimSpace(r.Output.Text), Language: r.Output.Language}
-	for _, rawList := range []json.RawMessage{r.Output.Sentences, r.Output.Sentence} {
-		if len(out.Sentences) > 0 || len(rawList) == 0 {
+	out := BatchResult{Text: strings.TrimSpace(r.Output.Text)}
+	var list []batchWireSentence
+	switch {
+	case isPresent(r.Output.Sentences):
+		if err := json.Unmarshal(r.Output.Sentences, &list); err != nil {
+			return BatchResult{}, &BatchError{Status: status, Message: "unexpected sentences shape: " + err.Error()}
+		}
+	case isPresent(r.Output.Sentence):
+		var one batchWireSentence
+		if err := json.Unmarshal(r.Output.Sentence, &one); err != nil {
+			return BatchResult{}, &BatchError{Status: status, Message: "unexpected sentence shape: " + err.Error()}
+		}
+		list = []batchWireSentence{one}
+	}
+	var joined []string
+	for _, s := range list {
+		text := strings.TrimSpace(s.Text)
+		if text == "" {
 			continue
 		}
-		var list []batchWireSentence
-		if err := json.Unmarshal(rawList, &list); err != nil {
-			var one batchWireSentence
-			if json.Unmarshal(rawList, &one) != nil {
-				continue
-			}
-			list = []batchWireSentence{one}
+		bs := BatchSentence{Text: text}
+		if s.BeginTime != nil {
+			bs.StartMs = int(*s.BeginTime)
 		}
-		for _, s := range list {
-			text := strings.TrimSpace(s.Text)
-			if text == "" {
-				continue
-			}
-			bs := BatchSentence{Text: text}
-			if s.BeginTime != nil {
-				bs.StartMs = int(*s.BeginTime)
-			}
-			if s.EndTime != nil {
-				bs.EndMs = int(*s.EndTime)
-			}
-			if out.Language == "" {
-				out.Language = s.Language
-			}
-			out.Sentences = append(out.Sentences, bs)
+		if s.EndTime != nil {
+			bs.EndMs = int(*s.EndTime)
 		}
+		out.Sentences = append(out.Sentences, bs)
+		joined = append(joined, text)
+	}
+
+	// Never lose words. Only one sentence per clip has been observed, so
+	// whether a clip of several comes back as a list or as its last sentence
+	// alone is unknown; if the sentences do not add up to the text, the text
+	// wins and becomes one segment spanning what the sentences cover.
+	if len(out.Sentences) > 0 && strings.Join(strings.Fields(strings.Join(joined, " ")), " ") !=
+		strings.Join(strings.Fields(out.Text), " ") && out.Text != "" {
+		first, last := out.Sentences[0], out.Sentences[len(out.Sentences)-1]
+		out.Sentences = []BatchSentence{{Text: out.Text, StartMs: first.StartMs, EndMs: last.EndMs}}
 	}
 	return out, nil
+}
+
+func isPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }

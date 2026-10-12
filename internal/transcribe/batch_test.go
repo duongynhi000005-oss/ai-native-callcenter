@@ -22,7 +22,7 @@ func TestBatchRequestCarriesTheClipAsAWavDataURI(t *testing.T) {
 		auth = r.Header.Get("Authorization")
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &got)
-		_, _ = io.WriteString(w, `{"output":{"text":"hello there","sentence":[{"text":"hello there","begin_time":120,"end_time":900}]}}`)
+		_, _ = io.WriteString(w, `{"output":{"text":"hello there","sentence":{"sentence_id":1,"text":"hello there","begin_time":120,"end_time":900}}}`)
 	}))
 	defer srv.Close()
 
@@ -73,6 +73,26 @@ func TestBatchRequestCarriesTheClipAsAWavDataURI(t *testing.T) {
 	}
 }
 
+// realSpeechResponse is a response the vendor returned for a clip with speech,
+// captured 2026-10-12 (words trimmed to two). `text` and `sentence` appear at
+// the top level and again under `output`; `sentence` is one object.
+const realSpeechResponse = `{"sentence":{"sentence_id":3,"begin_time":2760,"end_time":6280,"text":" Thanks for calling Novanet. How can I help you today? 。","channel_id":0,"speaker_id":null,"sentence_end":true,"words":[{"begin_time":2760,"end_time":2960,"text":" Thanks","punctuation":"","fixed":true,"speaker_id":null}]},"text":" Thanks for calling Novanet. How can I help you today? 。","request_id":"57530004-4ca8-94d2-9b61-4d4f89484c13","output":{"sentence":{"sentence_id":3,"begin_time":2760,"end_time":6280,"text":" Thanks for calling Novanet. How can I help you today? 。","channel_id":0,"speaker_id":null,"sentence_end":true,"words":[{"begin_time":2760,"end_time":2960,"text":" Thanks","punctuation":"","fixed":true,"speaker_id":null}]},"text":" Thanks for calling Novanet. How can I help you today? 。","request_id":"57530004-4ca8-94d2-9b61-4d4f89484c13"},"usage":{"duration":6,"input_tokens":430,"output_tokens":15,"total_tokens":445}}`
+
+func TestTheRealResponseShape(t *testing.T) {
+	t.Parallel()
+	res, err := parseBatchResponse(200, []byte(realSpeechResponse))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Thanks for calling Novanet. How can I help you today? 。"
+	if res.Text != want || len(res.Sentences) != 1 || res.NoSpeech {
+		t.Fatalf("got %+v", res)
+	}
+	if s := res.Sentences[0]; s.Text != want || s.StartMs != 2760 || s.EndMs != 6280 {
+		t.Errorf("sentence = %+v, want %q at 2760-6280 ms", s, want)
+	}
+}
+
 func TestBatchResponseShapes(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
@@ -80,10 +100,10 @@ func TestBatchResponseShapes(t *testing.T) {
 		sentences int
 		text      string
 	}{
-		"plural key with diarization": {`{"output":{"text":"a b","sentences":[{"text":"a","begin_time":0,"end_time":10,"speaker_id":0},{"text":"b","begin_time":10,"end_time":20}]}}`, 2, "a b"},
-		"a single sentence object":    {`{"output":{"text":"a","sentence":{"text":"a","begin_time":5,"end_time":9}}}`, 1, "a"},
-		"text only":                   {`{"output":{"text":"just text"}}`, 0, "just text"},
-		"no speech":                   {`{"output":{"text":""}}`, 0, ""},
+		"the sentences list the vendor documents for diarization": {`{"output":{"text":"a b","sentences":[{"text":"a","begin_time":0,"end_time":10,"speaker_id":0},{"text":"b","begin_time":10,"end_time":20}]}}`, 2, "a b"},
+		"text only":     {`{"output":{"text":"just text"}}`, 0, "just text"},
+		"no speech":     {`{"output":{"text":""}}`, 0, ""},
+		"null sentence": {`{"output":{"text":"t","sentence":null}}`, 0, "t"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -95,6 +115,34 @@ func TestBatchResponseShapes(t *testing.T) {
 				t.Errorf("got %+v", res)
 			}
 		})
+	}
+}
+
+// If the sentences do not add up to the text, no words may be lost.
+func TestSentencesThatDoNotCoverTheTextGiveWayToTheText(t *testing.T) {
+	t.Parallel()
+	body := `{"output":{"text":"first thing. second thing.","sentence":{"text":"second thing.","begin_time":9000,"end_time":9900}}}`
+	res, err := parseBatchResponse(200, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sentences) != 1 || res.Sentences[0].Text != "first thing. second thing." ||
+		res.Sentences[0].StartMs != 9000 || res.Sentences[0].EndMs != 9900 {
+		t.Errorf("got %+v", res.Sentences)
+	}
+}
+
+func TestAShapeWeDoNotRecogniseIsAnErrorNotSilentLoss(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"output":{"text":"x","sentence":"just a string"}}`,
+		`{"output":{"text":"x","sentences":{"text":"not a list"}}}`,
+	} {
+		_, err := parseBatchResponse(200, []byte(body))
+		var be *BatchError
+		if !errors.As(err, &be) || be.Retryable {
+			t.Errorf("%s: err = %v, want a permanent BatchError", body, err)
+		}
 	}
 }
 
