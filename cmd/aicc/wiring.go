@@ -520,6 +520,7 @@ func botConfig(
 	announce func(store.Callback),
 	announceBot func(callID, flowID uuid.UUID),
 	callData aicall.CallDataSource,
+	leads aicall.LeadSink,
 	isGreetingGated bool,
 	greetingMediaWait time.Duration,
 	noInput time.Duration,
@@ -539,6 +540,8 @@ func botConfig(
 		// A call the bot finishes alone writes the only ledger row it will
 		// ever have, so the business data has to reach the bot too.
 		CallData: callData,
+		// record_lead on a campaign call writes the attempt's lead.
+		Leads: leads,
 		// Unset is false and zero, which is today's behaviour; the pair is
 		// the deployment's AICC_BOT_GREETING_MEDIA_WAIT.
 		IsGreetingGated:   isGreetingGated,

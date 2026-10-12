@@ -161,6 +161,7 @@ func runOnce(ctx context.Context, spec *flow.Spec, source BackendSource, cfg Mod
 	actions := newActions(sc)
 	engine := flow.NewEngine(spec, sc.Lang, flow.SeedSlots(sc.Caller, sc.Entry, sc.DID, sc.UserData), quiet)
 	runtime := flow.NewRuntime(engine, actions, backend, sc.Queues, quiet)
+	applyCampaign(runtime, sc)
 	m := &modelRun{cfg: cfg, sc: sc, engine: engine, runtime: runtime, actions: actions}
 	m.report = Report{Scenario: sc.Name, Path: []string{engine.NodeID()}}
 	m.system = runtime.Instructions()
@@ -169,6 +170,7 @@ func runOnce(ctx context.Context, spec *flow.Spec, source BackendSource, cfg Mod
 	err := m.play(ctx)
 	m.report.Ending = actions.ending()
 	m.report.Transfer = actions.transfer
+	m.report.Lead = actions.lead
 	if err != nil {
 		m.report.Failure = "model error: " + err.Error()
 		return m.report, err
@@ -303,7 +305,7 @@ func (m *modelRun) botTurn(ctx context.Context) error {
 		before := m.engine.NodeID()
 		m.runtime.BeginToolBatch()
 		for _, call := range resp.ToolCalls {
-			isAllowed := m.engine.IsToolAllowed(call.Name)
+			isAllowed := m.runtime.IsToolAllowed(call.Name)
 			output, _ := m.runtime.Dispatch(ctx, call.Name, call.Arguments)
 			m.log(fmt.Sprintf("TOOL %s(%s) -> %s", call.Name, call.Arguments, flow.TranscriptOutput(output)))
 			if isAllowed {
@@ -389,6 +391,9 @@ func judge(want ModelExpect, r Report, engine *flow.Engine) string {
 	}
 	if want.Ending != "" && want.Ending != r.Ending {
 		problems = append(problems, fmt.Sprintf("ended with %q, want %q", r.Ending, want.Ending))
+	}
+	if problem := leadProblem(want.Lead, r.Lead); problem != "" {
+		problems = append(problems, problem)
 	}
 	if t := want.Transfer; t != nil {
 		switch {

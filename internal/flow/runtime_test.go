@@ -21,6 +21,7 @@ type fakeActions struct {
 	transfers []TransferRequest
 	messages  []MessageRequest
 	hangups   []HangupRequest
+	leads     []LeadRequest
 	// refuseTransfer makes transfers come back refused, as a closed queue would.
 	refuseTransfer bool
 }
@@ -49,6 +50,13 @@ func (a *fakeActions) Hangup(_ context.Context, request HangupRequest) (Result, 
 	defer a.mu.Unlock()
 	a.hangups = append(a.hangups, request)
 	return Succeeded(nil, "Say goodbye now."), nil
+}
+
+func (a *fakeActions) RecordLead(_ context.Context, request LeadRequest) (Result, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.leads = append(a.leads, request)
+	return Succeeded(nil, ""), nil
 }
 
 func testRuntime(t *testing.T, actions *fakeActions, backendURL string) *Runtime {

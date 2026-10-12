@@ -407,7 +407,7 @@ is the password the seed gives the accounts and extensions it creates.
 | Customers | 18 numbers a SIP phone can register as: 13800000001–13800000009 and (212) 555-0101 – (212) 555-0109. Password `AICC_SEED_PASSWORD` (`aicc@123`), registrar `<FS_EXTERNAL_IP>:5060`, domain `<FS_EXTERNAL_IP>`. A number is unreachable until a phone registers as it |
 | History | Seven deterministic days of calls, queue events and presence, for the wallboard and reports |
 
-Six published bilingual flows, each on an English, a Chinese and a US number:
+Six published bilingual flows, each on an English, a Chinese and a US number (a seventh, for campaigns, is described below the table):
 
 | Flow | English | Chinese | US |
 |---|---|---|---|
@@ -419,6 +419,10 @@ Six published bilingual flows, each on an English, a Chinese and a US number:
 | StarCom lead qualification | 95051 | 95052 | 800-555-0195 |
 
 - 800-555-0199 is the main line and the caller ID for outbound calls.
+- A seventh flow, StarCom campaign lead follow-up, is for outbound campaigns
+  only: it has no way to a person, and it answers on 95061 (English) and 95062
+  (Chinese), which take no inbound calls. No campaign is seeded; create one on
+  95061 or 95062 and import contacts with `name`, `product` and `offer` slots.
 - The dialled number selects the flow and the language.
 - Five of the six flows call a business backend. Without
   `AICC_BOT_BACKEND_BASE` pointing at a running `cmd/aicc-mockbackend`, their

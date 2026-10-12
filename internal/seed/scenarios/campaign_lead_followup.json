@@ -1,0 +1,245 @@
+{
+  "scenarios": [
+    {
+      "name": "a customer who wants the offer is a HIGH lead",
+      "description": "record_lead is callable in the one working phase although no allowlist names it, does not move the phase, and the call ends through hangup.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "userData": {"name": "Mia Chen", "product": "Nova X phone", "offer": "20% off with a 24-month plan"},
+      "steps": [
+        {"say": "Sure, I have a minute."},
+        {"call": "record_lead", "args": {"intent": "MEDIUM", "notes": "listening"}, "expect": {"phase": "talk",
+          "instructionContains": ["name=Mia Chen", "product of interest=Nova X phone", "offer=20% off with a 24-month plan"]}},
+        {"say": "That sounds good, please send me the details."},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "wants the details of the 20% offer"}, "expect": {"phase": "talk"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["talk", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["record_lead", "record_lead", "hangup"],
+        "lead": {"intent": "HIGH", "notes": "wants the details of the 20% offer"}
+      }
+    },
+    {
+      "name": "一个想要优惠的客户记为 HIGH",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "userData": {"name": "王芳", "product": "星讯 Nova X 手机", "offer": "合约套餐立减 20%"},
+      "steps": [
+        {"say": "可以,你说。"},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "想了解合约套餐优惠,希望发详细资料"},
+          "expect": {"phase": "talk", "instructionContains": ["姓名=王芳", "关注的产品=星讯 Nova X 手机", "当前优惠=合约套餐立减 20%"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["talk", "finish"],
+        "ending": "hangup",
+        "lead": {"intent": "HIGH"}
+      }
+    },
+    {
+      "name": "a change of mind from MEDIUM to HIGH, last call wins",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "userData": {"name": "Leo Park"},
+      "steps": [
+        {"say": "Hmm, I'll think about it."},
+        {"call": "record_lead", "args": {"intent": "MEDIUM", "notes": "will think about it"}},
+        {"say": "Actually, send me the offer."},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "changed their mind, wants the offer"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"intent": "HIGH", "notes": "changed their mind, wants the offer"}, "ending": "hangup"}
+    },
+    {
+      "name": "客户从 HIGH 改口为 MEDIUM,以最后一次为准",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "好啊,发我看看。"},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "想看优惠"}},
+        {"say": "算了,我再考虑考虑。"},
+        {"call": "record_lead", "args": {"intent": "MEDIUM", "notes": "改口,还要再考虑"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"intent": "MEDIUM", "notes": "改口,还要再考虑"}, "ending": "hangup"}
+    },
+    {
+      "name": "a customer who asks not to be called again is recorded DO_NOT_CALL and the call ends",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "Stop calling me. Take me off your list."},
+        {"call": "record_lead", "args": {"intent": "DO_NOT_CALL", "notes": "asked to be taken off the list"}, "expect": {"phase": "talk"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "lead": {"intent": "DO_NOT_CALL"}}
+    },
+    {
+      "name": "客户要求不要再来电,记为 DO_NOT_CALL 并结束通话",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "别再给我打电话了。"},
+        {"call": "record_lead", "args": {"intent": "DO_NOT_CALL", "notes": "要求不再来电"}, "expect": {"phase": "talk"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "lead": {"intent": "DO_NOT_CALL"}}
+    },
+    {
+      "name": "a customer who asks for a person gets no transfer and no message",
+      "description": "transfer_to_agent and take_message are withdrawn on a campaign call: the bot declines, files the follow-up as a HIGH lead, and hangs up.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "queues": ["support-en"],
+      "steps": [
+        {"say": "Can I talk to a real person?"},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "wants a person"},
+          "expect": {"isRefused": true, "phase": "talk"}},
+        {"call": "take_message", "args": {"message": "call me back"}, "expect": {"isRefused": true, "phase": "talk"}},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "asked for a person; a colleague should follow up"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["talk", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["record_lead", "hangup"],
+        "lead": {"intent": "HIGH"}
+      }
+    },
+    {
+      "name": "客户要求转人工,机器人不转接,记为 HIGH 后挂断",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "queues": ["support-zh"],
+      "steps": [
+        {"say": "我要找人工。"},
+        {"call": "transfer_to_agent", "args": {"queue": "support-zh", "reason": "CALLER_REQUEST", "summary": "要求人工"},
+          "expect": {"isRefused": true, "phase": "talk"}},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "要求人工跟进"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "HIGH"}}
+    },
+    {
+      "name": "a customer who never engages is closed by the engine and leaves no lead",
+      "description": "Three NO_INPUTs reach closingTarget. Nothing was concluded, so the lead stays unrecorded, which is not NONE.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "none", "lead": {"isUnrecorded": true}}
+    },
+    {
+      "name": "没有应答的客户由引擎结束通话,不产生记录",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "lead": {"isUnrecorded": true}}
+    },
+    {
+      "name": "an unknown intent is refused and nothing is recorded",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"call": "record_lead", "args": {"intent": "VERY_HIGH", "notes": "x"}, "expect": {"isOk": false, "phase": "talk"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"isUnrecorded": true}}
+    },
+    {
+      "name": "missing customer details leave blanks, never a placeholder",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "userData": {"name": "Ana"},
+      "steps": [
+        {"say": "Hello?"},
+        {"call": "record_lead", "args": {"intent": "LOW"}, "expect": {"instructionContains": ["name=Ana;", "product of interest=;", "offer=."]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"intent": "LOW"}}
+    },
+    {
+      "name": "客户资料缺失时留空,不出现占位符",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "喂?"},
+        {"call": "record_lead", "args": {"intent": "NONE"}, "expect": {"instructionContains": ["姓名=;", "关注的产品=;", "当前优惠=。"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"intent": "NONE"}}
+    },
+    {
+      "name": "record_lead is not a tool outside a campaign call",
+      "lang": "en",
+      "caller": "18688886666",
+      "steps": [
+        {"call": "record_lead", "args": {"intent": "HIGH"}, "expect": {"isRefused": true, "phase": "talk"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"lead": {"isUnrecorded": true}}
+    },
+    {
+      "name": "model: an interested customer is recorded as a HIGH lead",
+      "description": "Tier 2. The customer likes the offer and asks for details.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "userData": {"name": "Mia Chen", "product": "Nova X phone", "offer": "20% off with a 24-month plan"},
+      "callerPersona": {
+        "goal": "Hear about the offer, then say you want it and ask to be sent the details.",
+        "persona": "You are Mia Chen. You asked about the Nova X phone last week and are keen to buy.",
+        "behaviour": "Friendly; answer briefly."
+      },
+      "model": {"ending": "hangup", "lead": {"intent": "HIGH"}}
+    },
+    {
+      "name": "model: a customer who wants no more calls is recorded DO_NOT_CALL",
+      "description": "Tier 2. The customer is annoyed and asks to be taken off the list.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "callerPersona": {
+        "goal": "Tell the caller to stop calling you and to remove your number from their list.",
+        "persona": "You are tired of sales calls.",
+        "behaviour": "Curt; do not engage with the offer."
+      },
+      "model": {"ending": "hangup", "lead": {"intent": "DO_NOT_CALL"}}
+    },
+    {
+      "name": "model: 客户要求转人工,机器人不转接",
+      "description": "Tier 2. 客户坚持要人工;机器人不能转接,应记录为 HIGH 并结束通话。",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "callerPersona": {
+        "goal": "要求转人工客服,听完回答后接受由同事回电的安排。",
+        "persona": "你是对手机套餐感兴趣的客户,但更愿意和真人沟通。",
+        "behaviour": "礼貌但坚持要人工。"
+      },
+      "model": {"ending": "hangup", "lead": {"intent": "HIGH"}, "avoids": []}
+    }
+  ]
+}

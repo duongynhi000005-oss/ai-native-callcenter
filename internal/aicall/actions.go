@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 )
@@ -207,6 +208,42 @@ func (a *callActions) TakeMessage(ctx context.Context, request flow.MessageReque
 		}
 	}
 	return flow.Succeeded(nil, ""), nil
+}
+
+// RecordLead stores the lead on the call's attempt, overwriting an earlier one.
+// Nothing else happens now: the DNC row and the callback are written once, from
+// the final value, when the attempt finishes (design 10 section 11), so a model
+// that changes its mind leaves nothing to undo and the call is not ended.
+func (a *callActions) RecordLead(ctx context.Context, request flow.LeadRequest) (flow.Result, error) {
+	if !a.isCampaign() || a.orchestrator.cfg.Leads == nil || a.recorder == nil {
+		// The runtime offers the tool on a campaign call only, so this is a
+		// wiring gap; the model is told the lead was not saved.
+		a.log.Error("lead not recorded: no place to record it", "intent", request.Intent)
+		return flow.Failed("NOT_RECORDED", a.leadHint()), nil
+	}
+	ok, err := a.orchestrator.cfg.Leads.SetLead(ctx, a.recorder.callID,
+		campaign.LeadIntent(request.Intent), request.Notes)
+	if err != nil {
+		a.log.Error("could not save the lead", "intent", request.Intent, "error", err)
+		return flow.Failed("SAVE_FAILED", a.leadHint()), nil
+	}
+	if !ok {
+		a.log.Warn("lead not saved: the attempt is no longer in flight", "intent", request.Intent)
+		return flow.Failed("NOT_RECORDED", a.leadHint()), nil
+	}
+	a.log.Info("lead recorded", "intent", request.Intent,
+		"notesRunes", len([]rune(request.Notes)))
+	return flow.Succeeded(nil, ""), nil
+}
+
+// leadHint steers the model after a lead could not be saved: it carries on and
+// says nothing of it, because the customer has no use for our bookkeeping.
+func (a *callActions) leadHint() string {
+	if a.session != nil && a.session.cfg.Session.Language == "zh" {
+		return "记录未保存。不要向客户提及，继续当前对话；如有必要稍后可再次调用。"
+	}
+	return "The record was not saved. Do not mention it to the customer; carry on " +
+		"with the conversation, and you may try again later if it still matters."
 }
 
 // Hangup ends the call once the goodbye has been heard.

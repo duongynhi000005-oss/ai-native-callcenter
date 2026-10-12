@@ -136,13 +136,14 @@ A value becomes a slot in four ways: a `http.result` mapping over a backend resp
 
 ### 2.7 Built-in tools
 
-Three tools exist in every flow. They are not HTTP calls; they act on the call itself. A phase allows them by name, or `alwaysAllowedTools` does.
+Three tools exist in every flow, and a fourth on campaign calls. They are not HTTP calls; they act on the call itself. A phase allows them by name, or `alwaysAllowedTools` does.
 
 | Tool | Arguments | Behaviour |
 | --- | --- | --- |
 | `transfer_to_agent` | `queue` (an enum of the deployment's queues, narrowed to the number's own queue when it has one), `reason`, `summary` (at most 600 characters, caller's language), `slots` (an object) | Arms a transfer that runs after the caller has heard the model's line. The `summary`, `reason` and `slots` ride the caller's channel to the agent. A closed or unknown queue is a refusal (`QUEUE_CLOSED`, `QUEUE_UNKNOWN`) with a hint to offer a message. |
 | `take_message` | `message`, `callbackNumber` (optional) | Records an open callback request, defaulting the number to the caller's. |
 | `hangup` | `isFarewellSpoken` | Ends the call once the goodbye has been heard. |
+| `record_lead` | `intent` (`HIGH`, `MEDIUM`, `LOW`, `NONE` or `DO_NOT_CALL`), `notes` (optional, at most 1000 characters; longer is cut) | **Campaign calls only.** Records what the call concluded about the customer on the call's campaign attempt; the last call wins, so call it again when the customer changes their mind. It is bound to no phase: it is offered and callable in every phase whatever `tools` and `alwaysAllowedTools` say, it never moves the phase and never counts as a turn, and it is not offered on any other call. An intent outside the enum comes back as a tool error and nothing is written. The call is not ended by it. The side effects run once, when the call ends: `DO_NOT_CALL` puts the number on the do-not-call list, `HIGH` files one callback on the campaign's follow-up queue (design 10 section 11). A campaign call is offered neither `transfer_to_agent` nor `take_message`, so a flow meant for campaigns lists neither (`seed/flows/campaign_lead_followup.json` is the reference). |
 
 Two details that matter when authoring:
 
@@ -688,7 +689,7 @@ What to notice:
   go test -race ./internal/flowsim/                                   # every seed flow against internal/seed/scenarios/
   ```
 
-  A scenario fixes the call's metadata (`lang`, `caller`, `did`, `userData`), the queues the deployment has, the answers of the built-ins (`actions`), and a list of `steps`. A step is exactly one event: `say` (a caller utterance), `keypress`, `exchange` (the caller speaks and the bot answers in words with no tool call), `noInput`, `botTurn` (`reply` or `interrupted`), `sessionLimit`, `call` with `args` (a tool the bot calls) or `batch` (several tools in one response; the last move wins). `repeat: N` runs a step N times. A step may carry `expect`: `phase`, `isOk`, `isRefused`, `result` (a subset of what the model receives), `slots` (a subset), `announce`, `instructionContains` (the rendered instruction, so a lost `{slots.x}` is caught). The scenario's own `expect` checks the whole call: `path` (phases entered, in order), `phase`, `ending` (`hangup`, `transfer_to_agent`, `take_message` or `none`), `transfer` (`queue`, `reason`), `toolsRun`, `slots`. Unknown fields are an error, so a misspelt expectation cannot pass by checking nothing.
+  A scenario fixes the call's metadata (`lang`, `caller`, `did`, `userData`), whether it is a campaign call (`isCampaign`: `record_lead` is offered, `transfer_to_agent` and `take_message` are withdrawn), the queues the deployment has, the answers of the built-ins (`actions`), and a list of `steps`. A step is exactly one event: `say` (a caller utterance), `keypress`, `exchange` (the caller speaks and the bot answers in words with no tool call), `noInput`, `botTurn` (`reply` or `interrupted`), `sessionLimit`, `call` with `args` (a tool the bot calls) or `batch` (several tools in one response; the last move wins). `repeat: N` runs a step N times. A step may carry `expect`: `phase`, `isOk`, `isRefused`, `result` (a subset of what the model receives), `slots` (a subset), `announce`, `instructionContains` (the rendered instruction, so a lost `{slots.x}` is caught). The scenario's own `expect` checks the whole call: `path` (phases entered, in order), `phase`, `ending` (`hangup`, `transfer_to_agent`, `take_message` or `none`), `transfer` (`queue`, `reason`), `toolsRun`, `slots`, `lead` (`intent`, `notes`, or `isUnrecorded` for a call that never recorded one). Unknown fields are an error, so a misspelt expectation cannot pass by checking nothing.
 
   ```json
   {"scenarios": [{
