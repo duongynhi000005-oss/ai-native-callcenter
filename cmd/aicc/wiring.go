@@ -351,6 +351,7 @@ func apiDeps(
 	webhooks httpapi.WebhookService,
 	keys httpapi.KeyService,
 	sipSessions httpapi.SIPSessionService,
+	postCall httpapi.PostCallTranscriber,
 	spa http.Handler,
 ) httpapi.Deps {
 	return httpapi.Deps{
@@ -372,6 +373,7 @@ func apiDeps(
 		Webhooks:    webhooks,
 		Keys:        keys,
 		SIPSessions: sipSessions,
+		PostCall:    postCall,
 		SPA:         spa,
 	}
 }

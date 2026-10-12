@@ -54,6 +54,8 @@ func main() {
 			handler = runFlowAdd
 		case "flowsim":
 			handler = runFlowSim
+		case "transcribe-recordings":
+			handler = runTranscribeRecordings
 		case "doctor":
 			handler = runDoctor
 		case "version", "-version", "--version":
@@ -228,19 +230,11 @@ func run() error {
 
 	// Recording storage: nil when no directory is configured, which disables
 	// ingestion without disabling anything else.
-	var recordings recording.Storage
-	// The filesystem backend needs the directory the switch records into; the
-	// S3 backend works with the endpoint alone when the switch uploads
-	// directly (mod_http_cache), the spool directory being optional.
-	if cfg.RecordingDir != "" || (cfg.RecordingBackend == "S3" && cfg.S3Endpoint != "") {
-		recordings, err = recording.New(recording.Config{
-			Backend: cfg.RecordingBackend, Dir: cfg.RecordingDir,
-			S3Endpoint: cfg.S3Endpoint, S3AccessKey: cfg.S3AccessKey,
-			S3SecretKey: cfg.S3SecretKey, S3Bucket: cfg.S3Bucket, S3IsSSL: cfg.S3IsSSL,
-		})
-		if err != nil {
-			return fmt.Errorf("recording storage: %w", err)
-		}
+	recordings, err := newRecordingStorage(cfg)
+	if err != nil {
+		return err
+	}
+	if recordings != nil {
 		if s3, ok := recordings.(interface{ EnsureBucket(context.Context) error }); ok {
 			if err := s3.EnsureBucket(ctx); err != nil {
 				return fmt.Errorf("recording storage: %w", err)
@@ -254,6 +248,26 @@ func run() error {
 	if recordings != nil {
 		recordingStorage = recordings
 	}
+
+	// Post-call transcription: nil unless enabled, and every use of it is
+	// nil-safe or guarded, so a deployment that never turns it on runs
+	// exactly the code it ran before.
+	postCall, err := newPostCall(cfg, st.Ledger(), recordings)
+	if err != nil {
+		return err
+	}
+	if err := postCall.Start(ctx); err != nil {
+		return err
+	}
+	defer postCall.Stop()
+	var postCallAPI httpapi.PostCallTranscriber
+	if postCall != nil {
+		postCallAPI = postCall
+	}
+	cdrAssembler := telephony.NewCDRAssembler(st.Ledger(), catalogSvc, recordingStorage, slog.Default())
+	if postCall != nil {
+		cdrAssembler.SetRecordingOffer(postCall)
+	}
 	// Every connection between the parts, in one place that a test can drive
 	// with fakes. Nothing above this line joins two services together.
 	composition{
@@ -262,7 +276,7 @@ func run() error {
 		Agents:      agentSvc,
 		Catalog:     catalogSvc,
 		Link:        link,
-		CDR:         telephony.NewCDRAssembler(st.Ledger(), catalogSvc, recordingStorage, slog.Default()),
+		CDR:         cdrAssembler,
 		Queues:      queueCatalog{catalogSvc},
 		WrapUps:     st.Ledger(),
 		Transcripts: transcripts,
@@ -363,6 +377,7 @@ func run() error {
 			st.Webhooks(),
 			httpapi.APIKeys{APIKeyStore: st.APIKeys()},
 			sipSessions,
+			postCallAPI,
 			spa,
 		)).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

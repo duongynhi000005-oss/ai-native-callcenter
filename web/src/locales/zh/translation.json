@@ -115,6 +115,7 @@
     "NOT_CALL_PARTY": "您不在该通话中。",
     "AGENT_NOT_IN_WRAP_UP": "没有待填写的已结束通话。",
     "DEVICE_NOT_REGISTERED": "你的话机未注册",
+    "TRANSCRIPTION_DISABLED": "此部署未启用通话后转写",
     "USER_DATA_TOO_LARGE": "这通电话装不下这些业务数据：最多 {{maxKeys}} 个键，每个值 {{maxValueBytes}} 字节。一个都没有写入。",
     "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE": "这种通话没有这个功能。",
     "LAST_ADMIN": "这一步会让平台没有人能管理。",

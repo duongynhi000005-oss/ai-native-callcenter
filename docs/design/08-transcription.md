@@ -185,7 +185,7 @@ FreeSWITCH, PostgreSQL or any provider API.
 | Bot-phase transcript persistence | **YES (batch, at call end)** | `internal/aicall/ledger.go:136`, `internal/store/ledgerstore.go:276` | `InsertTranscript` is a sqlc `:copyfrom` (`internal/store/sql/ledger.sql:47`) | One write, at teardown |
 | **Human-leg transcript** | **ABSENT** | — | `transcripts.role CHECK IN ('BOT','CALLER')` — `internal/store/migrations/00005_call_ledger.sql:61` | No third speaker is representable |
 | Transcript REST read | **YES, supervisor-only, finished calls only** | `internal/httpapi/ledger_handlers.go:45-72` | `GET /cdrs/{callId}` returns `{cdr, transcript, recordings}`; route mounted under `requireSupervisorRole` at `internal/httpapi/server.go:207-210` | No live/agent-readable transcript route |
-| Recording | **YES** | `internal/recording/storage.go:22`, ingestion at `internal/telephony/cdr.go:107` | FS/S3, key `recordings/YYYY/MM/DD/<call_id>.wav` | Audio only; no ASR is run on it |
+| Recording | **YES** | `internal/recording/storage.go:22`, ingestion at `internal/telephony/cdr.go:107` | FS/S3, key `recordings/YYYY/MM/DD/<call_id>.wav` | Audio only; no ASR is run on it unless post-call transcription is enabled (section 18) |
 | Agent ↔ extension binding | **YES** | `internal/store/migrations/00002_telephony.sql:36`, `00007_agent_extension_binding.sql:8` | `agents.default_extension_id` + partial unique index | Resolution: `internal/agents/service.go:622` |
 | Frontend SSE consumer | **YES** | `web/src/lib/events.ts:26`, `web/src/lib/use-event-stream.ts:46` | One app-level `EventSource`; per-type listeners | Types come from `web/src/generated/api.ts` (`events.ts:10-16`) |
 | Frontend transcript display (live) | **ABSENT** | — | `web/src/routes/_app.agent.index.tsx:26-35` states the omission in a comment | "the platform publishes no queue-depth or transcript events … deliberately absent rather than faked" |
@@ -2870,3 +2870,227 @@ agent*, "can you kill me" for *can you hear me*, a spurious `拖。` on an Engli
 Neither figure may be quoted for the other, and neither is a capacity or quality claim. What
 would characterise this is a set of real calls scored against a human transcript, which has
 not been done.
+
+---
+
+## 18. Post-call transcription of recordings (issue #27)
+
+Live transcription (sections 4 to 17) covers a call while it is up. This section covers the
+other case: a finished call's stereo recording sent to a batch ASR model, so that human legs
+nobody transcribed live, and any call a reviewer wants read again, still have text. It is
+off by default and does nothing to a live call.
+
+### 18.1 Vendor protocol `[MEASURED 2026-09-24, issue #27]`
+
+`qwen-audio-3.1-asr-flash`, synchronous HTTPS, one clip per request:
+
+```
+POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+{"model": "...", "input": {"messages": [{"role": "user", "content": [
+  {"type": "input_audio", "input_audio": {"data": "data:audio/wav;base64,..."}}]}]},
+ "parameters": {"format": "wav", "sample_rate": "8000"}}
+```
+
+- At most 5 minutes per request. Only **channel 0** of a two-channel file is transcribed.
+- The OpenAI-compatible endpoint rejects the model (400) and the WebSocket run-task endpoint
+  never sends `task-finished`, so neither is used. `-filetrans` (async, needs a URL the vendor
+  can reach) is not used either: chunking keeps the audio inside this process.
+- **Response shape `[MEASURED 2026-10-12]`.** HTTP 200, one clip with speech:
+
+  ```
+  {"sentence": {...}, "text": "...", "request_id": "...",
+   "output": {"sentence": {...}, "text": "...", "request_id": "..."},
+   "usage": {"duration": 6, "input_tokens": 430, "output_tokens": 15, "total_tokens": 445}}
+  ```
+
+  `sentence` is **one object**, not a list: `{"sentence_id": 3, "begin_time": 2760,
+  "end_time": 6280, "text": "...", "channel_id": 0, "speaker_id": null, "sentence_end": true,
+  "words": [{"begin_time", "end_time", "text", "punctuation", "fixed", "speaker_id"}, ...]}`.
+  Times are milliseconds from the start of the clip. `text` is the clip's text and equals the
+  sentence's. The top level and `output` carry identical copies; the parser reads `output`.
+  Text can carry stray spaces and a trailing full stop `。` on English. The response names no
+  language, so stored segments have none. The parser takes `output.sentence` (an object) or
+  `output.sentences` (a list of the same objects, which the vendor documents for diarization;
+  not observed). Any other shape is a permanent error rather than silently dropped words.
+  Only one sentence per clip has been observed, so if the sentences do not add up to `text`
+  the text wins and becomes one segment spanning them.
+- `AICC_TRANSCRIBE_WIRE` (diagnosis only, shared with the streaming client) also writes each
+  batch response, status line then body, to `batch-<time>.log`. Responses carry no audio and
+  no key.
+
+**Probe 2026-10-12 (the first real run failed on both calls with 3 requests; then 4 probe requests and a 3-request re-run).** A clip with
+nothing the model recognises as speech is answered `HTTP 400`,
+`{"request_id":"...","code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS"}`, not an
+empty 200. The client now treats exactly that status, code and message as an empty clip
+(`BatchResult.NoSpeech`): the run keeps what its other clips said and a recording with no
+speech at all is `DONE` with no segments. Any other 400 still fails the run at once.
+Evidence, all from the two dev recordings used for the run:
+
+| Recording | Channel | Content (offline analysis) | Result |
+|---|---|---|---|
+| zh `01a0b9e9-...` 41 s | CUSTOMER (ch0) | near silent: peak 1820, RMS 31, 7 of 2058 frames above RMS 50; two quiet bursts at 9-19 s | 400 NO_WORDS (clip 7-21 s) |
+| zh `01a0b9e9-...` | FAR_END (ch1) | 41 s of steady low-frequency sound, RMS about 900, no pauses: the call left the bot after 3 s and sat in the queue (hold music) | 400 NO_WORDS: whole channel, the 3-9 s slice at 8 kHz, the same slice with `sample_rate` 16000, and upsampled to a 16 kHz file |
+| en `01a037c1-...` 29 s | CUSTOMER (ch0) | digital silence (peak 1) | dropped by the silence filter, not sent |
+| en `01a037c1-...` | FAR_END (ch1) | 30 s steady, RMS about 1900, abandoned in the queue after 29 s (hold music) | 400 NO_WORDS |
+
+The clips we encode are valid (afinfo: mono, 8000 Hz, Int16, the expected length; header
+`RIFF/WAVE/fmt /data`, 44 bytes), and neither the sample-rate parameter nor a 16 kHz file
+changed the answer. A speech control then settled it: call `01a0bd18-...` (en, 29.8 s, bot greeting and a caller
+line, 2 requests, one per channel) returned HTTP 200 for both clips through the same encoder,
+at 8 kHz with `sample_rate` "8000". The encoding is right; the first two recordings had no
+speech.
+
+| Channel | Segment (offset-end ms, stored text) | Live transcript (`transcripts`, MODEL) |
+|---|---|---|
+| FAR_END | 2760-6280 "Thanks for calling Novanet. How can I help you today? 。" | BOT, offset 3737: "Thanks for calling NovaNet, how can I help you today?" (the flow's greeting) |
+| CUSTOMER | 7040-11120 "I don't like to ask about the internet service." | CUSTOMER, offset 16844: "I'd like to activate the internet service." |
+
+The bot line matches the flow's greeting but for punctuation and the brand's capitals. The
+caller line is misheard by the batch model on 8 kHz telephone audio ("I don't like to ask
+about" for "I'd like to activate"); it is one call and says nothing about accuracy in
+general. The two sets of offsets differ in kind: the batch ones are positions in the
+recording (the bot started speaking about 2.8 s in), the live ones are when each line was
+recorded in the transcript, after the speech and the model had finished.
+
+Hold music and line noise are therefore billed (they are audio minutes sent) and return
+nothing. The silence filter only drops digital silence; it cannot tell music from speech.
+
+### 18.2 Pieces
+
+| Piece | Where |
+|---|---|
+| HTTPS batch client behind `BatchRecognizer` (not `Session`) | `internal/transcribe/batch.go` |
+| WAV decode, channel split, clip cutting, mono encode | `internal/transcribe/wavsplit.go` |
+| Queue, policy, workers, manual request, backfill plan | `internal/postcall` |
+| Run + segment tables, queue queries | migration `00035`, `internal/store/sql/transcriptions.sql`, `internal/store/transcriptionstore.go` |
+| Offer after the recording is booked | `telephony.CDRAssembler.ingestRecording` -> `RecordingOffer` |
+| API | `GET` and `POST /calls/{callId}/transcription`, `internal/httpapi/transcription_handlers.go` |
+| Backfill CLI | `aicc transcribe-recordings`, `cmd/aicc/postcall.go` |
+
+### 18.3 Storage: two new tables, not `transcripts`
+
+`transcripts` is the live transcript: a dense per-call `seq` that stream consumers resume from.
+A batch result written into it would collide on `(call_id, seq)` and appear after the call has
+ended. So:
+
+- `call_transcriptions`, one row per call: `status` `PENDING | RUNNING | DONE | FAILED`, `run`
+  (bumped by each re-request), `model`, `attempts`, `error`, `audio_sec`, `requested_at`,
+  `next_attempt_at`, `started_at`, `finished_at`. The row is also the work queue.
+- `call_transcription_segments`, `(call_id, seq)`: `channel` `CUSTOMER | FAR_END`, `offset_ms`,
+  `end_ms`, `text`, `language`.
+
+`CUSTOMER` is the left channel (the caller). `FAR_END` is the right channel: the bot, then the
+agent, following the call through transfers (`aicc_inbound.lua`, `aicc_queue.lua`). The
+segment does not say which of them spoke; the CDR's legs do. The status and channel values are
+identical in the database, JSON and TypeScript (naming spec 07).
+
+A finished run is replaced by a re-request: the segments are deleted and rewritten in the
+same transaction that marks the run `DONE`, guarded by `run`, so a superseded run can neither
+complete nor fail its successor.
+
+### 18.4 Trigger and the live-transcript rule
+
+`ingestRecording` offers the booked recording (`OfferRecording`) when post-call transcription
+is enabled. The offer returns at once. After a 20 s settle (the bot's transcript is written
+when its session tears down) the recording is judged, in this order:
+
+1. **Duration.** Skip below `AICC_POSTCALL_TRANSCRIBE_MIN_SEC` (10) or above `_MAX_SEC` (3600).
+2. **Live transcript.** Skip when the live transcript already covers both recorded channels:
+   - the **CUSTOMER** channel is covered when the call has at least one `kind=TEXT` row with
+     `speaker=CUSTOMER` in `transcripts`, of either source (`MODEL` or `ASR`);
+   - the **FAR_END** channel is covered when every kind of party that **answered** on it has a
+     row: a `BOT` row if a bot leg answered, a `HUMAN_AGENT` row if an agent leg answered, and
+     trivially when neither did;
+   - skip only when both are covered.
+   So a contained AI call (`MODEL` rows for caller and bot) is skipped. A human-handled call is
+   skipped only if live transcription was on for it. A bot call transferred to an agent nobody
+   transcribed is **not** skipped, because the agent's side has no rows; it is transcribed
+   whole, both channels, because a half-covered call costs one request set either way and a
+   single record is simpler to read.
+3. **Daily cap.** Skip when audio already started in the last rolling 24 hours plus this
+   recording would exceed `AICC_POSTCALL_TRANSCRIBE_DAILY_MAX_MIN` (600; 0 is no cap).
+
+An accepted recording becomes a `PENDING` row (`INSERT ... ON CONFLICT DO NOTHING`, so an offer
+is idempotent). A skipped one leaves no row, and `GET` answers 404 for it. An offer lost to a
+restart is found by the backfill.
+
+Who answered comes from the call snapshot (`answeredSides`): a bot leg with `AnsweredAt` set,
+and a non-bot party with an `AgentID` and `AnsweredAt` set.
+
+### 18.5 Workers, retry and the cap
+
+`AICC_POSTCALL_TRANSCRIBE_CONCURRENCY` (2) goroutines claim runs with
+`FOR UPDATE SKIP LOCKED`. Before each claim a worker holds back while the rolling-24-hour audio
+has reached the cap, so the cap is **soft by up to CONCURRENCY recordings** (a run's length is
+only counted once it is claimed). Held runs stay `PENDING` and resume when the window rolls.
+
+A run reads the recording through `recording.Storage.Open` (filesystem or S3), decodes the WAV
+(a header whose data length is zero or past the end is trusted only as far as the bytes go),
+and for each channel cuts clips of at most 270 s. A cut falls on the quietest 20 ms frame in
+the last 30 s of the window, so it lands in a pause. A clip whose peak never exceeds 64 is
+silence and is **not sent**. Each clip goes out as mono 16-bit WAV at the recording's rate
+(8 kHz), its timestamps offset by the clip's start, and the segments of both channels are
+merged by `offset_ms` (ties: `CUSTOMER` first) and numbered from 1.
+
+Failures:
+
+| Failure | Result |
+|---|---|
+| HTTP 429, 5xx, timeout, network error, Throttling code | retry: `PENDING`, `error` set, `next_attempt_at` = 30 s, then 2 min, then 8 min |
+| 400 `CLIENT_ERROR` `ASR_RESPONSE_HAVE_NO_WORDS` (a clip with no speech) | not a failure: the clip is empty, the run goes on |
+| Any other vendor rejection (400, 401, 200 with an error code) | `FAILED` at once |
+| Recording deleted, not a 16-bit PCM WAV | `FAILED` at once |
+| `AICC_POSTCALL_TRANSCRIBE_MAX_ATTEMPTS` (3) reached | `FAILED` |
+| Process stops mid-run | row stays `RUNNING`; on start it returns to `PENDING`, the attempt stays counted |
+
+A retry repeats the whole recording; a clip that succeeded before another failed is paid for
+again. That is accepted for simplicity.
+
+### 18.6 API
+
+`GET /calls/{callId}/transcription` (`getPostCallTranscription`) returns the run and, once
+`DONE`, its segments. Scope `history:read:own`, widened to the agent's own calls by the same
+rule as the recording audio (`mayHearCall`), or `history:read:all`. 404 `NOT_FOUND` when the
+call has no run. It is deliberately separate from `GET /calls/{callId}/transcript`: both can
+exist for one call and neither replaces the other. #90 reads this resource for calls whose live
+transcript is absent; it can also gate on `status = DONE`.
+
+`POST /calls/{callId}/transcription` (`requestPostCallTranscription`) queues a run and
+answers `202` with the run. **Scope `quality:review`**: the audience is a reviewer deciding a
+call is worth the audio minutes. A new scope was not worth the 21st entry in the vocabulary
+and in `scopemap.py`; `history:read:all` only reads, and `config:write` is for configuration.
+Both the session and the bearer branch exist. It ignores the live-transcript rule and the
+minimum (a person asked) but keeps the maximum and the cap. A `PENDING` or `RUNNING` run is
+returned unchanged; a `DONE` or `FAILED` one starts over (`run` + 1).
+
+| Condition | Status | Code |
+|---|---|---|
+| post-call transcription is off on this deployment | 409 | `TRANSCRIPTION_DISABLED` (new) |
+| the call has no recording | 404 | `NOT_FOUND` |
+| the recording is over the configured maximum | 422 | `VALIDATION_FAILED`, `params.maxDurationSec` |
+| the daily cap would be exceeded | 429 | `RATE_LIMITED`, `params.dailyMaxAudioMin` |
+
+`GET` keeps working with the feature off, so rows written earlier stay readable.
+
+### 18.7 Backfill
+
+`aicc transcribe-recordings [-since 168h] [-limit 10] [-calls id,id] [-run]` plans the same
+policy over existing recordings with no run (newest first), prints each call id with its
+seconds and the total audio minutes, and exits without sending anything. With `-run` it queues
+them and drains the same workers until each is `DONE` or `FAILED`. `-calls` names calls
+explicitly, bypasses the policy, and starts over a run that is `DONE` or `FAILED` (a run in flight is left alone). It needs `AICC_POSTCALL_TRANSCRIBE_ENABLED=true`, the
+endpoint and `ALIYUN_API_KEY`.
+
+### 18.8 Config
+
+`AICC_POSTCALL_TRANSCRIBE_ENABLED` (false), `_ENDPOINT` (required when enabled, `https://`),
+`_MODEL` (`qwen-audio-3.1-asr-flash`), `_MIN_SEC` (10), `_MAX_SEC` (3600), `_DAILY_MAX_MIN`
+(600), `_CONCURRENCY` (2), `_MAX_ATTEMPTS` (3). Key: `ALIYUN_API_KEY`. Enabled without
+recording storage or without the key is a startup error.
+
+### 18.9 Not done
+
+No `-filetrans`; no per-clip resume; no speaker diarization (the channel is the speaker);
+no word timings stored; no SSE event when a run finishes; no UI. No quality or cost figure is
+claimed anywhere: cost is audio minutes sent (both channels, silence excluded), which the dry
+run prints.

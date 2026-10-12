@@ -2116,6 +2116,135 @@
         ]
       }
     },
+    "/calls/{callId}/transcription": {
+      "get": {
+        "operationId": "getPostCallTranscription",
+        "tags": [
+          "calls"
+        ],
+        "summary": "A call's post-call transcription",
+        "description": "The transcript of a call's recording, produced after the call by a batch recogniser (design 08 section 18). It is separate from GET /calls/{callId}/transcript, which is what was said live: the two can both exist for one call, and neither replaces the other.\n\nstatus says where the run is. PENDING and RUNNING mean segments is empty and will fill; DONE means segments is complete (and may legitimately be empty when nobody spoke); FAILED carries error. A call with no run, because post-call transcription is off, the recording was skipped by policy, or nobody asked, is 404 NOT_FOUND.\n\nhistory:read:own reaches the calls the subject's own agent identity was on; history:read:all reaches anybody's.",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run and its segments.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostCallTranscription"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "security": [
+          {
+            "cookieSession": [
+              "history:read:own"
+            ]
+          },
+          {
+            "apiKeyBearer": [
+              "history:read:own"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "operationId": "requestPostCallTranscription",
+        "tags": [
+          "calls"
+        ],
+        "summary": "Transcribe a call's recording",
+        "description": "Asks for the call's recording to be transcribed after the fact, or transcribed again. It queues a run and returns at once; poll GET /calls/{callId}/transcription.\n\nThis is the manual path: it ignores the live-transcript rule and the minimum recording length that the automatic path applies, because a person asked. It keeps the maximum length and the daily audio cap, which exist for cost and memory. A run already PENDING or RUNNING is returned unchanged; a DONE or FAILED one starts over and its segments are replaced when the new run finishes.\n\nquality:review is the scope because the audience is a reviewer deciding that a call is worth the audio minutes it costs; it is not history:read:all, which only reads.\n\nRefusals: 409 TRANSCRIPTION_DISABLED when this deployment has post-call transcription off; 404 NOT_FOUND when the call has no recording; 422 VALIDATION_FAILED (params.maxDurationSec) when the recording is longer than the configured maximum; 429 RATE_LIMITED (params.dailyMaxAudioMin) when the daily audio cap is reached.",
+        "parameters": [
+          {
+            "name": "callId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The run, queued or already in flight.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostCallTranscription"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "description": "The daily audio cap is reached. Code RATE_LIMITED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "security": [
+          {
+            "cookieSession": [
+              "quality:review"
+            ],
+            "csrfHeader": []
+          },
+          {
+            "apiKeyBearer": [
+              "quality:review"
+            ]
+          }
+        ]
+      }
+    },
     "/calls/{callId}/reviews": {
       "get": {
         "operationId": "listCallReviews",
@@ -5718,7 +5847,7 @@
         }
       },
       "Conflict": {
-        "description": "The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED.",
+        "description": "The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED.",
         "content": {
           "application/json": {
             "schema": {
@@ -5793,6 +5922,7 @@
           "AGENT_NOT_LOGGED_IN",
           "AGENT_NOT_IN_WRAP_UP",
           "DEVICE_NOT_REGISTERED",
+          "TRANSCRIPTION_DISABLED",
           "CALL_NOT_FOUND",
           "NOT_CALL_PARTY",
           "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE",
@@ -9442,6 +9572,124 @@
             ]
           }
         ]
+      },
+      "PostCallTranscriptionStatus": {
+        "type": "string",
+        "description": "Where a post-call transcription run is. PENDING waits for a worker (or for a retry's backoff), RUNNING is with the recogniser, DONE has its segments, FAILED has given up and carries error.",
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "DONE",
+          "FAILED"
+        ]
+      },
+      "RecordedChannel": {
+        "type": "string",
+        "description": "Which side of the stereo recording a segment came from. CUSTOMER is the left channel, the caller. FAR_END is the right channel: the bot, then the agent, following the call through transfers; which of them spoke at a given moment is read from the CDR's legs.",
+        "enum": [
+          "CUSTOMER",
+          "FAR_END"
+        ]
+      },
+      "PostCallTranscriptionSegment": {
+        "type": "object",
+        "description": "One recognised stretch of speech.",
+        "required": [
+          "seq",
+          "channel",
+          "offsetMs",
+          "endMs",
+          "text"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "description": "Position in the run, from 1, in time order.",
+            "minimum": 1
+          },
+          "channel": {
+            "$ref": "#/components/schemas/RecordedChannel"
+          },
+          "offsetMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Where the segment starts in the recording.",
+            "minimum": 0
+          },
+          "endMs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Where it ends.",
+            "minimum": 0
+          },
+          "text": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string",
+            "description": "As the recogniser reported it; absent when it did not say."
+          }
+        }
+      },
+      "PostCallTranscription": {
+        "type": "object",
+        "description": "A call's post-call transcription: the run, and the segments it produced.",
+        "required": [
+          "callId",
+          "status",
+          "model",
+          "attempts",
+          "audioSec",
+          "requestedAt",
+          "segments"
+        ],
+        "properties": {
+          "callId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PostCallTranscriptionStatus"
+          },
+          "model": {
+            "type": "string",
+            "description": "The recogniser model of the latest attempt; empty until a worker has taken the run."
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attempts made by the current run."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the latest attempt failed. Present on FAILED, and on PENDING while a retry waits."
+          },
+          "audioSec": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Length of the recording sent, which is what the daily cap counts."
+          },
+          "requestedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When a worker last took the run."
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PostCallTranscriptionSegment"
+            },
+            "description": "Empty until DONE."
+          }
+        }
       }
     }
   }

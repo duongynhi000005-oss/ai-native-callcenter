@@ -175,6 +175,11 @@ var OperationSecurityByRoute = map[string]OperationSecurity{
 		SessionScopes: []string{"history:read:own"},
 		KeyScopes:     []string{"history:read:own"},
 	},
+	"GET /calls/{callId}/transcription": {
+		OperationID:   "getPostCallTranscription",
+		SessionScopes: []string{"history:read:own"},
+		KeyScopes:     []string{"history:read:own"},
+	},
 	"GET /cdrs": {
 		OperationID:   "listCDRs",
 		SessionScopes: []string{"history:read:all"},
@@ -450,6 +455,12 @@ var OperationSecurityByRoute = map[string]OperationSecurity{
 		OperationID:   "retrieveCall",
 		SessionScopes: []string{"calls:control"},
 		KeyScopes:     []string{"calls:control"},
+		NeedsCSRF:     true,
+	},
+	"POST /calls/{callId}/transcription": {
+		OperationID:   "requestPostCallTranscription",
+		SessionScopes: []string{"quality:review"},
+		KeyScopes:     []string{"quality:review"},
 		NeedsCSRF:     true,
 	},
 	"POST /calls/{callId}/transfer": {

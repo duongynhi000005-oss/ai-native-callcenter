@@ -641,6 +641,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/calls/{callId}/transcription": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A call's post-call transcription
+         * @description The transcript of a call's recording, produced after the call by a batch recogniser (design 08 section 18). It is separate from GET /calls/{callId}/transcript, which is what was said live: the two can both exist for one call, and neither replaces the other.
+         *
+         *     status says where the run is. PENDING and RUNNING mean segments is empty and will fill; DONE means segments is complete (and may legitimately be empty when nobody spoke); FAILED carries error. A call with no run, because post-call transcription is off, the recording was skipped by policy, or nobody asked, is 404 NOT_FOUND.
+         *
+         *     history:read:own reaches the calls the subject's own agent identity was on; history:read:all reaches anybody's.
+         */
+        get: operations["getPostCallTranscription"];
+        put?: never;
+        /**
+         * Transcribe a call's recording
+         * @description Asks for the call's recording to be transcribed after the fact, or transcribed again. It queues a run and returns at once; poll GET /calls/{callId}/transcription.
+         *
+         *     This is the manual path: it ignores the live-transcript rule and the minimum recording length that the automatic path applies, because a person asked. It keeps the maximum length and the daily audio cap, which exist for cost and memory. A run already PENDING or RUNNING is returned unchanged; a DONE or FAILED one starts over and its segments are replaced when the new run finishes.
+         *
+         *     quality:review is the scope because the audience is a reviewer deciding that a call is worth the audio minutes it costs; it is not history:read:all, which only reads.
+         *
+         *     Refusals: 409 TRANSCRIPTION_DISABLED when this deployment has post-call transcription off; 404 NOT_FOUND when the call has no recording; 422 VALIDATION_FAILED (params.maxDurationSec) when the recording is longer than the configured maximum; 429 RATE_LIMITED (params.dailyMaxAudioMin) when the daily audio cap is reached.
+         */
+        post: operations["requestPostCallTranscription"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/calls/{callId}/reviews": {
         parameters: {
             query?: never;
@@ -1516,7 +1550,7 @@ export interface components {
          * @description Machine-readable, translatable failure identifier. The frontend renders errors.<CODE>; the backend never localizes.
          * @enum {string}
          */
-        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
+        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
         /** @description The single error envelope body: an error code plus interpolation params. Message is diagnostic English, never shown to end users. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -2890,6 +2924,60 @@ export interface components {
             /** @description The credential, to be sent as `Authorization: Bearer <secret>`. */
             secret: string;
         };
+        /**
+         * @description Where a post-call transcription run is. PENDING waits for a worker (or for a retry's backoff), RUNNING is with the recogniser, DONE has its segments, FAILED has given up and carries error.
+         * @enum {string}
+         */
+        PostCallTranscriptionStatus: "PENDING" | "RUNNING" | "DONE" | "FAILED";
+        /**
+         * @description Which side of the stereo recording a segment came from. CUSTOMER is the left channel, the caller. FAR_END is the right channel: the bot, then the agent, following the call through transfers; which of them spoke at a given moment is read from the CDR's legs.
+         * @enum {string}
+         */
+        RecordedChannel: "CUSTOMER" | "FAR_END";
+        /** @description One recognised stretch of speech. */
+        PostCallTranscriptionSegment: {
+            /** @description Position in the run, from 1, in time order. */
+            seq: number;
+            channel: components["schemas"]["RecordedChannel"];
+            /**
+             * Format: int64
+             * @description Where the segment starts in the recording.
+             */
+            offsetMs: number;
+            /**
+             * Format: int64
+             * @description Where it ends.
+             */
+            endMs: number;
+            text: string;
+            /** @description As the recogniser reported it; absent when it did not say. */
+            language?: string;
+        };
+        /** @description A call's post-call transcription: the run, and the segments it produced. */
+        PostCallTranscription: {
+            /** Format: uuid */
+            callId: string;
+            status: components["schemas"]["PostCallTranscriptionStatus"];
+            /** @description The recogniser model of the latest attempt; empty until a worker has taken the run. */
+            model: string;
+            /** @description Attempts made by the current run. */
+            attempts: number;
+            /** @description Why the latest attempt failed. Present on FAILED, and on PENDING while a retry waits. */
+            error?: string;
+            /** @description Length of the recording sent, which is what the daily cap counts. */
+            audioSec: number;
+            /** Format: date-time */
+            requestedAt: string;
+            /**
+             * Format: date-time
+             * @description When a worker last took the run.
+             */
+            startedAt?: string;
+            /** Format: date-time */
+            finishedAt?: string;
+            /** @description Empty until DONE. */
+            segments: components["schemas"]["PostCallTranscriptionSegment"][];
+        };
     };
     responses: {
         /** @description The request is malformed: unparseable body or an invalid identifier. Codes VALIDATION_FAILED, USER_DATA_TOO_LARGE. */
@@ -2928,7 +3016,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED. */
+        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -3958,6 +4046,69 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getPostCallTranscription: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                callId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run and its segments. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostCallTranscription"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    requestPostCallTranscription: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                callId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run, queued or already in flight. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostCallTranscription"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["UnprocessableEntity"];
+            /** @description The daily audio cap is reached. Code RATE_LIMITED. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };

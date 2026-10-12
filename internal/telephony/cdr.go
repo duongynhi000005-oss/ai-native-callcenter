@@ -77,6 +77,9 @@ type CDRAssembler struct {
 	queues  QueueDirectory
 	storage RecordingStorage
 	log     *slog.Logger
+	// offer, when set, is told about every recording once it is booked. Set
+	// before the first call finishes; never changed afterwards.
+	offer RecordingOffer
 	// flushWait is how long ingestion waits for the switch to close the file;
 	// shortened in tests.
 	flushWait time.Duration
@@ -90,6 +93,17 @@ func NewCDRAssembler(ledger CDRLedger, queues QueueDirectory, storage RecordingS
 	return &CDRAssembler{ledger: ledger, queues: queues, storage: storage,
 		log: log, flushWait: recordingFlushWait}
 }
+
+// RecordingOffer is told that a call's recording is booked, so it can decide
+// whether to do more with it (post-call transcription). It must return at
+// once: it is called on the call's retirement goroutine.
+type RecordingOffer interface {
+	OfferRecording(rec store.Recording, hadBotLeg, hadHumanLeg bool)
+}
+
+// SetRecordingOffer attaches the recipient of booked recordings. Nil, the
+// default, offers them to nobody.
+func (a *CDRAssembler) SetRecordingOffer(o RecordingOffer) { a.offer = o }
 
 // CallFinished receives the final snapshot; safe to set as Registry.OnCallFinished.
 func (a *CDRAssembler) CallFinished(snap Snapshot) {
@@ -177,14 +191,15 @@ func (a *CDRAssembler) ingestRecording(snap Snapshot) {
 		return
 	}
 
-	if _, err := a.ledger.InsertRecording(ctx, store.Recording{
+	booked, err := a.ledger.InsertRecording(ctx, store.Recording{
 		CallID:      snap.CallID,
 		Backend:     a.storage.Backend(),
 		Bucket:      a.storage.Bucket(),
 		ObjectKey:   key,
 		SizeBytes:   size,
 		DurationSec: recording.DurationSec(size),
-	}); err != nil {
+	})
+	if err != nil {
 		a.log.Error("could not book the recording", "callId", snap.CallID, "error", err)
 		return
 	}
@@ -192,6 +207,27 @@ func (a *CDRAssembler) ingestRecording(snap Snapshot) {
 		a.log.Error("could not flag the cdr as recorded", "callId", snap.CallID, "error", err)
 	}
 	a.log.Info("recording booked", "callId", snap.CallID, "key", key, "sizeBytes", size)
+	if a.offer != nil {
+		hadBot, hadHuman := answeredSides(snap)
+		a.offer.OfferRecording(booked, hadBot, hadHuman)
+	}
+}
+
+// answeredSides reports who answered on the call's far end: a bot, a person,
+// or both. It is what lets post-call transcription tell whether the live
+// transcript covers everybody who spoke.
+func answeredSides(snap Snapshot) (bot, human bool) {
+	for _, p := range snap.Parties {
+		if p.AnsweredAt == nil {
+			continue
+		}
+		if p.IsBotLeg {
+			bot = true
+		} else if p.AgentID != nil {
+			human = true
+		}
+	}
+	return bot, human
 }
 
 // recordingKeyFor is the switch's naming contract: UTC date of call start,

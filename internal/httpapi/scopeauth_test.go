@@ -53,7 +53,7 @@ type seeded struct {
 
 // newFixture builds a real database, runs the real migrations, and stands up a
 // real server.
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, opts ...func(*Deps)) *fixture {
 	t.Helper()
 	dsn := testdb.ScratchDSN(t, "scopetest")
 
@@ -68,7 +68,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	cfg := config.Config{SessionCookie: "aicc_session", SessionTTL: time.Hour}
-	srv := New(cfg, Deps{
+	deps := Deps{
 		Auth:     auth.NewService(st.Queries, cfg.SessionTTL),
 		Agents:   stubAgents{},
 		AgentDir: dbDirectory{st},
@@ -78,7 +78,11 @@ func newFixture(t *testing.T) *fixture {
 		Contacts: st.Contacts(),
 		Keys:     APIKeys{APIKeyStore: st.APIKeys()},
 		Hub:      events.NewHub(events.NewSequence(dbSeq{st}, "events")),
-	})
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	srv := New(cfg, deps)
 	f := &fixture{t: t, server: httptest.NewServer(srv.router()), st: st}
 	t.Cleanup(f.server.Close)
 

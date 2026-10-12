@@ -391,3 +391,39 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+// Post-call transcription is off unless asked for, and asking for it without
+// an endpoint that can work is a startup error, not a queue that never drains.
+func TestPostCallTranscribeConfig(t *testing.T) {
+	t.Setenv("AICC_ENV", "dev")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.IsPostCallTranscribeEnabled {
+		t.Error("post-call transcription is on by default")
+	}
+	if c.PostCallTranscribeModel != "qwen-audio-3.1-asr-flash" || c.PostCallTranscribeMinSec != 10 ||
+		c.PostCallTranscribeMaxSec != 3600 || c.PostCallTranscribeDailyMaxMin != 600 ||
+		c.PostCallTranscribeConcurrency != 2 || c.PostCallTranscribeMaxAttempts != 3 {
+		t.Errorf("defaults = %+v, want the ones .env.example documents", c)
+	}
+
+	t.Setenv("AICC_POSTCALL_TRANSCRIBE_ENABLED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AICC_POSTCALL_TRANSCRIBE_ENDPOINT") {
+		t.Errorf("enabled with no endpoint: %v", err)
+	}
+	t.Setenv("AICC_POSTCALL_TRANSCRIBE_ENDPOINT", "wss://w.example/api-ws/v1/inference")
+	if _, err := Load(); err == nil {
+		t.Error("the WebSocket endpoint was accepted")
+	}
+	t.Setenv("AICC_POSTCALL_TRANSCRIBE_ENDPOINT", "https://w.example/api/v1/services/aigc/multimodal-generation/generation")
+	if _, err := Load(); err != nil {
+		t.Errorf("a valid configuration was refused: %v", err)
+	}
+	t.Setenv("AICC_POSTCALL_TRANSCRIBE_MIN_SEC", "100")
+	t.Setenv("AICC_POSTCALL_TRANSCRIBE_MAX_SEC", "50")
+	if _, err := Load(); err == nil {
+		t.Error("a maximum below the minimum was accepted")
+	}
+}
