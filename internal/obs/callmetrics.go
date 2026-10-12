@@ -46,6 +46,9 @@ var (
 	webhookDeliveries metric.Int64Counter
 
 	campaignUnmappedCause metric.Int64Counter
+	campaignAttempts      metric.Int64Counter
+	dialerInFlight        metric.Int64UpDownCounter
+	dialerBlocked         metric.Int64Counter
 )
 
 // CallKind labels a live call. The two populations overlap rather than sum:
@@ -160,6 +163,15 @@ func init() {
 		metric.WithDescription("Campaign attempts that ended with a hangup cause the "+
 			"outcome table has no row for. Each was treated as TRANSIENT (retried within "+
 			"maxSystemRetries); a rising count means the table needs a row."))
+	campaignAttempts, _ = meter.Int64Counter("aicc_campaign_attempts_total",
+		metric.WithDescription("Campaign attempts that finished, by outcome. A revision of "+
+			"an attempt that was already finished is not counted again."))
+	dialerInFlight, _ = meter.Int64UpDownCounter("aicc_dialer_in_flight",
+		metric.WithDescription("Campaign calls in flight, by kind: RINGING until the "+
+			"customer answers, TALKING from the answer to the end of the call."))
+	dialerBlocked, _ = meter.Int64Counter("aicc_dialer_admission_blocked_total",
+		metric.WithDescription("Times the dialer had a contact to dial and did not, by "+
+			"reason: CAMPAIGN_CONCURRENCY, OUTBOUND_RINGING or BOT_CAPACITY."))
 	transcribeFramesSent, _ = meter.Int64Counter("aicc_transcribe_frames_sent_total",
 		metric.WithDescription("Audio frames handed to a recognition session, by speaker."))
 	transcribeFramesDropped, _ = meter.Int64Counter("aicc_transcribe_frames_dropped_total",
@@ -412,6 +424,41 @@ func RecordBotHold(outcome string, ms int64) {
 	}
 	if outcome == BotHoldOverflow && botOverflow != nil {
 		botOverflow.Add(context.Background(), 1)
+	}
+}
+
+// The kinds of aicc_dialer_in_flight and the reasons of
+// aicc_dialer_admission_blocked_total.
+const (
+	DialerRinging = "RINGING"
+	DialerTalking = "TALKING"
+
+	DialerBlockedCampaign = "CAMPAIGN_CONCURRENCY"
+	DialerBlockedRinging  = "OUTBOUND_RINGING"
+	DialerBlockedBot      = "BOT_CAPACITY"
+)
+
+// RecordCampaignAttempt counts a finished campaign attempt by outcome.
+func RecordCampaignAttempt(outcome string) {
+	if campaignAttempts != nil {
+		campaignAttempts.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("outcome", outcome)))
+	}
+}
+
+// DialerInFlightChanged moves the in-flight gauge for one kind.
+func DialerInFlightChanged(kind string, delta int64) {
+	if dialerInFlight != nil {
+		dialerInFlight.Add(context.Background(), delta,
+			metric.WithAttributes(attribute.String("kind", kind)))
+	}
+}
+
+// RecordDialerBlocked counts an admission refused for a reason.
+func RecordDialerBlocked(reason string) {
+	if dialerBlocked != nil {
+		dialerBlocked.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("reason", reason)))
 	}
 }
 

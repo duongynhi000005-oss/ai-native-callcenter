@@ -17,10 +17,13 @@ import (
 
 // DNCStore is the do-not-call list: numbers this platform never places a call
 // to. Every number it holds is canonical E.164.
-type DNCStore struct{ q *queries.Queries }
+type DNCStore struct {
+	q       *queries.Queries
+	onAdded func()
+}
 
 // DNC returns the do-not-call list.
-func (s *Store) DNC() *DNCStore { return &DNCStore{q: s.Queries} }
+func (s *Store) DNC() *DNCStore { return &DNCStore{q: s.Queries, onAdded: s.OnDNCAdded} }
 
 // DNC entry sources, byte-identical in JSON and the database.
 const (
@@ -71,6 +74,9 @@ func (d *DNCStore) Add(ctx context.Context, number, source string, callID, by *u
 	}
 	if err != nil {
 		return DNCNumber{}, false, err
+	}
+	if d.onAdded != nil {
+		d.onAdded()
 	}
 	return dncFromRow(row), true, nil
 }

@@ -196,6 +196,48 @@ func (e CallbackStatus) Valid() bool {
 	}
 }
 
+// Defines values for CampaignActivity.
+const (
+	CampaignActivityATCAPACITY    CampaignActivity = "AT_CAPACITY"
+	CampaignActivityDIALING       CampaignActivity = "DIALING"
+	CampaignActivityWAITINGRETRY  CampaignActivity = "WAITING_RETRY"
+	CampaignActivityWAITINGWINDOW CampaignActivity = "WAITING_WINDOW"
+)
+
+// Valid indicates whether the value is a known member of the CampaignActivity enum.
+func (e CampaignActivity) Valid() bool {
+	switch e {
+	case CampaignActivityATCAPACITY:
+		return true
+	case CampaignActivityDIALING:
+		return true
+	case CampaignActivityWAITINGRETRY:
+		return true
+	case CampaignActivityWAITINGWINDOW:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CampaignAttemptState.
+const (
+	CampaignAttemptStateDIALING  CampaignAttemptState = "DIALING"
+	CampaignAttemptStateFINISHED CampaignAttemptState = "FINISHED"
+)
+
+// Valid indicates whether the value is a known member of the CampaignAttemptState enum.
+func (e CampaignAttemptState) Valid() bool {
+	switch e {
+	case CampaignAttemptStateDIALING:
+		return true
+	case CampaignAttemptStateFINISHED:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CampaignContactStatus.
 const (
 	CampaignContactStatusACTIVE        CampaignContactStatus = "ACTIVE"
@@ -1575,6 +1617,9 @@ type CallbackStatus string
 
 // Campaign defines model for Campaign.
 type Campaign struct {
+	// Activity What a RUNNING campaign is doing right now, computed by the dialer and never stored. DIALING: calls are in flight. WAITING_WINDOW: every pending contact is outside its calling window (the campaign stays RUNNING; the window reopens by itself). WAITING_RETRY: no pending contact is due yet. AT_CAPACITY: due contacts are held back by a limit (the campaign's maxConcurrent, the deployment's ringing cap, or bot capacity).
+	Activity *CampaignActivity `json:"activity,omitempty"`
+
 	// CallingWindow When a contact may be dialled, in that contact's own time zone (its timeZone, else the campaign's). It binds in addition to the deployment's outer calling hours (AICC_OUTBOUND_HOURS, default 08:00-21:00), and every range must lie wholly inside them: otherwise CAMPAIGN_WINDOW_OUTSIDE_LIMIT, on create and on every change. Ranges of one window may not overlap. A closed window does not pause the campaign.
 	CallingWindow CampaignCallingWindow `json:"callingWindow"`
 
@@ -1598,9 +1643,15 @@ type Campaign struct {
 	FollowUpQueueID *openapi_types.UUID `json:"followUpQueueId,omitempty"`
 	ID              openapi_types.UUID  `json:"id"`
 
+	// InFlight Read-only. Calls this campaign has ringing or talking right now. Absent unless RUNNING.
+	InFlight *int `json:"inFlight,omitempty"`
+
 	// MaxConcurrent This campaign's share of the deployment's concurrent calls.
 	MaxConcurrent int    `json:"maxConcurrent"`
 	Name          string `json:"name"`
+
+	// NextDialAt Read-only. When the dialer expects to place the next call: the earliest time a pending contact is due and inside its calling window. Absent when it is not RUNNING, when contacts are due now, or when nothing is pending.
+	NextDialAt *time.Time `json:"nextDialAt,omitempty"`
 
 	// PauseReason Why a campaign is PAUSED: an operator (MANUAL) or a breaker (TRUNK_FAILURE, PROVIDER_FAILURE). Resuming is an operator's decision in every case.
 	PauseReason *CampaignPauseReason `json:"pauseReason,omitempty"`
@@ -1620,6 +1671,54 @@ type Campaign struct {
 	// TimeZone IANA name. The zone of contacts that carry none of their own.
 	TimeZone string `json:"timeZone"`
 }
+
+// CampaignActivity What a RUNNING campaign is doing right now, computed by the dialer and never stored. DIALING: calls are in flight. WAITING_WINDOW: every pending contact is outside its calling window (the campaign stays RUNNING; the window reopens by itself). WAITING_RETRY: no pending contact is due yet. AT_CAPACITY: due contacts are held back by a limit (the campaign's maxConcurrent, the deployment's ringing cap, or bot capacity).
+type CampaignActivity string
+
+// CampaignAttempt One call placed to a contact. The row exists before the originate is sent, so every call a campaign places has one.
+type CampaignAttempt struct {
+	// CallID The call's id: the CDR carries the same one.
+	CallID     openapi_types.UUID `json:"callId"`
+	CampaignID openapi_types.UUID `json:"campaignId"`
+	ContactID  openapi_types.UUID `json:"contactId"`
+
+	// FinishedAt Absent while DIALING.
+	FinishedAt  *time.Time         `json:"finishedAt,omitempty"`
+	HangupCause *string            `json:"hangupCause,omitempty"`
+	ID          openapi_types.UUID `json:"id"`
+
+	// IsTouched True when the outcome reached the customer, so it counts against maxAttempts and holds the number from other campaigns for the deployment's frequency window.
+	IsTouched bool `json:"isTouched"`
+
+	// LeadIntent What a call concluded about the customer. Absent on a contact no call has recorded a lead for, which is not the same as NONE.
+	LeadIntent *CampaignLeadIntent `json:"leadIntent,omitempty"`
+	LeadNotes  *string             `json:"leadNotes,omitempty"`
+
+	// LegID The customer leg's id.
+	LegID openapi_types.UUID `json:"legId"`
+
+	// Number Canonical E.164 number dialled.
+	Number string `json:"number"`
+
+	// Outcome How an attempt ended (design 10 section 7.2). A contact's lastOutcome is the latest attempt's.
+	Outcome   *CampaignOutcome `json:"outcome,omitempty"`
+	StartedAt time.Time        `json:"startedAt"`
+
+	// State DIALING until the call ended and its outcome was written, once; a fuller CDR may later revise the outcome of a FINISHED attempt, never its state.
+	State   CampaignAttemptState `json:"state"`
+	TalkSec *int                 `json:"talkSec,omitempty"`
+}
+
+// CampaignAttemptList defines model for CampaignAttemptList.
+type CampaignAttemptList struct {
+	Items []CampaignAttempt `json:"items"`
+
+	// Total Total rows matching the filter, for paging.
+	Total int `json:"total"`
+}
+
+// CampaignAttemptState DIALING until the call ended and its outcome was written, once; a fuller CDR may later revise the outcome of a FINISHED attempt, never its state.
+type CampaignAttemptState string
 
 // CampaignBackoff Spacing of the retries of a failure that never reached the customer (TRANSIENT, ORIGINATE_FAILED): the first retry comes baseSec after the failure, each next one factor times later, never more than capSec.
 type CampaignBackoff struct {
@@ -3058,6 +3157,14 @@ type ListCampaignsParams struct {
 	Offset *int            `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
+// ListCampaignAttemptsParams defines parameters for ListCampaignAttempts.
+type ListCampaignAttemptsParams struct {
+	ContactID *openapi_types.UUID `form:"contactId,omitempty" json:"contactId,omitempty"`
+	Outcome   *CampaignOutcome    `form:"outcome,omitempty" json:"outcome,omitempty"`
+	Limit     *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset    *int                `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
 // ListCampaignContactsParams defines parameters for ListCampaignContacts.
 type ListCampaignContactsParams struct {
 	Status     *CampaignContactStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -3430,6 +3537,9 @@ type ServerInterface interface {
 	// UpdateCampaign Change a campaign
 	// (PATCH /campaigns/{campaignId})
 	UpdateCampaign(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID)
+	// ListCampaignAttempts List a campaign's attempts
+	// (GET /campaigns/{campaignId}/attempts)
+	ListCampaignAttempts(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID, params ListCampaignAttemptsParams)
 	// CancelCampaign Cancel a campaign
 	// (POST /campaigns/{campaignId}/cancel)
 	CancelCampaign(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID)
@@ -3916,6 +4026,12 @@ func (_ Unimplemented) GetCampaign(w http.ResponseWriter, r *http.Request, campa
 // UpdateCampaign Change a campaign
 // (PATCH /campaigns/{campaignId})
 func (_ Unimplemented) UpdateCampaign(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListCampaignAttempts List a campaign's attempts
+// (GET /campaigns/{campaignId}/attempts)
+func (_ Unimplemented) ListCampaignAttempts(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID, params ListCampaignAttemptsParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5528,6 +5644,87 @@ func (siw *ServerInterfaceWrapper) UpdateCampaign(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.UpdateCampaign(w, r, campaignID)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListCampaignAttempts operation middleware
+func (siw *ServerInterfaceWrapper) ListCampaignAttempts(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "campaignId" -------------
+	var campaignID openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "campaignId", chi.URLParam(r, "campaignId"), &campaignID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "campaignId", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListCampaignAttemptsParams
+
+	// ------------- Optional query parameter "contactId" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "contactId", r.URL.Query(), &params.ContactID, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "contactId"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "contactId", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "outcome" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "outcome", r.URL.Query(), &params.Outcome, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "outcome"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "outcome", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListCampaignAttempts(w, r, campaignID, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -7559,6 +7756,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Patch(options.BaseURL+"/campaigns/{campaignId}", wrapper.UpdateCampaign)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/campaigns/{campaignId}/attempts", wrapper.ListCampaignAttempts)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/campaigns/{campaignId}/cancel", wrapper.CancelCampaign)

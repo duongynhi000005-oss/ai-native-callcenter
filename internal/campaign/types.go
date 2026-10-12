@@ -145,6 +145,9 @@ type Campaign struct {
 	StartedAt          *time.Time
 	FinishedAt         *time.Time
 	Contacts           ContactCounts
+	// Progress is the dialer's read-only account of a RUNNING campaign; the
+	// zero value when it is not running or the dialer has no view.
+	Progress Progress
 }
 
 // Contact is one number a campaign dials.

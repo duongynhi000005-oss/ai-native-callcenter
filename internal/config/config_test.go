@@ -390,6 +390,9 @@ func TestValidate(t *testing.T) {
 			if tt.cfg.ProviderBreakerCount == 0 {
 				tt.cfg.ProviderBreakerCount = DefaultProviderBreakerCount
 			}
+			if tt.cfg.OutboundMaxRinging == 0 {
+				tt.cfg.OutboundMaxRinging = DefaultOutboundMaxRinging
+			}
 			err := tt.cfg.validate()
 			if tt.wantErr == "" {
 				if err != nil {

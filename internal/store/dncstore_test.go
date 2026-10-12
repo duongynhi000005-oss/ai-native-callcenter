@@ -113,3 +113,24 @@ func TestTheDNCTableRefusesWhatIsNotCanonical(t *testing.T) {
 		t.Errorf("a canonical row was refused: %v", err)
 	}
 }
+
+// The dialer skips the contacts waiting on a number the moment it is listed;
+// a number that was already there is not news.
+func TestAddingANumberToTheDNCListTellsTheDialerOnce(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openDNC(t)
+	var told int
+	st.OnDNCAdded = func() { told++ }
+	list := st.DNC()
+	for range 3 {
+		if _, _, err := list.Add(ctx, "+8613800138000", DNCSourceManual, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if told != 1 {
+		t.Errorf("told %d times, want once", told)
+	}
+	if _, _, err := list.Add(ctx, "+8613800138001", DNCSourceManual, nil, nil); err != nil || told != 2 {
+		t.Errorf("a new number: told %d, %v", told, err)
+	}
+}

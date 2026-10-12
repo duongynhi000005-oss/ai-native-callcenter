@@ -85,6 +85,8 @@ type Repository interface {
 	// one entry per input, in order.
 	ImportContacts(ctx context.Context, campaignID uuid.UUID, contacts []NewContact) ([]Stored, error)
 	ListContacts(ctx context.Context, campaignID uuid.UUID, f ContactFilter) ([]Contact, int64, error)
+	// ListAttempts pages a campaign's attempts, newest first.
+	ListAttempts(ctx context.Context, campaignID uuid.UUID, f AttemptFilter) ([]Attempt, int64, error)
 }
 
 // Controller moves a campaign between statuses. The API asks, the controller
@@ -137,6 +139,52 @@ type Service struct {
 	ctl  Controller
 	env  Env
 	now  func() time.Time
+	// progress and observer connect the dialer; both optional.
+	progress ProgressSource
+	observer Observer
+}
+
+// WithDialer connects the dialer's read side and its change notices. Either
+// may be nil.
+func (s *Service) WithDialer(p ProgressSource, o Observer) *Service {
+	s.progress, s.observer = p, o
+	return s
+}
+
+// annotate fills in what the dialer says about each running campaign.
+func (s *Service) annotate(list []Campaign) {
+	if s.progress == nil {
+		return
+	}
+	for i := range list {
+		if list[i].Status != StatusRunning {
+			continue
+		}
+		if p, ok := s.progress.Progress(list[i].ID); ok {
+			list[i].Progress = p
+		}
+	}
+}
+
+// moved annotates the campaign a transition returns.
+func (s *Service) moved(c Campaign, err error) (Campaign, error) {
+	if err != nil {
+		return c, err
+	}
+	list := []Campaign{c}
+	s.annotate(list)
+	return list[0], nil
+}
+
+// ListAttempts pages a campaign's attempts, newest first.
+func (s *Service) ListAttempts(ctx context.Context, id uuid.UUID, f AttemptFilter) ([]Attempt, int64, error) {
+	if f.Outcome != "" && !f.Outcome.IsValid() {
+		return nil, 0, invalid("outcome", "UNKNOWN_OUTCOME", "%q is not an outcome", f.Outcome)
+	}
+	if _, err := s.repo.Get(ctx, id); err != nil {
+		return nil, 0, err
+	}
+	return s.repo.ListAttempts(ctx, id, f)
 }
 
 // NewService builds the service. A nil controller means RepoController.
@@ -229,7 +277,13 @@ func (s *Service) Create(ctx context.Context, in New) (Campaign, error) {
 
 // Get returns one campaign.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Campaign, error) {
-	return s.repo.Get(ctx, id)
+	c, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return c, err
+	}
+	list := []Campaign{c}
+	s.annotate(list)
+	return list[0], nil
 }
 
 // List pages campaigns, newest first.
@@ -237,7 +291,9 @@ func (s *Service) List(ctx context.Context, f ListFilter) ([]Campaign, int64, er
 	if f.Status != "" && !f.Status.IsValid() {
 		return nil, 0, invalid("status", "UNKNOWN_STATUS", "%q is not a campaign status", f.Status)
 	}
-	return s.repo.List(ctx, f)
+	items, total, err := s.repo.List(ctx, f)
+	s.annotate(items)
+	return items, total, err
 }
 
 // mutable fields while a campaign runs or is paused; everything else is
@@ -261,7 +317,9 @@ type changes map[string]bool
 // "changed" when its new value differs from the stored one, so a client that
 // sends the whole form back is not refused for the fields it did not touch.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, p Patch) (Campaign, error) {
-	return s.repo.Update(ctx, id, func(cur Campaign) (Campaign, error) {
+	var before Campaign
+	after, err := s.repo.Update(ctx, id, func(cur Campaign) (Campaign, error) {
+		before = cur
 		next := cur
 		ch := changes{}
 		if p.Name != nil {
@@ -336,6 +394,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, p Patch) (Campaign, 
 		}
 		return next, nil
 	})
+	if err != nil {
+		return after, err
+	}
+	if s.observer != nil {
+		s.observer.Updated(before, after)
+	}
+	list := []Campaign{after}
+	s.annotate(list)
+	return list[0], nil
 }
 
 func differs(field string, a, b Campaign) bool {
@@ -387,22 +454,22 @@ func (s *Service) Start(ctx context.Context, id uuid.UUID) (Campaign, error) {
 	}); err != nil {
 		return Campaign{}, err
 	}
-	return s.ctl.Start(ctx, id)
+	return s.moved(s.ctl.Start(ctx, id))
 }
 
 // Pause moves RUNNING to PAUSED with reason MANUAL.
 func (s *Service) Pause(ctx context.Context, id uuid.UUID) (Campaign, error) {
-	return s.ctl.Pause(ctx, id)
+	return s.moved(s.ctl.Pause(ctx, id))
 }
 
 // Resume moves PAUSED to RUNNING, whatever paused it.
 func (s *Service) Resume(ctx context.Context, id uuid.UUID) (Campaign, error) {
-	return s.ctl.Resume(ctx, id)
+	return s.moved(s.ctl.Resume(ctx, id))
 }
 
 // Cancel moves DRAFT, RUNNING or PAUSED to CANCELLED. Calls in flight finish.
 func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (Campaign, error) {
-	return s.ctl.Cancel(ctx, id)
+	return s.moved(s.ctl.Cancel(ctx, id))
 }
 
 // ListContacts pages a campaign's contacts in import order.

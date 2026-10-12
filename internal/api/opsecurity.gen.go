@@ -202,6 +202,11 @@ var OperationSecurityByRoute = map[string]OperationSecurity{
 		SessionScopes: []string{"campaigns:read"},
 		KeyScopes:     []string{"campaigns:read"},
 	},
+	"GET /campaigns/{campaignId}/attempts": {
+		OperationID:   "listCampaignAttempts",
+		SessionScopes: []string{"campaigns:read"},
+		KeyScopes:     []string{"campaigns:read"},
+	},
 	"GET /campaigns/{campaignId}/contacts": {
 		OperationID:   "listCampaignContacts",
 		SessionScopes: []string{"campaigns:read"},

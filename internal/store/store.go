@@ -53,6 +53,9 @@ type Store struct {
 	// dialer's actor wakes on it; the store cannot reach the actor, so whoever
 	// wires it up hands it in.
 	OnAttemptFinished func(campaign.Finished)
+	// OnDNCAdded, when set, is told that a number was newly put on the
+	// do-not-call list, so the dialer can skip the contacts waiting on it.
+	OnDNCAdded func()
 	// OutboundHours are the deployment's outer calling hours
 	// (AICC_OUTBOUND_HOURS). A campaign contact's retry is never scheduled
 	// outside them. The zero value means no outer limit.

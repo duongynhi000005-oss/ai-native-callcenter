@@ -160,6 +160,9 @@ func (s *Service) ImportContacts(ctx context.Context, id uuid.UUID, rows []Impor
 	if err != nil {
 		return ImportResult{}, err
 	}
+	if s.observer != nil {
+		s.observer.Imported(id)
+	}
 	for i, k := range pos {
 		r := &res.Rows[i]
 		r.ContactID = stored[k].ID

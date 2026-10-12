@@ -32,6 +32,7 @@ type CampaignService interface {
 	Cancel(ctx context.Context, id uuid.UUID) (campaign.Campaign, error)
 	ImportContacts(ctx context.Context, id uuid.UUID, rows []campaign.ImportRow) (campaign.ImportResult, error)
 	ListContacts(ctx context.Context, id uuid.UUID, f campaign.ContactFilter) ([]campaign.Contact, int64, error)
+	ListAttempts(ctx context.Context, id uuid.UUID, f campaign.AttemptFilter) ([]campaign.Attempt, int64, error)
 }
 
 // maxCampaignBody bounds a campaign request body. The 5000 rows of a full
@@ -199,6 +200,53 @@ func (s *Server) ListCampaignContacts(w http.ResponseWriter, r *http.Request,
 		out = append(out, campaignContactOut(c))
 	}
 	writeJSON(w, http.StatusOK, api.CampaignContactList{Items: out, Total: int(total)})
+}
+
+// ListCampaignAttempts pages a campaign's attempts, newest first.
+func (s *Server) ListCampaignAttempts(w http.ResponseWriter, r *http.Request,
+	campaignID openapi_types.UUID, params api.ListCampaignAttemptsParams) {
+	items, total, err := s.campaigns.ListAttempts(r.Context(), campaignID, campaign.AttemptFilter{
+		ContactID: params.ContactID,
+		Outcome:   campaign.Outcome(stringOr(params.Outcome)),
+		Limit:     intOr(params.Limit, 50),
+		Offset:    intOr(params.Offset, 0),
+	})
+	if err != nil {
+		s.writeCampaignError(w, r, err)
+		return
+	}
+	out := make([]api.CampaignAttempt, 0, len(items))
+	for _, a := range items {
+		out = append(out, campaignAttemptOut(a))
+	}
+	writeJSON(w, http.StatusOK, api.CampaignAttemptList{Items: out, Total: int(total)})
+}
+
+func campaignAttemptOut(a campaign.Attempt) api.CampaignAttempt {
+	out := api.CampaignAttempt{
+		ID: a.ID, CampaignID: a.CampaignID, ContactID: a.ContactID, Number: a.Number,
+		CallID: a.CallID, LegID: a.LegID, State: api.CampaignAttemptState(a.State),
+		IsTouched: a.IsTouched, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt,
+	}
+	if a.Outcome != "" {
+		o := api.CampaignOutcome(a.Outcome)
+		out.Outcome = &o
+		t := a.TalkSec
+		out.TalkSec = &t
+	}
+	if a.HangupCause != "" {
+		c := a.HangupCause
+		out.HangupCause = &c
+	}
+	if a.LeadIntent != "" {
+		i := api.CampaignLeadIntent(a.LeadIntent)
+		out.LeadIntent = &i
+	}
+	if a.LeadNotes != "" {
+		n := a.LeadNotes
+		out.LeadNotes = &n
+	}
+	return out
 }
 
 // ImportCampaignContacts adds a list of contacts and answers one result per
@@ -439,6 +487,13 @@ func campaignOut(c campaign.Campaign) api.Campaign {
 			Total: c.Contacts.Total, Active: c.Contacts.Active, Done: c.Contacts.Done,
 			Exhausted: c.Contacts.Exhausted, InvalidNumber: c.Contacts.InvalidNumber, DNC: c.Contacts.DNC,
 		},
+	}
+	if c.Status == campaign.StatusRunning && c.Progress.Activity != "" {
+		a := api.CampaignActivity(c.Progress.Activity)
+		out.Activity = &a
+		out.NextDialAt = c.Progress.NextDialAt
+		n := c.Progress.InFlight
+		out.InFlight = &n
 	}
 	if c.PauseReason != "" {
 		reason := api.CampaignPauseReason(c.PauseReason)

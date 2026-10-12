@@ -5770,6 +5770,101 @@
         }
       }
     },
+    "/campaigns/{campaignId}/attempts": {
+      "get": {
+        "operationId": "listCampaignAttempts",
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "List a campaign's attempts",
+        "description": "Newest first. contactId and outcome narrow the list. Needs campaigns:read.",
+        "parameters": [
+          {
+            "name": "campaignId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "contactId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/CampaignOutcome"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page plus the total for the filter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignAttemptList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "security": [
+          {
+            "cookieSession": [
+              "campaigns:read"
+            ]
+          },
+          {
+            "apiKeyBearer": [
+              "campaigns:read"
+            ]
+          }
+        ]
+      }
+    },
     "/system/health": {
       "get": {
         "operationId": "getSystemHealth",
@@ -11135,6 +11230,19 @@
           },
           "contacts": {
             "$ref": "#/components/schemas/CampaignContactCounts"
+          },
+          "activity": {
+            "$ref": "#/components/schemas/CampaignActivity"
+          },
+          "nextDialAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Read-only. When the dialer expects to place the next call: the earliest time a pending contact is due and inside its calling window. Absent when it is not RUNNING, when contacts are due now, or when nothing is pending."
+          },
+          "inFlight": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Read-only. Calls this campaign has ringing or talking right now. Absent unless RUNNING."
           }
         },
         "required": [
@@ -11487,6 +11595,118 @@
           "duplicates",
           "rejected",
           "rows"
+        ]
+      },
+      "CampaignActivity": {
+        "type": "string",
+        "enum": [
+          "DIALING",
+          "WAITING_WINDOW",
+          "WAITING_RETRY",
+          "AT_CAPACITY"
+        ],
+        "description": "What a RUNNING campaign is doing right now, computed by the dialer and never stored. DIALING: calls are in flight. WAITING_WINDOW: every pending contact is outside its calling window (the campaign stays RUNNING; the window reopens by itself). WAITING_RETRY: no pending contact is due yet. AT_CAPACITY: due contacts are held back by a limit (the campaign's maxConcurrent, the deployment's ringing cap, or bot capacity)."
+      },
+      "CampaignAttemptState": {
+        "type": "string",
+        "enum": [
+          "DIALING",
+          "FINISHED"
+        ],
+        "description": "DIALING until the call ended and its outcome was written, once; a fuller CDR may later revise the outcome of a FINISHED attempt, never its state."
+      },
+      "CampaignAttempt": {
+        "type": "object",
+        "description": "One call placed to a contact. The row exists before the originate is sent, so every call a campaign places has one.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "campaignId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "contactId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "string",
+            "description": "Canonical E.164 number dialled."
+          },
+          "callId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The call's id: the CDR carries the same one."
+          },
+          "legId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The customer leg's id."
+          },
+          "state": {
+            "$ref": "#/components/schemas/CampaignAttemptState"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CampaignOutcome"
+          },
+          "hangupCause": {
+            "type": "string"
+          },
+          "talkSec": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "isTouched": {
+            "type": "boolean",
+            "description": "True when the outcome reached the customer, so it counts against maxAttempts and holds the number from other campaigns for the deployment's frequency window."
+          },
+          "leadIntent": {
+            "$ref": "#/components/schemas/CampaignLeadIntent"
+          },
+          "leadNotes": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Absent while DIALING."
+          }
+        },
+        "required": [
+          "id",
+          "campaignId",
+          "contactId",
+          "number",
+          "callId",
+          "legId",
+          "state",
+          "isTouched",
+          "startedAt"
+        ]
+      },
+      "CampaignAttemptList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CampaignAttempt"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total rows matching the filter, for paging."
+          }
+        },
+        "required": [
+          "items",
+          "total"
         ]
       }
     }

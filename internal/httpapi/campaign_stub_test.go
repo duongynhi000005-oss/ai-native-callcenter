@@ -45,3 +45,7 @@ func (stubCampaigns) ImportContacts(context.Context, uuid.UUID, []campaign.Impor
 func (stubCampaigns) ListContacts(context.Context, uuid.UUID, campaign.ContactFilter) ([]campaign.Contact, int64, error) {
 	return nil, 0, nil
 }
+
+func (stubCampaigns) ListAttempts(context.Context, uuid.UUID, campaign.AttemptFilter) ([]campaign.Attempt, int64, error) {
+	return nil, 0, nil
+}

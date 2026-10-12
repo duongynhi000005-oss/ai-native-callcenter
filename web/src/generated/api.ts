@@ -1487,6 +1487,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/campaigns/{campaignId}/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a campaign's attempts
+         * @description Newest first. contactId and outcome narrow the list. Needs campaigns:read.
+         */
+        get: operations["listCampaignAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/health": {
         parameters: {
             query?: never;
@@ -3370,6 +3390,14 @@ export interface components {
              */
             finishedAt?: string;
             contacts: components["schemas"]["CampaignContactCounts"];
+            activity?: components["schemas"]["CampaignActivity"];
+            /**
+             * Format: date-time
+             * @description Read-only. When the dialer expects to place the next call: the earliest time a pending contact is due and inside its calling window. Absent when it is not RUNNING, when contacts are due now, or when nothing is pending.
+             */
+            nextDialAt?: string;
+            /** @description Read-only. Calls this campaign has ringing or talking right now. Absent unless RUNNING. */
+            inFlight?: number;
         };
         /** @description A campaign to create. It starts as a DRAFT. */
         CampaignWrite: {
@@ -3500,6 +3528,57 @@ export interface components {
             rejected: number;
             /** @description One result per request row, in request order. */
             rows: components["schemas"]["CampaignImportRowResult"][];
+        };
+        /**
+         * @description What a RUNNING campaign is doing right now, computed by the dialer and never stored. DIALING: calls are in flight. WAITING_WINDOW: every pending contact is outside its calling window (the campaign stays RUNNING; the window reopens by itself). WAITING_RETRY: no pending contact is due yet. AT_CAPACITY: due contacts are held back by a limit (the campaign's maxConcurrent, the deployment's ringing cap, or bot capacity).
+         * @enum {string}
+         */
+        CampaignActivity: "DIALING" | "WAITING_WINDOW" | "WAITING_RETRY" | "AT_CAPACITY";
+        /**
+         * @description DIALING until the call ended and its outcome was written, once; a fuller CDR may later revise the outcome of a FINISHED attempt, never its state.
+         * @enum {string}
+         */
+        CampaignAttemptState: "DIALING" | "FINISHED";
+        /** @description One call placed to a contact. The row exists before the originate is sent, so every call a campaign places has one. */
+        CampaignAttempt: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            campaignId: string;
+            /** Format: uuid */
+            contactId: string;
+            /** @description Canonical E.164 number dialled. */
+            number: string;
+            /**
+             * Format: uuid
+             * @description The call's id: the CDR carries the same one.
+             */
+            callId: string;
+            /**
+             * Format: uuid
+             * @description The customer leg's id.
+             */
+            legId: string;
+            state: components["schemas"]["CampaignAttemptState"];
+            outcome?: components["schemas"]["CampaignOutcome"];
+            hangupCause?: string;
+            talkSec?: number;
+            /** @description True when the outcome reached the customer, so it counts against maxAttempts and holds the number from other campaigns for the deployment's frequency window. */
+            isTouched: boolean;
+            leadIntent?: components["schemas"]["CampaignLeadIntent"];
+            leadNotes?: string;
+            /** Format: date-time */
+            startedAt: string;
+            /**
+             * Format: date-time
+             * @description Absent while DIALING.
+             */
+            finishedAt?: string;
+        };
+        CampaignAttemptList: {
+            items: components["schemas"]["CampaignAttempt"][];
+            /** @description Total rows matching the filter, for paging. */
+            total: number;
         };
     };
     responses: {
@@ -6191,6 +6270,38 @@ export interface operations {
                 };
             };
             422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listCampaignAttempts: {
+        parameters: {
+            query?: {
+                contactId?: string;
+                outcome?: components["schemas"]["CampaignOutcome"];
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                campaignId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page plus the total for the filter. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignAttemptList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
