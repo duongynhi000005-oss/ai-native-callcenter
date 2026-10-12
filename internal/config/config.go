@@ -104,6 +104,13 @@ type Config struct {
 	// is the loopback's own, gone by the time the bot has anything to say
 	// about the caller, so no stamp and no transfer can find the channel (C47).
 	OutboundEndpoint string
+	// OutboundRingTimeout is how long an originated outbound leg (AI outbound
+	// and click-to-dial) rings before the switch gives up on it
+	// (AICC_OUTBOUND_RING_TIMEOUT), sent as originate_timeout. It must be
+	// strictly below OutboundAnswerWindow so an answer after the window is
+	// unreachable by construction; validate refuses anything else.
+	OutboundRingTimeout    time.Duration
+	outboundRingTimeoutErr error // a malformed value, refused by validate
 	// OutboundSIPHeaders are appended to the AI outbound customer leg only
 	// (AICC_OUTBOUND_SIP_HEADERS); see ParseOutboundSIPHeaders. The
 	// application names no SBC vendor, a deployment sets its own marker.
@@ -314,6 +321,10 @@ func Load() (Config, error) {
 	if !isNoInputSet {
 		noInput = DefaultBotNoInputTimeout
 	}
+	ringTimeout, isRingSet, ringErr := envDurationIfSet("AICC_OUTBOUND_RING_TIMEOUT")
+	if !isRingSet {
+		ringTimeout = DefaultOutboundRingTimeout
+	}
 	outboundHeaders, outboundHeadersErr := ParseOutboundSIPHeaders(env(outboundHeadersVar, ""))
 	c := Config{
 		Env:                  env("AICC_ENV", "dev"),
@@ -365,6 +376,8 @@ func Load() (Config, error) {
 		ProviderEndpoint:              env("AICC_PROVIDER_ENDPOINT", ""),
 		ProviderModel:                 env("AICC_PROVIDER_MODEL", ""),
 		OutboundEndpoint:              env("AICC_OUTBOUND_ENDPOINT", ""),
+		OutboundRingTimeout:           ringTimeout,
+		outboundRingTimeoutErr:        ringErr,
 		OutboundSIPHeaders:            outboundHeaders,
 		outboundSIPHeadersErr:         outboundHeadersErr,
 		OutboundCallerID:              env("AICC_OUTBOUND_CLID", ""),
@@ -521,6 +534,11 @@ func (c Config) validate() error {
 			c.BotGreetingMediaWait))
 	}
 	if err := ValidateOutboundEndpoint(c.OutboundEndpoint); err != nil {
+		errs = append(errs, err)
+	}
+	if c.outboundRingTimeoutErr != nil {
+		errs = append(errs, c.outboundRingTimeoutErr)
+	} else if err := ValidateOutboundRingTimeout(c.OutboundRingTimeout); err != nil {
 		errs = append(errs, err)
 	}
 	if c.outboundSIPHeadersErr != nil {

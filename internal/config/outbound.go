@@ -5,8 +5,37 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
+
+// The outbound ring timeout (AICC_OUTBOUND_RING_TIMEOUT) and the window an
+// originated leg may take to be answered. The window is a fixed property of
+// the originator, not a setting: the ring timeout is validated against it.
+const (
+	// OutboundAnswerWindow is how long the originator holds the continuation
+	// armed on an originated leg; an answer later than this is not bridged.
+	OutboundAnswerWindow = 60 * time.Second
+	// DefaultOutboundRingTimeout leaves 15 s between the switch giving up and
+	// the window closing, covering the arm delay, retransmissions and a slow
+	// trunk. It is also under the 60 s the switch would apply on its own.
+	DefaultOutboundRingTimeout = 45 * time.Second
+	// MinOutboundRingTimeout keeps a typo from ringing a phone too briefly
+	// to be answered.
+	MinOutboundRingTimeout = 5 * time.Second
+)
+
+// ValidateOutboundRingTimeout checks AICC_OUTBOUND_RING_TIMEOUT: at least
+// MinOutboundRingTimeout and strictly below OutboundAnswerWindow, so a leg
+// the switch is still ringing can never be answered into a window that has
+// already closed.
+func ValidateOutboundRingTimeout(d time.Duration) error {
+	if d < MinOutboundRingTimeout || d >= OutboundAnswerWindow {
+		return fmt.Errorf("AICC_OUTBOUND_RING_TIMEOUT must be at least %s and strictly below the %s answer window, got %s",
+			MinOutboundRingTimeout, OutboundAnswerWindow, d)
+	}
+	return nil
+}
 
 // SIPHeader is one SIP header the deployment asks the AI outbound customer
 // leg to carry. Name is as written by the operator (case preserved).

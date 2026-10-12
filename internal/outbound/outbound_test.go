@@ -121,6 +121,22 @@ type fakeSwitch struct {
 	originates []originated
 	bridges    []bridged
 	transfers  []transferred
+	hangups    []hungUp
+}
+
+type hungUp struct{ channelID, cause string }
+
+func (f *fakeSwitch) Hangup(channelID, cause string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangups = append(f.hangups, hungUp{channelID, cause})
+	return nil
+}
+
+func (f *fakeSwitch) hangupList() []hungUp {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]hungUp(nil), f.hangups...)
 }
 
 func (f *fakeSwitch) TransferToExtension(channelID, extension, context string) error {

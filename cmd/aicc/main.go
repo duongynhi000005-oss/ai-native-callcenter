@@ -294,6 +294,7 @@ func run() error {
 		EndpointFormat: cfg.OutboundEndpoint,
 		SIPHeaders:     cfg.OutboundSIPHeaders,
 		CallerID:       cfg.OutboundCallerID,
+		RingTimeout:    cfg.OutboundRingTimeout,
 	}, adapter, catalogSvc, catalogSvc,
 		st.Ledger().HasCDR,
 		func(callID uuid.UUID) bool {
