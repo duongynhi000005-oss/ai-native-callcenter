@@ -1,0 +1,105 @@
+{
+  "scenarios": [
+    {
+      "name": "caller verifies, picks a plan and the change is booked",
+      "lang": "en",
+      "caller": "13700001111",
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {
+          "phase": "verify", "result": {"found": "1", "in_contract": "0"}}},
+        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "3333"}, "expect": {
+          "phase": "offer", "result": {"match": "1"}}},
+        {"call": "bb_plans", "expect": {"phase": "offer"}},
+        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 2}, "expect": {
+          "phase": "done", "slots": {"bb_change.args.plan_id": 2}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["identity", "verify", "offer", "done", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["bb_account", "bb_verify", "bb_plans", "bb_change", "hangup"]
+      }
+    },
+    {
+      "name": "a plan cannot be changed before the phone is verified",
+      "lang": "en",
+      "caller": "13700002222",
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "verify"}},
+        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 2}, "expect": {"isRefused": true, "phase": "verify"}}
+      ],
+      "expect": {"path": ["identity", "verify"], "toolsRun": ["bb_account"]}
+    },
+    {
+      "name": "two failed verifications go to a person",
+      "lang": "en",
+      "caller": "13700003333",
+      "queues": ["support-en"],
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "verify"}},
+        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "0000"}, "expect": {"phase": "verify", "result": {"match": "0"}}},
+        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "1111"}, "expect": {"phase": "need_transfer"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "VERIFY_FAILED", "summary": "could not verify"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"path": ["identity", "verify", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent"}
+    },
+    {
+      "name": "three unknown service numbers go to a person",
+      "lang": "zh",
+      "caller": "13700004444",
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "00000001"}, "expect": {"phase": "identity", "result": {"found": "0"}}},
+        {"call": "bb_account", "args": {"service_no": "00000002"}, "expect": {"phase": "identity"}},
+        {"call": "bb_account", "args": {"service_no": "00000003"}, "expect": {"phase": "need_transfer"}}
+      ],
+      "expect": {"path": ["identity", "need_transfer"]}
+    },
+    {
+      "name": "a rejected change goes to a person",
+      "description": "The backend refuses plan 9; the failed call moves the call to need_transfer.",
+      "lang": "en",
+      "caller": "13700005555",
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "10086002"}, "expect": {"phase": "verify", "result": {"in_contract": "1"}}},
+        {"call": "bb_verify", "args": {"service_no": "10086002", "phone_last4": "7777"}, "expect": {"phase": "offer"}},
+        {"call": "bb_change", "args": {"service_no": "10086002", "plan_id": 9}, "expect": {"isOk": false, "phase": "need_transfer"}}
+      ],
+      "expect": {"path": ["identity", "verify", "offer", "need_transfer"]}
+    },
+    {
+      "name": "after the change the caller can still ask about plans",
+      "lang": "en",
+      "caller": "13700006666",
+      "steps": [
+        {"call": "bb_account", "args": {"service_no": "10086001"}},
+        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "3333"}},
+        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 1}, "expect": {"phase": "done"}},
+        {"call": "bb_plans", "expect": {"phase": "done"}},
+        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "done"}}
+      ],
+      "expect": {"path": ["identity", "verify", "offer", "done"]}
+    },
+    {
+      "name": "silence at the greeting closes the call",
+      "lang": "en",
+      "caller": "13700007777",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["identity", "finish"]}
+    },
+    {
+      "name": "a bot that keeps chatting is closed by the tool-less wall",
+      "lang": "en",
+      "caller": "13700008888",
+      "steps": [
+        {"repeat": 10, "exchange": "what plans do you have?", "expect": {"phase": "identity"}},
+        {"exchange": "and the price?", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["identity", "finish"]}
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "scenarios": [
+    {
+      "name": "caller promises a date and hangs up",
+      "description": "The main branch: overdue bill found, a payment date recorded, the call closes.",
+      "lang": "en",
+      "caller": "92223333",
+      "steps": [
+        {"say": "Yes, this is me."},
+        {"call": "bill_lookup", "expect": {
+          "phase": "remind",
+          "result": {"found": "1", "amount": "45.60", "days_overdue": "8"},
+          "instructionContains": ["45.60", "8 days overdue"]}},
+        {"say": "I will pay this Friday."},
+        {"call": "promise_record", "args": {"pay_date": "this Friday"}, "expect": {
+          "phase": "promised",
+          "result": {"recorded": "1"},
+          "instructionContains": ["this Friday"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["greet", "remind", "promised", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["bill_lookup", "promise_record", "hangup"]
+      }
+    },
+    {
+      "name": "caller disputes the bill and is handed to a specialist",
+      "lang": "en",
+      "caller": "90000000",
+      "queues": ["support-en"],
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "remind", "result": {"days_overdue": "21"}}},
+        {"say": "That amount is wrong, I paid it already."},
+        {"call": "dispute_record", "args": {"reason": "says the bill was already paid"}, "expect": {"phase": "disputed"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "BILL_DISPUTE", "summary": "Caller says the bill is paid."},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {
+        "path": ["greet", "remind", "disputed", "finish_transfer"],
+        "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-en", "reason": "BILL_DISPUTE"}
+      }
+    },
+    {
+      "name": "no overdue bill for the number",
+      "lang": "en",
+      "caller": "10000000",
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "no_bill", "result": {"found": "0"}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["greet", "no_bill", "finish"], "ending": "hangup"}
+    },
+    {
+      "name": "caller asks for a person at the reminder",
+      "lang": "zh",
+      "caller": "18688886666",
+      "queues": ["support-zh"],
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "remind", "result": {"days_overdue": "16"}}},
+        {"say": "我要找人工"},
+        {"call": "transfer_to_agent", "args": {"queue": "support-zh", "reason": "CALLER_REQUEST", "summary": "要求人工"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"ending": "transfer_to_agent", "transfer": {"queue": "support-zh"}}
+    },
+    {
+      "name": "a refused transfer keeps the call where it is",
+      "lang": "en",
+      "caller": "92223333",
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "the queue is closed"}},
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "remind"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "remind", "result": {"error": "the queue is closed"}}}
+      ],
+      "expect": {"path": ["greet", "remind"], "ending": "none"}
+    },
+    {
+      "name": "a tool from a later phase is refused",
+      "lang": "en",
+      "caller": "92223333",
+      "steps": [
+        {"call": "promise_record", "args": {"pay_date": "Friday"}, "expect": {"isRefused": true, "phase": "greet"}}
+      ],
+      "expect": {"path": ["greet"], "toolsRun": []}
+    },
+    {
+      "name": "three silences close the call",
+      "lang": "en",
+      "caller": "92223333",
+      "steps": [
+        {"noInput": true, "expect": {"phase": "greet", "slots": {"noInput.count": 1}}},
+        {"noInput": true, "expect": {"phase": "greet"}},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["greet", "finish"], "ending": "none"}
+    }
+    ,{
+      "name": "a model that keeps failing to transfer runs into the turn limit",
+      "description": "maxTurns is 20: the 21st tool result sends the call to need_transfer, the flow's fallback.",
+      "lang": "en",
+      "caller": "92223333",
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "the queue is closed"}},
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "remind"}},
+        {"repeat": 19, "call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "remind"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "need_transfer"}}
+      ],
+      "expect": {"path": ["greet", "remind", "need_transfer"]}
+    }
+  ]
+}

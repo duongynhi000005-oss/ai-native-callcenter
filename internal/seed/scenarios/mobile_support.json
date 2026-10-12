@@ -1,0 +1,91 @@
+{
+  "scenarios": [
+    {
+      "name": "caller checks a repair order that exists",
+      "lang": "en",
+      "caller": "13800001111",
+      "steps": [
+        {"exchange": "I want to check my repair."},
+        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {
+          "phase": "repair_report",
+          "result": {"found": "1", "device": "星讯 X1 手机"},
+          "slots": {"repair_status.args.rma": "RMA1001"}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["welcome", "repair_report", "finish"], "ending": "hangup", "toolsRun": ["repair_status", "hangup"]}
+    },
+    {
+      "name": "caller corrects a wrong order number after the first lookup found nothing",
+      "lang": "en",
+      "caller": "13800002222",
+      "steps": [
+        {"call": "repair_status", "args": {"rma": "RMA0000"}, "expect": {"phase": "welcome", "result": {"found": "0"}}},
+        {"call": "repair_status", "args": {"rma": "RMA1002"}, "expect": {"phase": "repair_report", "result": {"found": "1"}}},
+        {"call": "repair_status", "args": {"rma": "RMA0001"}, "expect": {"phase": "repair_report", "result": {"found": "0"}}},
+        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {"phase": "repair_report", "result": {"found": "1"}}}
+      ],
+      "expect": {"path": ["welcome", "repair_report"]}
+    },
+    {
+      "name": "three unknown order numbers hand the caller to a person",
+      "lang": "zh",
+      "caller": "13800003333",
+      "queues": ["support-zh"],
+      "steps": [
+        {"call": "repair_status", "args": {"rma": "RMA0001"}, "expect": {"phase": "welcome"}},
+        {"call": "repair_status", "args": {"rma": "RMA0002"}, "expect": {"phase": "welcome"}},
+        {"call": "repair_status", "args": {"rma": "RMA0003"}, "expect": {"phase": "need_transfer"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-zh", "reason": "REPAIR_ORDER_NOT_FOUND", "summary": "三次查询均无结果"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"path": ["welcome", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-zh", "reason": "REPAIR_ORDER_NOT_FOUND"}}
+    },
+    {
+      "name": "caller presses 0 straight away",
+      "lang": "en",
+      "caller": "13800004444",
+      "queues": ["support-en"],
+      "steps": [
+        {"keypress": "0"},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "asked for an agent"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"ending": "transfer_to_agent"}
+    },
+    {
+      "name": "transfer refused, caller leaves a message",
+      "lang": "en",
+      "caller": "13800005555",
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "outside business hours"}},
+      "steps": [
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "welcome", "result": {"error": "outside business hours"}}},
+        {"call": "take_message", "args": {"message": "call me back about the screen"}, "expect": {"phase": "welcome"}}
+      ],
+      "expect": {"path": ["welcome"], "ending": "take_message"}
+    },
+    {
+      "name": "a bot that only chats is closed by the tool-less wall",
+      "description": "maxTurnsWithoutTool is 10: the 11th tool-less reply to the caller sends the call to the closing phase.",
+      "lang": "en",
+      "caller": "13800006666",
+      "steps": [
+        {"repeat": 10, "exchange": "and what about the battery?", "expect": {"phase": "welcome"}},
+        {"exchange": "and the camera?", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["welcome", "finish"]}
+    },
+    {
+      "name": "a tool-using bot is not closed by the wall",
+      "lang": "en",
+      "caller": "13800007777",
+      "steps": [
+        {"repeat": 8, "exchange": "hmm"},
+        {"call": "repair_status", "args": {"rma": "RMA0001"}},
+        {"repeat": 8, "exchange": "hmm", "expect": {"phase": "welcome"}}
+      ],
+      "expect": {"path": ["welcome"]}
+    }
+  ]
+}

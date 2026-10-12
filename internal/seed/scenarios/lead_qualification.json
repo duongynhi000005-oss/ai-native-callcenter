@@ -1,0 +1,83 @@
+{
+  "scenarios": [
+    {
+      "name": "caller answers all three questions",
+      "description": "Slot tools write the facts; lead_submit sends them to the backend and the grade reaches the closing phase.",
+      "lang": "en",
+      "caller": "13900001111",
+      "steps": [
+        {"say": "Sure, go ahead."},
+        {"call": "record_interest", "args": {"value": "high"}, "expect": {"phase": "greet", "slots": {"interest": "high"},
+          "instructionContains": ["interest=high"]}},
+        {"call": "record_budget", "args": {"value": "around 4000 yuan"}, "expect": {"slots": {"budget": "around 4000 yuan"},
+          "instructionContains": ["budget=around 4000 yuan"]}},
+        {"call": "record_timeline", "args": {"value": "next month"}, "expect": {"slots": {"timeline": "next month"}}},
+        {"call": "lead_submit", "args": {"notes": "wants a trial"}, "expect": {"phase": "done", "result": {"lead_grade": "A", "recorded": "1"},
+          "instructionContains": ["lead grade A"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["greet", "done", "finish"],
+        "ending": "hangup",
+        "slots": {"interest": "high", "budget": "around 4000 yuan", "timeline": "next month"}
+      }
+    },
+    {
+      "name": "caller is not interested from the start",
+      "lang": "zh",
+      "caller": "13900002222",
+      "steps": [
+        {"say": "不好意思,不感兴趣。"},
+        {"call": "record_interest", "args": {"value": "none"}, "expect": {"slots": {"interest": "none"}}},
+        {"call": "lead_submit", "args": {"notes": "declined"}, "expect": {"phase": "done", "result": {"lead_grade": "D"}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["greet", "done", "finish"], "ending": "hangup"}
+    },
+    {
+      "name": "an interest outside the allowed values is refused and nothing is stored",
+      "lang": "en",
+      "caller": "13900003333",
+      "steps": [
+        {"call": "record_interest", "args": {"value": "maybe"}, "expect": {"isOk": false, "phase": "greet"}}
+      ],
+      "expect": {"path": ["greet"]}
+    },
+    {
+      "name": "caller asks for a person mid-survey",
+      "lang": "en",
+      "caller": "13900004444",
+      "queues": ["sales-en"],
+      "steps": [
+        {"call": "record_interest", "args": {"value": "mid"}},
+        {"call": "transfer_to_agent", "args": {"queue": "sales-en", "reason": "CALLER_REQUEST", "summary": "interested, wants a person"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"ending": "transfer_to_agent", "transfer": {"queue": "sales-en"}, "slots": {"interest": "mid"}}
+    },
+    {
+      "name": "silence at the greeting is closed by the engine",
+      "lang": "en",
+      "caller": "13900005555",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["greet", "finish"]}
+    },
+    {
+      "name": "a model that loops on a tool runs into the turn limit",
+      "description": "maxTurns is 15: the 16th tool result sends the call to need_transfer, where a transfer ends it.",
+      "lang": "en",
+      "caller": "13900007777",
+      "queues": ["sales-en"],
+      "steps": [
+        {"repeat": 15, "call": "record_budget", "args": {"value": "3000"}, "expect": {"phase": "greet"}},
+        {"call": "record_budget", "args": {"value": "3000"}, "expect": {"phase": "need_transfer"}},
+        {"call": "transfer_to_agent", "args": {"queue": "sales-en", "reason": "FLOW_FALLBACK", "summary": "x"}, "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"path": ["greet", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent"}
+    }
+  ]
+}
