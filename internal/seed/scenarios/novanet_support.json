@@ -1,0 +1,98 @@
+{
+  "scenarios": [
+    {
+      "name": "english caller asks for a person",
+      "lang": "en",
+      "caller": "8005550100",
+      "queues": ["support-en", "support-zh"],
+      "steps": [
+        {"exchange": "My internet is down, let me talk to somebody."},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "Internet is down."},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"path": ["welcome", "finish_transfer"], "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-en", "reason": "CALLER_REQUEST"}}
+    },
+    {
+      "name": "chinese caller is sent to the chinese queue",
+      "lang": "zh",
+      "caller": "8005550101",
+      "queues": ["support-en", "support-zh"],
+      "steps": [
+        {"call": "transfer_to_agent", "args": {"queue": "support-zh", "reason": "CALLER_REQUEST", "summary": "宽带断网"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"ending": "transfer_to_agent", "transfer": {"queue": "support-zh"}}
+    },
+    {
+      "name": "a queue that does not exist is refused",
+      "lang": "en",
+      "caller": "8005550102",
+      "queues": ["support-en", "support-zh"],
+      "steps": [
+        {"call": "transfer_to_agent", "args": {"queue": "customer_service", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "welcome"}}
+      ],
+      "expect": {"path": ["welcome"], "ending": "none"}
+    },
+    {
+      "name": "transfer refused, the bot offers a message",
+      "lang": "en",
+      "caller": "8005550103",
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "the queue is closed"}},
+      "steps": [
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "welcome"}},
+        {"call": "take_message", "args": {"message": "router keeps rebooting", "callbackNumber": "8005550103"}, "expect": {"phase": "welcome"}},
+        {"call": "hangup", "expect": {"phase": "farewell"}}
+      ],
+      "expect": {"path": ["welcome", "farewell"], "ending": "hangup"}
+    },
+    {
+      "name": "caller says goodbye",
+      "lang": "en",
+      "caller": "8005550104",
+      "steps": [
+        {"call": "hangup", "args": {"isFarewellSpoken": false}, "expect": {"phase": "farewell"}}
+      ],
+      "expect": {"path": ["welcome", "farewell"], "ending": "hangup"}
+    },
+    {
+      "name": "three silences end the call",
+      "lang": "en",
+      "caller": "8005550105",
+      "steps": [
+        {"noInput": true, "expect": {"phase": "welcome"}},
+        {"noInput": true, "expect": {"phase": "welcome"}},
+        {"noInput": true, "expect": {"phase": "farewell"}}
+      ],
+      "expect": {"path": ["welcome", "farewell"]}
+    },
+    {
+      "name": "speech between silences restarts the count",
+      "lang": "en",
+      "caller": "8005550106",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"say": "Hello? Sorry, I was looking for my router."},
+        {"noInput": true, "expect": {"phase": "welcome", "slots": {"noInput.count": 1}}}
+      ],
+      "expect": {"path": ["welcome"]}
+    },
+    {
+      "name": "the model loops on refused transfers until the turn limit",
+      "description": "maxTurns is 30: the 31st tool result sends the call to need_transfer.",
+      "lang": "en",
+      "caller": "8005550107",
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "busy"}},
+      "steps": [
+        {"repeat": 30, "call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "welcome"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "CALLER_REQUEST", "summary": "x"},
+          "expect": {"isOk": false, "phase": "need_transfer"}}
+      ],
+      "expect": {"path": ["welcome", "need_transfer"]}
+    }
+  ]
+}

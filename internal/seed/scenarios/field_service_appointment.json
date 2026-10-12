@@ -1,0 +1,97 @@
+{
+  "scenarios": [
+    {
+      "name": "new caller books an appointment",
+      "description": "No booking on the number: lookup finds nothing, slots are offered, one is booked.",
+      "lang": "en",
+      "caller": "13600001111",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "book", "result": {"found": "0"}}},
+        {"call": "appt_slots", "expect": {"phase": "book"}},
+        {"call": "appt_book", "args": {"date_choice": 1, "item": "phone screen repair", "address": "12 Lakeside Road"}, "expect": {
+          "phase": "done_book", "slots": {"appt_book.args.item": "phone screen repair"}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["welcome", "book", "done_book", "finish"], "ending": "hangup",
+        "toolsRun": ["appt_lookup", "appt_slots", "appt_book", "hangup"]}
+    },
+    {
+      "name": "caller with a booking confirms it",
+      "lang": "en",
+      "caller": "91234567",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "manage", "result": {"found": "1", "appt_id": "AP1999"}}},
+        {"call": "appt_confirm", "expect": {"phase": "done_confirm", "result": {"confirmed": "1"}}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["welcome", "manage", "done_confirm", "finish"], "ending": "hangup"}
+    },
+    {
+      "name": "caller with a booking moves it to another slot",
+      "lang": "zh",
+      "caller": "91234567",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "manage"}},
+        {"call": "appt_slots", "expect": {"phase": "manage"}},
+        {"call": "appt_reschedule", "args": {"date_choice": 2}, "expect": {"phase": "done_reschedule", "result": {"appt_id": "AP1999"}}}
+      ],
+      "expect": {"path": ["welcome", "manage", "done_reschedule"]}
+    },
+    {
+      "name": "a booking cannot be made while managing an existing one",
+      "lang": "en",
+      "caller": "91234567",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "manage"}},
+        {"call": "appt_book", "args": {"date_choice": 1, "item": "x", "address": "y"}, "expect": {"isRefused": true, "phase": "manage"}}
+      ],
+      "expect": {"path": ["welcome", "manage"], "toolsRun": ["appt_lookup"]}
+    },
+    {
+      "name": "a rejected booking stays in the booking phase",
+      "description": "date_choice 7 is not a slot the backend knows; the call must not claim a booking.",
+      "lang": "en",
+      "caller": "13600002222",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "book"}},
+        {"call": "appt_book", "args": {"date_choice": 7, "item": "x", "address": "y"}, "expect": {"isOk": false, "phase": "book"}}
+      ],
+      "expect": {"path": ["welcome", "book"]}
+    },
+    {
+      "name": "caller asks for an agent while booking",
+      "lang": "en",
+      "caller": "13600003333",
+      "queues": ["service-en"],
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "book"}},
+        {"call": "transfer_to_agent", "args": {"queue": "service-en", "reason": "CALLER_REQUEST", "summary": "wants a person"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"ending": "transfer_to_agent", "transfer": {"queue": "service-en"}}
+    },
+    {
+      "name": "silence at the greeting closes the call",
+      "lang": "en",
+      "caller": "13600004444",
+      "steps": [
+        {"noInput": true},
+        {"noInput": true},
+        {"noInput": true, "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["welcome", "finish"]}
+    },
+    {
+      "name": "the model loops and the turn limit hands over to a person",
+      "description": "maxTurns is 30: the 31st tool result sends the call to need_transfer.",
+      "lang": "en",
+      "caller": "13600005555",
+      "steps": [
+        {"call": "appt_lookup", "expect": {"phase": "book"}},
+        {"repeat": 29, "call": "appt_slots", "expect": {"phase": "book"}},
+        {"call": "appt_slots", "expect": {"phase": "need_transfer"}}
+      ],
+      "expect": {"path": ["welcome", "book", "need_transfer"]}
+    }
+  ]
+}

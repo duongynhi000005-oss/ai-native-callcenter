@@ -52,6 +52,8 @@ func main() {
 			handler = runPasswd
 		case "flowadd":
 			handler = runFlowAdd
+		case "flowsim":
+			handler = runFlowSim
 		case "doctor":
 			handler = runDoctor
 		case "version", "-version", "--version":

@@ -387,7 +387,7 @@ Say these to the business rather than working around them in the prompt.
 | **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Supported: a slot tool records the fact, see 2.8. Tool arguments are also kept as `<tool>.args.<k>`, and an outbound call's business data as `userData.<k>` (2.6). Still absent: a list of values (the slot keeps only the latest, so "all the orders looked up" needs your backend's memory), and a start-of-call lookup (issue [#84](https://github.com/rasonyang/ai-native-callcenter/issues/84)). Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
 | **Collecting digits, a keypad menu, masked secrets.** | Not supported. Keypad input is not a flow event. Today each key reaches the model as a text cue (`(The caller pressed 5 on their keypad.)`), interrupts the bot, and asks for a reply; the model assembles the digits and follows your prompt. That is not deterministic, and digits pass through the model, the transcript and the logs. Do not collect PINs or card numbers this way. Issue [#91](https://github.com/rasonyang/ai-native-callcenter/issues/91). |
 | **Knowledge retrieval as a platform feature.** | Not provided. A knowledge tool is an ordinary HTTP tool (4.2) against a service you run. A neutral contract and store templates are planned in issue [#92](https://github.com/rasonyang/ai-native-callcenter/issues/92). |
-| **Testing a flow without a call.** | No text-mode simulator. See 8. Issue [#85](https://github.com/rasonyang/ai-native-callcenter/issues/85). |
+| **Testing a flow with a model in the loop.** | `aicc flowsim` replays scripted scenarios deterministically (8). A text model playing the bot and the caller (tier 2 of issue [#85](https://github.com/rasonyang/ai-native-callcenter/issues/85)) is not built yet. |
 | **Expressions, derived slots, arithmetic.** | By design the DSL has none; use a decision field (4.1). |
 | **Asynchronous tools.** | A tool call is synchronous with a 5 second bound; there is no way to be notified when a background job finishes. Use submit and check, or a callback (4.3). |
 | **Transitions on what the caller said.** | The only events are `TOOL_RESULT` and `NO_INPUT`. To branch on the caller's intent, have the model call a tool whose result carries the branch. |
@@ -681,7 +681,31 @@ What to notice:
 
 - **Load.** `aicc flowadd -file <flow>.json -did <number>` loads and publishes (the same slug updates and republishes). The same validation runs on `POST /flows` and `PUT /flows/{flowId}` (a spec the loader rejects is refused with 422 listing every problem). Publishing can additionally refuse with `TERMINAL_ANNOUNCE_REQUIRED` (5.2).
 - **Backend.** Run `go run ./cmd/aicc-mockbackend` and point `AICC_BOT_BACKEND_BASE` at it to walk the seeded flows against deterministic fixtures (`docs/dev-stack.md`). For a new flow, write the equivalent handlers for your endpoints. Test the failure paths on purpose: a tool that times out, a `found: 0`, an unknown decision value.
-- **Engine behaviour without a call.** The package's own tests drive the engine and runtime with scripted tool results and a fake `Actions` (`internal/flow/flow_test.go`, `internal/flow/runtime_test.go`). Use them as a model for asserting a flow's transitions. There is no text-mode simulator for a whole flow ([#85](https://github.com/rasonyang/ai-native-callcenter/issues/85)).
+- **Scenarios (the flow simulator).** `aicc flowsim` replays a scripted call against your flow on the real `flow.Engine` and `flow.Runtime`, with the flow's real HTTP tools served by the mock backend, and needs no database, switch or model:
+
+  ```sh
+  aicc flowsim -flow my_flow.json -scenario my_flow.scenarios.json      # add -v for every step, -only "name" for one scenario
+  go test -race ./internal/flowsim/                                   # every seed flow against internal/seed/scenarios/
+  ```
+
+  A scenario fixes the call's metadata (`lang`, `caller`, `did`, `userData`), the queues the deployment has, the answers of the built-ins (`actions`), and a list of `steps`. A step is exactly one event: `say` (a caller utterance), `keypress`, `exchange` (the caller speaks and the bot answers in words with no tool call), `noInput`, `botTurn` (`reply` or `interrupted`), `sessionLimit`, `call` with `args` (a tool the bot calls) or `batch` (several tools in one response; the last move wins). `repeat: N` runs a step N times. A step may carry `expect`: `phase`, `isOk`, `isRefused`, `result` (a subset of what the model receives), `slots` (a subset), `announce`, `instructionContains` (the rendered instruction, so a lost `{slots.x}` is caught). The scenario's own `expect` checks the whole call: `path` (phases entered, in order), `phase`, `ending` (`hangup`, `transfer_to_agent`, `take_message` or `none`), `transfer` (`queue`, `reason`), `toolsRun`, `slots`. Unknown fields are an error, so a misspelt expectation cannot pass by checking nothing.
+
+  ```json
+  {"scenarios": [{
+    "name": "caller disputes the bill",
+    "lang": "en", "caller": "90000000", "queues": ["support-en"],
+    "steps": [
+      {"call": "bill_lookup", "expect": {"phase": "remind", "result": {"days_overdue": "21"}}},
+      {"call": "dispute_record", "args": {"reason": "already paid"}, "expect": {"phase": "disputed"}},
+      {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "BILL_DISPUTE", "summary": "paid"}, "expect": {"phase": "finish_transfer"}}
+    ],
+    "expect": {"path": ["greet", "remind", "disputed", "finish_transfer"], "ending": "transfer_to_agent"}
+  }]}
+  ```
+
+  What to cover: the main path, each failure (a tool answering `found: 0` or `ok: 0`, a refused transfer, an unknown queue), silence (`noInput` three times), the turn limits (`repeat` a tool past `maxTurns`; `exchange` past `maxTurnsWithoutTool`), and a tool called in a phase that does not allow it (`isRefused`). The run prints each scenario's phase path and ending, then the phases and phase-local transitions no scenario reached. Seed scenarios live in `internal/seed/scenarios/<flow>.json` (outside the embedded `flows/` directory), and `go test` requires a scenario file per seed flow that reaches every phase.
+
+  The simulator checks the flow's logic: transitions, allowlists, slot rendering, built-in results, the guards. It is deterministic, so it cannot tell you what a model would say or whether it would call the tool you scripted; it does not exercise audio, barge-in, playback timing or provider quirks either. Passing it does not verify a call-path change.
 - **Live.** A flow is not verified until real calls have walked every branch, including the failure and transfer paths, and the logs and CDRs have been read. The number (DID) a caller dials picks the flow.
 
 ## 9. Checklist before publishing

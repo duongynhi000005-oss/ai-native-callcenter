@@ -37,6 +37,7 @@ make dev-up                                       # PostgreSQL 18 + SeaweedFS co
 deploy/dev/restart.sh                             # build web/dist and /tmp/aicc, restart, wait until it serves
 /tmp/aicc useradd -username admin -password … -role ADMIN
 /tmp/aicc flowadd -file internal/seed/flows/x.json -did 95001   # load + publish; same slug = update + republish
+/tmp/aicc flowsim -flow internal/seed/flows/x.json -scenario internal/seed/scenarios/x.json   # deterministic scenario replay on the real engine (docs/flow-authoring.md section 8); go test ./internal/flowsim runs every seed flow
 go run ./cmd/aicc-mockbackend                     # business APIs the reference flows call (127.0.0.1:8770); the app uses it when AICC_BOT_BACKEND_BASE points there
 # logs: stderr and logs/aicc-<starttime>.log (read the file to analyse a run)
 
