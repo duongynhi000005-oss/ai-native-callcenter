@@ -721,6 +721,9 @@ not change.
     callbacks come only from `HIGH` leads (§11), and `take_message` would file one for any call;
   - a provider failure takes the no-fallback branch of `rescueCaller` (F7) whatever the DID's
     fallback queue says, and the attempt finishes `BOT_FAILED`.
+  - the session limit (`global.maxDurationSec`, design 02) never hands a campaign call to the
+    DID's queue: at 100 % the call ends through `global.closingTarget`. This third way to a
+    person was missing from the first draft (found while building #163).
 
 ---
 
@@ -768,6 +771,12 @@ The model judges; code records.
 - **A number added while its campaign runs:** an attempt not yet admitted is skipped
   (`DNC_SKIPPED`); one already ringing or talking is not hung up, and no retry follows because the
   contact becomes `DNC`.
+- **Comparing a single call's number (decided by the owner, 2026-10-12).** DNC entries are
+  canonical E.164 (§9.1). A single call's `to` is canonicalised with the deployment setting
+  `AICC_DEFAULT_COUNTRY_CODE` before the check. The binary's default is empty; the deploy stack and
+  the development environment set `86`. With it empty a national `to` cannot be canonicalised and
+  is not checked (a known gap), while a `+` or `00` number always is; `aicc doctor` warns when the
+  list is non-empty and the code is unset.
 
 ---
 
@@ -997,14 +1006,18 @@ campaigns; none needs one.
 
 **Slices:**
 
-| Slice | Content | Depends on |
-|---|---|---|
-| S1 | DNC list (`dnc_numbers`, `/dnc-numbers`) and the check in `outbound.Service` for `DialAI` and click-to-dial; 422 `NUMBER_ON_DNC`; E.164 canonicalisation helper | P5 |
-| S2 | Campaign and contact model, migrations, API, import (§3, §9, §14) | S1 (canonicaliser, `DNC` contact status) |
-| S3 | Dialer core: actor, admission, write-ahead attempts, finish routine in the CDR transaction, outcomes and retries, breakers, calling hours (§4-§5, §7, §8.1) | S2, P0, P1, P2, P4 |
-| S4 | Capacity: expected-answer admission, `inboundReserve`, overflow control, DID line limit (§6) | S3, P3, P6 (DID line part only) |
-| S5 | `record_lead`, leads, DNC-by-conversation, callback on `HIGH` (§10, §11) | S2, S3, S1 |
-| S6 | Reporting: SSE `CAMPAIGN_UPDATED`, CDR `campaignId`, webhook filter, metrics, SPA screens (§14) | S2-S5 |
+| Slice | Issue | Content | Depends on |
+|---|---|---|---|
+| S1 | #162 | DNC list (`dnc_numbers`, `/dnc-numbers`) and the check in `outbound.Service` for `DialAI` and click-to-dial; 422 `NUMBER_ON_DNC`; E.164 canonicalisation helper | P5 |
+| S2 | #163 | Campaign and contact model, migrations, API, import (§3, §9, §14) | S1 (canonicaliser, `DNC` contact status) |
+| S3 | #164 | Dialer core: actor, admission, write-ahead attempts, finish routine in the CDR transaction, outcomes and retries, breakers, calling hours (§4-§5, §7, §8.1) | S2, P0, P1, P2, P4 |
+| S4 | #165 | Capacity: expected-answer admission, `inboundReserve`, overflow control, DID line limit (§6) | S3, P3, P6 (DID line part only) |
+| S5 | #166 | `record_lead`, leads, DNC-by-conversation, callback on `HIGH` (§10, §11) | S2, S3, S1 |
+| S6 | #167 | Reporting: SSE `CAMPAIGN_UPDATED`, CDR `campaignId`, webhook filter, metrics, SPA screens (§14) | S2-S5 |
 
-S5 and S6 can run in parallel once S3 has landed. #158 (P3) may fold into S4 if phase 1 ships
-without over-dialing. Issue numbers for S1-S6 are filled in when those issues are filed.
+S5 and S6 can run in parallel once S3 has landed. #158 (P3) is built as its own change rather
+than folding into S4.
+
+Follow-up outside the campaign work: #168, sending an inbound AI call whose bot session went
+with a restart to the DID's fallback queue instead of hanging it up (§8.2 hangs it up; owner,
+2026-10-12).
