@@ -82,7 +82,7 @@ func TestARealisticMixOfOutcomesIsReconciledCallByCall(t *testing.T) {
 	for step := 0; step < 400; step++ {
 		r.endAll(func(number string) string {
 			s := byNumber[number]
-			i := r.placer.placedToLocked(number) - 1 // the call that is ending
+			i := r.placer.placedTo(number) - 1 // the call that is ending; outside the placer, so take its lock
 			return s.ends[min(i, len(s.ends)-1)]
 		})
 		next := r.nextDue(c)
@@ -407,7 +407,7 @@ func TestTheTrunkBreakerTripsOnTheNthFailureAndNotTheOneBefore(t *testing.T) {
 			c := r.newCampaign("Trunk", func(s *camSpec) { s.max = 1 })
 			r.importContacts(c, numbers("47", 30))
 			if mode == "sync" {
-				r.placer.fail = func(outbound.AIDialRequest) error { return errors.New("gateway down") }
+				r.placer.setFail(func(outbound.AIDialRequest) error { return errors.New("gateway down") })
 			}
 			r.start(c)
 

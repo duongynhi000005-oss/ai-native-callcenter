@@ -41,7 +41,7 @@ func TestACampaignDialsUpToItsConcurrencyAndRefillsAsCallsEnd(t *testing.T) {
 	r.noViolations()
 
 	// What the placer was handed.
-	first := r.placer.calls[0].Req
+	first := r.placer.placedCalls()[0].Req
 	if first.DIDNumber != "95099" || first.RingTimeout != 30*time.Second || first.CampaignID != c.ID ||
 		first.UserData["name"] == "" || first.To == "" {
 		t.Errorf("request = %+v", first)
@@ -382,7 +382,7 @@ func TestCallsCarryTheirContactsSlotsAndTheCampaignsRingTimeout(t *testing.T) {
 	c := r.newCampaign("Fields", func(s *camSpec) { s.ring = 20; s.max = 1 })
 	r.importContacts(c, []contactSpec{{number: "+8613999000001"}})
 	r.start(c)
-	req := r.placer.calls[0].Req
+	req := r.placer.placedCalls()[0].Req
 	if req.RingTimeout != 20*time.Second || req.UserData["name"] != "c0" || req.To != "+8613999000001" {
 		t.Errorf("request = %+v", req)
 	}
