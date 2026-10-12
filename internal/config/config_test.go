@@ -375,6 +375,9 @@ func TestValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			// The fixtures leave the dead-air timeout out; Load always sets it.
+			if tt.cfg.OutboundRingTimeout == 0 {
+				tt.cfg.OutboundRingTimeout = DefaultOutboundRingTimeout
+			}
 			if tt.cfg.BotNoInputTimeout == 0 {
 				tt.cfg.BotNoInputTimeout = DefaultBotNoInputTimeout
 			}

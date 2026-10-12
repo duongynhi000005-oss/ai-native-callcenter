@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type Switch interface {
 	Originate(partyID uuid.UUID, endpoint string, vars map[string]string) (string, error)
 	BridgeToEndpoint(channelID string, newPartyID uuid.UUID, endpoint string, vars map[string]string) error
 	TransferToExtension(channelID, extension, context string) error
+	Hangup(channelID, cause string) error
 	Endpoint(extensionNumber string) string
 }
 
@@ -64,8 +66,13 @@ type Config struct {
 	// while this one delays. Default 100.
 	RatePerSec int
 	// AnswerWindow is how long an originated leg may ring before the armed
-	// continuation is abandoned. Default 60s.
+	// continuation is abandoned. Default config.OutboundAnswerWindow (60s).
 	AnswerWindow time.Duration
+	// RingTimeout is the default originate_timeout of an originated leg: how
+	// long the switch rings it. Must be strictly below AnswerWindow (the
+	// config layer validates it; a request is checked again at call time).
+	// Default config.DefaultOutboundRingTimeout (45s).
+	RingTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -87,7 +94,10 @@ func (c Config) withDefaults() Config {
 		c.RatePerSec = 100
 	}
 	if c.AnswerWindow <= 0 {
-		c.AnswerWindow = 60 * time.Second
+		c.AnswerWindow = config.OutboundAnswerWindow
+	}
+	if c.RingTimeout <= 0 {
+		c.RingTimeout = config.DefaultOutboundRingTimeout
 	}
 	return c
 }
@@ -108,6 +118,30 @@ type Service struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingLeg // by channel id
+	now     func() time.Time       // the clock; replaced in tests
+}
+
+// LateAnswerCause is the hangup cause stamped on a leg that was answered after
+// its window closed. It reaches the CDR's hangupCause (a free string) as the
+// leg's release cause, so the ledger tells a late answer from a normal ending.
+const LateAnswerCause = "ALLOTTED_TIMEOUT"
+
+// ringTimeout resolves a request's ring timeout against the service default
+// and refuses one that would outlast the answer window.
+func (s *Service) ringTimeout(requested time.Duration) (time.Duration, error) {
+	d := requested
+	if d == 0 {
+		d = s.cfg.RingTimeout
+	}
+	if d <= 0 || d >= s.cfg.AnswerWindow {
+		return 0, ErrBadRingTimeout
+	}
+	return d, nil
+}
+
+// ringTimeoutVar renders originate_timeout in whole seconds, rounded up.
+func ringTimeoutVar(d time.Duration) string {
+	return strconv.Itoa(int((d + time.Second - 1) / time.Second))
 }
 
 // pendingLeg is a continuation armed on an originated channel: what to do
@@ -138,6 +172,7 @@ func New(cfg Config, sw Switch, dids DIDSource, numbers NumberPlan,
 		callData: NewCallData(),
 		log:      log,
 		pending:  map[string]*pendingLeg{},
+		now:      time.Now,
 	}
 }
 
@@ -157,6 +192,9 @@ var (
 	ErrUnknownDID        = fmt.Errorf("outbound: no such DID")
 	ErrFlowless          = fmt.Errorf("outbound: the DID has no published flow")
 	ErrAlreadyPlaced     = fmt.Errorf("outbound: this call was already placed")
+	// ErrBadRingTimeout means a ring timeout that would let the leg ring past
+	// the answer window.
+	ErrBadRingTimeout = fmt.Errorf("outbound: ring timeout must be positive and strictly below the answer window")
 )
 
 // pinCodecs adds the G.711 pin on legs that leave through sofia. Loopback
@@ -232,6 +270,9 @@ type AgentDialRequest struct {
 	CallcenterName string
 	// UserData is business data to carry into the call and its ledger row.
 	UserData map[string]string
+	// RingTimeout overrides the service's ring timeout for this attempt; zero
+	// uses the default. Must be strictly below the answer window.
+	RingTimeout time.Duration
 }
 
 // Dial is click-to-dial: ring the agent first, and only dial out once the
@@ -251,6 +292,10 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	userData, callcenterName := req.UserData, req.CallcenterName
 	if !isDialable(destination) || !isExtension(agentExtension) {
 		return uuid.Nil, ErrBadNumber
+	}
+	ring, err := s.ringTimeout(req.RingTimeout)
+	if err != nil {
+		return uuid.Nil, err
 	}
 
 	callID := req.CallID
@@ -332,6 +377,9 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		// INCOMPATIBLE_DESTINATION (found live). One codec, no comma — a
 		// comma inside the block is a variable separator.
 		"absolute_codec_string": "PCMU",
+		// Explicit and below the answer window: the switch's own default is
+		// about the window, which leaves an answer on either side of it.
+		"originate_timeout": ringTimeoutVar(ring),
 	}
 	// Tell mod_callcenter this agent is on a call, so its queues stop offering
 	// them one while it lasts.
@@ -433,6 +481,10 @@ type AIDialRequest struct {
 	// UserData is business data to carry to whoever ends up on the call, and
 	// into its ledger row. It is held here rather than sent to the switch.
 	UserData map[string]string
+	// RingTimeout overrides the service's ring timeout for this attempt (a
+	// campaign's per-attempt value); zero uses the default. Must be strictly
+	// below the answer window.
+	RingTimeout time.Duration
 }
 
 // DialAI is the inbound AI path reversed: originate towards the customer,
@@ -444,6 +496,10 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 	}
 	if !isDialable(req.To) {
 		return uuid.Nil, ErrBadNumber
+	}
+	ring, err := s.ringTimeout(req.RingTimeout)
+	if err != nil {
+		return uuid.Nil, err
 	}
 
 	did, err := s.findDID(ctx, req.DIDNumber)
@@ -499,6 +555,8 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 		// dialled *at* the DID, and this one is dialled at the customer.
 		"aicc_did":                     did.Number,
 		"origination_caller_id_number": did.Number,
+		// Explicit and below the answer window; see Dial.
+		"originate_timeout": ringTimeoutVar(ring),
 	}
 	endpoint := fmt.Sprintf(s.cfg.EndpointFormat, req.To)
 	pinCodecs(vars, endpoint)
@@ -592,7 +650,7 @@ func (s *Service) arm(channelID string, onAnswer func()) {
 	defer s.mu.Unlock()
 	s.pending[channelID] = &pendingLeg{
 		onAnswer:  onAnswer,
-		expiresAt: time.Now().Add(s.cfg.AnswerWindow),
+		expiresAt: s.now().Add(s.cfg.AnswerWindow),
 	}
 }
 
@@ -608,13 +666,24 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 		s.mu.Lock()
 		leg := s.pending[ev.ChannelID]
 		delete(s.pending, ev.ChannelID)
-		expired := leg != nil && time.Now().After(leg.expiresAt)
+		expired := leg != nil && s.now().After(leg.expiresAt)
 		s.mu.Unlock()
 		if leg == nil {
 			return
 		}
 		if expired {
-			s.log.Warn("answer arrived after the window; not bridging", "channelId", ev.ChannelID)
+			// Never leave an answered leg parked: the person on it would
+			// hear nothing. Hang it up with a distinct cause, which is what
+			// the ledger's hangupCause then reads. For click-to-dial this is
+			// the agent's auto-answered phone.
+			s.log.Warn("answer arrived after the window; hanging up, not bridging",
+				"channelId", ev.ChannelID, "cause", LateAnswerCause)
+			go func() {
+				if err := s.sw.Hangup(ev.ChannelID, LateAnswerCause); err != nil {
+					s.log.Error("hangup of a late-answered leg failed",
+						"channelId", ev.ChannelID, "error", err)
+				}
+			}()
 			return
 		}
 		// The continuation talks to the switch; the dispatch loop must not
@@ -633,7 +702,7 @@ func (s *Service) PendingCount() int {
 	defer s.mu.Unlock()
 	// Expired entries are only garbage; sweeping here keeps the map honest
 	// without a background goroutine.
-	now := time.Now()
+	now := s.now()
 	for id, leg := range s.pending {
 		if now.After(leg.expiresAt) {
 			delete(s.pending, id)

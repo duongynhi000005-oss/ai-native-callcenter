@@ -134,3 +134,24 @@ func TestLoadRefusesABadOutboundSetting(t *testing.T) {
 		t.Errorf("headers = %v", cfg.OutboundSIPHeaders)
 	}
 }
+
+func TestLoadRefusesAnOutboundRingTimeoutAtOrAboveTheAnswerWindow(t *testing.T) {
+	for _, bad := range []string{"60s", "90s", "1s", "soon"} {
+		t.Setenv("AICC_OUTBOUND_RING_TIMEOUT", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AICC_OUTBOUND_RING_TIMEOUT") {
+			t.Errorf("%q: Load err = %v, want the ring timeout refused", bad, err)
+		}
+	}
+	t.Setenv("AICC_OUTBOUND_RING_TIMEOUT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OutboundRingTimeout != DefaultOutboundRingTimeout {
+		t.Errorf("default = %s, want %s", cfg.OutboundRingTimeout, DefaultOutboundRingTimeout)
+	}
+	t.Setenv("AICC_OUTBOUND_RING_TIMEOUT", "59s")
+	if _, err := Load(); err != nil {
+		t.Errorf("59s refused: %v", err)
+	}
+}
