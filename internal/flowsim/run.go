@@ -42,17 +42,22 @@ func (r Report) Passed() bool { return r.Failure == "" }
 type Move struct{ From, To string }
 
 // Run replays every scenario of a file against the flow. backend serves the
-// flow's HTTP tools; nil is allowed for a flow with none.
-func Run(ctx context.Context, spec *flow.Spec, backend *flow.Backend, scenarios []Scenario) []Report {
+// flow's HTTP tools, fresh for each scenario.
+func Run(ctx context.Context, spec *flow.Spec, backend BackendSource, scenarios []Scenario) []Report {
 	reports := make([]Report, 0, len(scenarios))
 	for _, scenario := range scenarios {
+		if scenario.IsModelOnly() {
+			continue // tier 2 only
+		}
 		reports = append(reports, RunScenario(ctx, spec, backend, scenario))
 	}
 	return reports
 }
 
 // RunScenario replays one scenario on a fresh engine and runtime.
-func RunScenario(ctx context.Context, spec *flow.Spec, backend *flow.Backend, sc Scenario) Report {
+func RunScenario(ctx context.Context, spec *flow.Spec, source BackendSource, sc Scenario) Report {
+	backend, release := source()
+	defer release()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	actions := newActions(sc)
 	engine := flow.NewEngine(spec, sc.Lang, flow.SeedSlots(sc.Caller, sc.Entry, sc.DID, sc.UserData), quiet)

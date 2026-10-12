@@ -27,8 +27,7 @@ func TestSeedFlowsPassTheirScenarios(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no seed flows found: %v", err)
 	}
-	backend, stop := StartMockBackend()
-	defer stop()
+	backend := MockBackends()
 
 	for _, flowFile := range files {
 		stem := strings.TrimSuffix(filepath.Base(flowFile), ".json")
@@ -67,8 +66,7 @@ func TestSeedFlowsPassTheirScenarios(t *testing.T) {
 // simulator exists for are made on purpose and must be caught, with a message
 // that names the cause.
 func TestBrokenFlowsAreCaught(t *testing.T) {
-	backend, stop := StartMockBackend()
-	defer stop()
+	backend := MockBackends()
 
 	tests := []struct {
 		name   string
@@ -184,7 +182,7 @@ func TestScenarioFileIsStrict(t *testing.T) {
 		{"unknown field", `{"scenarios":[{"name":"a","steps":[],"expec":{}}]}`, "unknown field"},
 		{"no scenarios", `{"scenarios":[]}`, "no scenarios"},
 		{"unnamed", `{"scenarios":[{"steps":[]}]}`, "has no name"},
-		{"duplicate names", `{"scenarios":[{"name":"a"},{"name":"a"}]}`, "two scenarios are called"},
+		{"duplicate names", `{"scenarios":[{"name":"a","steps":[{"noInput":true}]},{"name":"a","steps":[{"noInput":true}]}]}`, "two scenarios are called"},
 		{"two events in a step", `{"scenarios":[{"name":"a","steps":[{"noInput":true,"call":"x"}]}]}`, "exactly one of"},
 		{"no event in a step", `{"scenarios":[{"name":"a","steps":[{"expect":{"phase":"x"}}]}]}`, "exactly one of"},
 		{"bad botTurn", `{"scenarios":[{"name":"a","steps":[{"botTurn":"loud"}]}]}`, "botTurn"},
@@ -200,8 +198,7 @@ func TestScenarioFileIsStrict(t *testing.T) {
 }
 
 func TestUnknownToolIsNamed(t *testing.T) {
-	backend, stop := StartMockBackend()
-	defer stop()
+	backend := MockBackends()
 	spec, scenarios := brokenEarlyCollections(t, func(map[string]any) {})
 	file, err := ParseScenarios([]byte(`{"scenarios":[{"name":"typo","steps":[{"call":"bill_lokup"}]}]}`))
 	if err != nil {
@@ -217,8 +214,7 @@ func TestUnknownToolIsNamed(t *testing.T) {
 // A batch is judged in the phase the response was made in and the last move
 // wins (02 §6); the simulator drives it through the same engine calls.
 func TestBatchLastMoveWins(t *testing.T) {
-	backend, stop := StartMockBackend()
-	defer stop()
+	backend := MockBackends()
 	spec, _ := brokenEarlyCollections(t, func(map[string]any) {})
 	file, err := ParseScenarios([]byte(`{"scenarios":[{"name":"batch","caller":"92223333","steps":[
 		{"call":"bill_lookup","expect":{"phase":"remind"}},
@@ -234,8 +230,7 @@ func TestBatchLastMoveWins(t *testing.T) {
 }
 
 func TestWriteReportsFailuresAndCoverage(t *testing.T) {
-	backend, stop := StartMockBackend()
-	defer stop()
+	backend := MockBackends()
 	spec, scenarios := brokenEarlyCollections(t, func(doc map[string]any) {
 		nodeOf(doc, "remind")["tools"] = []any{"dispute_record"}
 	})

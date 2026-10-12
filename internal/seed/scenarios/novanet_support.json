@@ -93,6 +93,18 @@
           "expect": {"isOk": false, "phase": "need_transfer"}}
       ],
       "expect": {"path": ["welcome", "need_transfer"]}
+    },
+    {
+      "name": "model: english caller asks for a person",
+      "description": "Tier 2. The caller wants an agent and the bot transfers to the English queue.",
+      "lang": "en",
+      "caller": "8005550100",
+      "queues": ["support-en", "support-zh"],
+      "callerPersona": {
+        "goal": "Your home internet has been down all day and you want to talk to a human agent. Ask for one.",
+        "behaviour": "Slightly impatient, but polite."
+      },
+      "model": {"ending": "transfer_to_agent", "transfer": {"queue": "support-en"}, "phase": "finish_transfer"}
     }
   ]
 }

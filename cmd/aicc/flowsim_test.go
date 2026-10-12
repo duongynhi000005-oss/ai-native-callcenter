@@ -19,6 +19,20 @@ func TestFlowSimRunsASeedFlow(t *testing.T) {
 	}
 }
 
+// Tier 2 spends money, so without the switch it refuses before any request.
+func TestFlowSimTier2NeedsTheLiveSwitch(t *testing.T) {
+	t.Setenv("AICC_LIVE_FLOWSIM", "")
+	t.Setenv("ALIYUN_API_KEY", "k")
+	err := runFlowSim([]string{
+		"-flow", "../../internal/seed/flows/early_collections.json",
+		"-scenario", "../../internal/seed/scenarios/early_collections.json",
+		"-tier", "2",
+	})
+	if err == nil || !strings.Contains(err.Error(), "AICC_LIVE_FLOWSIM") {
+		t.Fatalf("error = %v, want a refusal naming AICC_LIVE_FLOWSIM", err)
+	}
+}
+
 func TestFlowSimFailsWhenAScenarioFails(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "s.json")
 	body := `{"scenarios":[{"name":"wrong","caller":"92223333","steps":[{"call":"bill_lookup","expect":{"phase":"promised"}}]}]}`

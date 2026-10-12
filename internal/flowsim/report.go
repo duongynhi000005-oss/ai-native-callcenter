@@ -12,11 +12,24 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/mockbackend"
 )
 
-// StartMockBackend serves the reference mock backend in-process and returns a
-// flow.Backend aimed at it, with the function that stops it.
-func StartMockBackend() (*flow.Backend, func()) {
-	server := httptest.NewServer(mockbackend.New(nil))
-	return flow.NewBackend(server.URL), server.Close
+// BackendSource hands each scenario (tier 1) or run (tier 2) its backend, and
+// the function that releases it. The mock backend keeps state (a booking made
+// in one run is found by the next), and the mock's contract is that every run
+// starts from the same facts, so each run gets a fresh one.
+type BackendSource func() (*flow.Backend, func())
+
+// MockBackends serves a new in-process mock backend for every call.
+func MockBackends() BackendSource {
+	return func() (*flow.Backend, func()) {
+		server := httptest.NewServer(mockbackend.New(nil))
+		return flow.NewBackend(server.URL), server.Close
+	}
+}
+
+// SharedBackend hands every run the same backend, for one the simulator cannot
+// reset (an external -backend URL). State it keeps carries from run to run.
+func SharedBackend(b *flow.Backend) BackendSource {
+	return func() (*flow.Backend, func()) { return b, func() {} }
 }
 
 // Write prints reports and coverage for one flow. verbose adds each step.
