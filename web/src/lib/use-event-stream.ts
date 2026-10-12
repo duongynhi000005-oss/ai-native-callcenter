@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 import { CALLS_KEY, PRESENCE_KEY, ROSTER_KEY, WAITING_KEY, WRAP_UP_KEY } from './agent'
+import { applyCampaignUpdated, campaignPayloadOf } from './campaigns'
 import { CALLBACKS_KEY, CDRS_KEY, REPORTS_KEY } from './ledger'
 import { connectEvents, type AiccEvent, type EventType } from './events'
 
@@ -12,7 +13,7 @@ import { connectEvents, type AiccEvent, type EventType } from './events'
  * availability combines persisted presence with observed device state, so the
  * authoritative answer is refetched rather than reconstructed in the browser.
  */
-function applyToCache(queryClient: ReturnType<typeof useQueryClient>, event: AiccEvent) {
+export function applyToCache(queryClient: ReturnType<typeof useQueryClient>, event: AiccEvent) {
   if (event.type.startsWith('AGENT_') || event.type.startsWith('DEVICE_')) {
     void queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
     void queryClient.invalidateQueries({ queryKey: PRESENCE_KEY })
@@ -35,6 +36,13 @@ function applyToCache(queryClient: ReturnType<typeof useQueryClient>, event: Aic
   }
   if (event.type.startsWith('CALLBACK_')) {
     void queryClient.invalidateQueries({ queryKey: CALLBACKS_KEY })
+  }
+  if (event.type === 'CAMPAIGN_UPDATED') {
+    // The payload is the campaign's new state, so the cached copies are
+    // updated from it. Supervisors and administrators are the only ones the
+    // server sends it to; for anyone else it never arrives.
+    const payload = campaignPayloadOf(event)
+    if (payload) applyCampaignUpdated(queryClient, payload)
   }
   if (event.type === 'CALL_CDR') {
     // A finished call moves every ledger-backed screen.

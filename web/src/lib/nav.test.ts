@@ -29,6 +29,8 @@ describe('the sidebar each role gets', () => {
       '/admin/routing',
       '/admin/numbers',
       '/admin/bots',
+      '/admin/campaigns',
+      '/admin/dnc',
       '/admin/cdr',
       '/admin/reports',
       '/admin/audit',
@@ -42,6 +44,8 @@ describe('the sidebar each role gets', () => {
       '/supervisor',
       '/supervisor/agents',
       '/supervisor/queues',
+      '/admin/campaigns',
+      '/admin/dnc',
       '/admin/cdr',
       '/admin/reports',
     ])
