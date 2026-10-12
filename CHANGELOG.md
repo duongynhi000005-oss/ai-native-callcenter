@@ -17,6 +17,16 @@ carries the one-line installer's files.
   out of the `X-AICC-` namespace and be unique; values cannot contain `;`,
   braces or control characters. A malformed value refuses startup and names the
   pair (#62).
+- `AICC_BOT_NO_INPUT_TIMEOUT`: how long the bot waits for the caller before a
+  dead-air `NO_INPUT`, as a Go duration from `2s` to `60s` (default `8s`, the
+  old fixed value; it cannot be turned off). A malformed or out-of-range value
+  refuses startup (#49).
+- `global.temperature` in a flow sets the model's sampling temperature, in
+  `0 <= t < 2`, published and versioned with the persona like `global.voice`.
+  Absent keeps the provider's default, so existing flows are unchanged. The
+  qwen and gemini clients send it; openai, gateway and doubao have no such
+  field and ignore it, and the server logs that once. The bot detail page
+  shows the value (#11).
 
 ### Changed
 
@@ -33,6 +43,23 @@ carries the one-line installer's files.
   outside the DashScope-native families on the qwen client (a typo used to fail
   only after the first call finished, with "Model not exist.").
   `qwen3-asr-flash-realtime` is refused explicitly: it speaks the OpenAI dialect.
+- The embedded web app is served gzip-compressed to clients that accept it.
+  The build writes a `.gz` beside each compressible file and the server picks
+  it by `Accept-Encoding`; nothing is compressed at request time, and the API
+  and `/events` are untouched. The index page at `/` is now `no-cache`, like
+  the SPA fallback (#64).
+- CDR and audit-log listings with an open time bound (`from` only, `to` only
+  or neither) now use the time index under a generic query plan too. Results
+  are unchanged: `from` is inclusive, `to` exclusive (#63).
+
+### Fixed
+
+- Installer: on Linux, `.env` is root-owned and mode 0600, so the closing
+  message's "the password is `AICC_SEED_PASSWORD` in `/opt/aicc/.env`" led to
+  a `Permission denied`. The installer now also prints the command that reads
+  it, `sudo grep AICC_SEED_PASSWORD /opt/aicc/.env` on Linux and the same
+  without `sudo` on macOS, and `deploy/README.md` says the same (#123, #130;
+  thanks @javayou13131).
 
 ## v0.4.0 - 2026-10-10
 
