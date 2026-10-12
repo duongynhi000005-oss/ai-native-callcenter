@@ -25,12 +25,15 @@ import (
 // The SIP headers the dialplan attaches to a bot leg. They are the only thing
 // correlating the SIP dialog with the call the rest of the system knows.
 const (
-	headerCallID    = "X-Aicc-Call-Id"
-	headerDID       = "X-Aicc-Did"
-	headerLanguage  = "X-Aicc-Language"
-	headerANI       = "X-Aicc-Ani"
-	headerChannelID = "X-Aicc-Channel-Id"
-	headerCallType  = "X-Aicc-Call-Type"
+	headerCallID = "X-Aicc-Call-Id"
+	headerDID    = "X-Aicc-Did"
+	// Sent only on a campaign call: the campaign and the attempt that placed it.
+	headerCampaignID = "X-Aicc-Campaign-Id"
+	headerAttemptID  = "X-Aicc-Attempt-Id"
+	headerLanguage   = "X-Aicc-Language"
+	headerANI        = "X-Aicc-Ani"
+	headerChannelID  = "X-Aicc-Channel-Id"
+	headerCallType   = "X-Aicc-Call-Type"
 	// Sent only by the AI-outbound bridge: the platform placed this call to a
 	// customer, so the ANI is the person answering and the DID is our number.
 	headerPlacedToCustomer = "X-Aicc-Placed-To-Customer"
@@ -341,6 +344,8 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		fallbackQueue: did.FallbackQueueID,
 		recorder:      recorder,
 		facts:         facts,
+		campaignID:    headers[headerCampaignID],
+		attemptID:     headers[headerAttemptID],
 	}
 	// An agent who hangs up first leaves the bot no chance to say what it ran,
 	// and it is their call's row the human path writes, so the flow and the
@@ -352,6 +357,9 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	}
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(o.cfg.BackendBase),
 		o.queueNames(ctx, did.FallbackQueueID), log)
+	if actions.isCampaign() {
+		runtime.Deny(campaignDeniedTools...)
+	}
 
 	profile := o.cfg.Profile
 	model, err := o.cfg.Sessions(profile, log)

@@ -31,6 +31,9 @@ type Runtime struct {
 	log     *slog.Logger
 
 	builtins map[string]Tool
+	// denied is the set of tools this call may never use, whatever the flow's
+	// allowlists say (Deny). Nil on an ordinary call.
+	denied map[string]bool
 	// wrapUpDeadline is set once the call has used most of its time budget:
 	// when the limit falls due. Instructions renders the time left from the
 	// current clock, so a later phase change never repeats a stale figure.
@@ -66,6 +69,19 @@ func NewRuntime(engine *Engine, actions Actions, backend *Backend,
 	}
 }
 
+// Deny withdraws tools from this call: Tools no longer offers them and
+// Dispatch refuses them like a tool outside its phase, whatever the flow's
+// allowlists say. A campaign call uses it to remove every way to a person
+// (transfer_to_agent) and to file a callback (take_message).
+func (r *Runtime) Deny(names ...string) {
+	if r.denied == nil {
+		r.denied = map[string]bool{}
+	}
+	for _, name := range names {
+		r.denied[name] = true
+	}
+}
+
 // Engine exposes the phase machine.
 func (r *Runtime) Engine() *Engine { return r.engine }
 
@@ -79,6 +95,9 @@ func (r *Runtime) Tools() []provider.ToolSpec {
 	specs := make([]provider.ToolSpec, 0, len(referenced))
 
 	for _, name := range slices.Sorted(maps.Keys(referenced)) {
+		if r.denied[name] {
+			continue
+		}
 		tool, ok := r.builtins[name]
 		if !ok {
 			tool, ok = r.engine.Spec().Tools[name]
@@ -222,7 +241,7 @@ func (r *Runtime) Dispatch(ctx context.Context, name, arguments string) (output 
 	// ok=0 and the current phase's instruction, which reads as being told it
 	// is getting ahead of itself — and it carries on talking to the caller
 	// instead of falling silent.
-	if !r.engine.IsToolAllowed(name) {
+	if r.denied[name] || !r.engine.IsToolAllowed(name) {
 		r.log.Info("tool refused by the current phase",
 			"tool", name, "node", r.engine.NodeID())
 		return Failed(

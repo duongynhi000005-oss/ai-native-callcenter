@@ -24,6 +24,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
+	"github.com/rasonyang/ai-native-callcenter/internal/dialer"
 	"github.com/rasonyang/ai-native-callcenter/internal/esl"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/httpapi"
@@ -152,6 +153,20 @@ func run() error {
 	// A campaign contact's retry stays inside the outer calling hours. The
 	// dialer (a later slice) sets st.OnAttemptFinished to wake itself.
 	st.OutboundHours = cfg.OutboundHours
+	// The dialer is built further down, after the services it depends on; what
+	// the store tells it is forwarded once it exists. Events before then are
+	// not lost: the dialer reads the database when it starts.
+	var campaignDialer atomic.Pointer[dialer.Dialer]
+	st.OnAttemptFinished = func(f campaign.Finished) {
+		if d := campaignDialer.Load(); d != nil {
+			d.AttemptFinished(f)
+		}
+	}
+	st.OnDNCAdded = func() {
+		if d := campaignDialer.Load(); d != nil {
+			d.DNCAdded()
+		}
+	}
 	hub.OnDropped = func(sub events.Subscriber) {
 		slog.Warn("sse subscriber dropped", "userId", sub.UserID)
 	}
@@ -304,6 +319,40 @@ func run() error {
 	// outlived a restart (internal/outbound/adopt.go).
 	outboundSvc.HoldUntilReconciled()
 
+	// The campaign dialer: one actor owning admission and campaign
+	// transitions. It needs the bot to talk to anyone who answers, so a
+	// deployment with the AI path off runs no dialer and its campaigns, if
+	// any are started, dial nothing.
+	var campaignController campaign.Controller
+	var campaignProgress campaign.ProgressSource
+	var campaignObserver campaign.Observer
+	if cfg.IsBotEnabled {
+		dlr := dialer.New(dialer.Config{
+			MaxRinging:           cfg.OutboundMaxRinging,
+			Frequency:            cfg.CampaignFrequencyWindow,
+			OutboundHours:        cfg.OutboundHours,
+			TrunkBreakerCount:    cfg.TrunkBreakerCount,
+			ProviderBreakerCount: cfg.ProviderBreakerCount,
+		}, dialer.Deps{
+			Store:  st.Dialer(),
+			Placer: outboundSvc,
+			Slots:  botSlots,
+			IsLive: func(callID uuid.UUID) bool {
+				_, err := registry.Snapshot(callID)
+				return err == nil
+			},
+			Reconciled: outboundSvc.Reconciled(),
+			Log:        slog.Default(),
+		})
+		outboundSvc.SetAnswerObserver(dlr.Answered)
+		botSlots.SetOnFree(dlr.SlotFreed)
+		campaignDialer.Store(dlr)
+		campaignController, campaignProgress, campaignObserver = dlr, dlr, dlr
+		go dlr.Run(ctx)
+	} else {
+		slog.Warn("the AI path is off (AICC_BOT_ENABLED): campaigns are not dialled")
+	}
+
 	// The bot's sessions, for the reconcile that runs on every connect. Set
 	// once the orchestrator exists; until then no conversation can be running,
 	// which is also the truth of a cold start.
@@ -408,11 +457,11 @@ func run() error {
 			catalogSvc,
 			st.Contacts(),
 			st.DNC(),
-			campaign.NewService(st.Campaigns(), nil, campaign.Env{
+			campaign.NewService(st.Campaigns(), campaignController, campaign.Env{
 				OutboundHours:      cfg.OutboundHours,
 				AnswerWindow:       config.OutboundAnswerWindow,
 				DefaultCountryCode: cfg.DefaultCountryCode,
-			}),
+			}).WithDialer(campaignProgress, campaignObserver),
 			st.Ledger(),
 			st.Flows(),
 			st.Accounts(),

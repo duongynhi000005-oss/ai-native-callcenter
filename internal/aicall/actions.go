@@ -32,6 +32,11 @@ type callActions struct {
 	// this conversation and goes on to a queue.
 	callerChannel string
 	fallbackQueue *uuid.UUID
+	// campaignID and attemptID come from X-AICC-Campaign-ID / X-AICC-Attempt-ID
+	// on the bot leg; a non-empty campaignID marks a campaign call, which has no
+	// way to a person (isCampaign). Zero on every other call.
+	campaignID string
+	attemptID  string
 	// recorder and facts feed the ledger; both may be nil in tests.
 	recorder *callRecorder
 	facts    *callFacts
@@ -326,6 +331,9 @@ func (a *callActions) runArmedNow() {
 // openFallbackQueue is the number's own queue when it exists and is taking
 // calls: the one queue the platform may hand a caller to on its own.
 func (a *callActions) openFallbackQueue(ctx context.Context) (catalog.Queue, bool) {
+	if a.isCampaign() {
+		return catalog.Queue{}, false
+	}
 	if a.fallbackQueue == nil {
 		return catalog.Queue{}, false
 	}
@@ -413,10 +421,17 @@ func (a *callActions) onBargeIn() {
 	armed()
 }
 
+// campaignDeniedTools are the built-ins a campaign call never offers: a
+// campaign call has no way to a person, and callbacks come only from leads.
+var campaignDeniedTools = []string{"transfer_to_agent", "take_message"}
+
+// isCampaign reports whether this call was placed by a campaign.
+func (a *callActions) isCampaign() bool { return a.campaignID != "" }
+
 // rescueCaller moves the caller to the number's fallback queue after a failed
 // conversation.
 func (a *callActions) rescueCaller() {
-	if a.callerChannel == "" || a.fallbackQueue == nil {
+	if a.callerChannel == "" || a.fallbackQueue == nil || a.isCampaign() {
 		a.session.Close(context.Background())
 		return
 	}
