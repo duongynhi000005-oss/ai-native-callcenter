@@ -311,11 +311,8 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	defer recorder.finish(o.cfg.Ledger, facts, log)
 
 	// The flow's phase machine, and the actions its tools perform on this call.
-	engine := flow.NewEngine(spec, language, map[string]any{
-		"caller": headers[headerANI],
-		"entry":  spec.Entry,
-		"did":    didNumber,
-	}, log)
+	engine := flow.NewEngine(spec, language,
+		flow.SeedSlots(headers[headerANI], spec.Entry, didNumber, facts.userData), log)
 	actions := &callActions{
 		orchestrator:  o,
 		log:           log,

@@ -634,7 +634,7 @@ func TestAPhaseWithNoLineOfItsOwnAsksForNothingToBeSaid(t *testing.T) {
 	actions := &callActions{orchestrator: o, session: session, log: log}
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(""), nil, log)
 
-	o.afterMove(engine.OnToolResult(flow.ToolTransferToAgent,
+	o.afterMove(engine.OnToolResult(flow.ToolTransferToAgent, nil,
 		map[string]any{"ok": "1"}), session, runtime, actions, log)
 
 	if got := model.spokenLines(); len(got) != 0 {

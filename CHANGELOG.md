@@ -27,8 +27,25 @@ carries the one-line installer's files.
   qwen and gemini clients send it; openai, gateway and doubao have no such
   field and ignore it, and the server logs that once. The bot detail page
   shows the value (#11).
+- Slot tools: a flow tool with `"kind": "slot"` records a fact the caller
+  states into a declared slot (`slot`, optional `enum`), so it survives the
+  model's own context and can be read back with `{slots.<slot>}` in an
+  instruction, an announce, an HTTP body or a transition condition. An empty
+  value, one over 256 characters or one outside the enum is refused and
+  nothing is stored. Every tool call also keeps its scalar arguments as
+  `<tool>.args.<k>`, and a call placed with business data starts with it as
+  `userData.<k>`. The seed `lead_qualification` flow records interest, budget
+  and timeline this way. Authoring guide: `docs/flow-authoring.md` §2.8 (#13).
 
 ### Changed
+
+- A flow whose `{slots.x}` (in an instruction, an announce or an HTTP body) or
+  transition condition names a slot nothing in the flow writes no longer
+  loads. Such a reference used to render as empty or never match. The
+  published revision is re-validated at the start of every call, so such a
+  flow refuses its calls after the upgrade until it is fixed: check each
+  custom flow with the new binary (`aicc flowadd` validates before it stores)
+  before moving traffic to it. None of the seed flows is affected (#13).
 
 - The server now refuses to start when `AICC_OUTBOUND_ENDPOINT` is set to
   anything but a `sofia/` dial string holding exactly one `%s` (loopback never

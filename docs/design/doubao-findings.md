@@ -623,3 +623,13 @@ release and not a lifetime cap — but today the CDR cannot tell it from a fault
 And `aicc_provider_ws_errors_total` counts a failed doubao session twice, once
 for the error frame and once for the session end it causes; one session that
 ended badly should be one.
+
+**W-D9 — a mid-call instruction change is sent, not measured (issue #13).**
+`Session.UpdateInstructions` sends a full `session.update` (instructions plus
+every tool, since tools are a full overwrite here), and the wire test and the
+fake confirm the frame. Whether the live server applies new instructions to a
+dialogue already in progress was never measured, so the re-pin that keeps a
+recorded slot (a slot tool's fact, `{slots.x}` in an instruction) in front of
+the model is best effort on doubao. The slot itself stays exact for templates
+and HTTP bodies. Measure it before relying on it: change the instruction mid-call
+and see whether the next reply obeys.
