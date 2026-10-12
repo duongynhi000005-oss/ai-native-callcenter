@@ -543,3 +543,30 @@ func TestTheUserDataBoundsAreTheOnesTheContractStates(t *testing.T) {
 func (dialerDirectory) UserIDForAgent(*http.Request, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
+
+// A canonical E.164 number reaches the dialer untouched, for both kinds: the
+// handler neither strips the "+" nor rewrites a national number.
+func TestAPlusDestinationReachesTheDialerAsSent(t *testing.T) {
+	t.Parallel()
+	w, ai := placeCall(t, `{"kind":"AI_OUTBOUND","to":"+8613800138000"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("AI: http = %d: %s", w.Code, w.Body)
+	}
+	if ai.got.To != "+8613800138000" {
+		t.Errorf("AI dialled %q, want the number as sent", ai.got.To)
+	}
+
+	w, click := agentDial(t, agentSubject(), `{"kind":"AGENT_OUTBOUND","to":"+8613800138000"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("click-to-dial: http = %d: %s", w.Code, w.Body)
+	}
+	if click.got.To != "+8613800138000" || click.got.AgentExtension != "1008" {
+		t.Errorf("click-to-dial = %+v, want the + number and the agent's own phone", click.got)
+	}
+
+	// A national number is still accepted and still not rewritten.
+	_, national := placeCall(t, `{"kind":"AI_OUTBOUND","to":"13800138000"}`)
+	if national.got.To != "13800138000" {
+		t.Errorf("national dialled %q, want it unchanged", national.got.To)
+	}
+}

@@ -189,9 +189,22 @@ func (s *Service) callTypeFor(ctx context.Context, destination string) (string, 
 	return "OUTBOUND", nil
 }
 
-// isDialable keeps dial strings boring: digits only, sane length. Everything
-// else stays out of command lines by construction.
+// isDialable keeps dial strings boring: one optional leading "+", then ASCII
+// digits, 3 to 20 of them. Everything else stays out of command lines by
+// construction. Separators, a second "+" and rewriting a national number are
+// the import normaliser's job (internal/phonenum), not the dial path's: a
+// destination is dialled, and recorded in the CDR, exactly as sent, so a single
+// call may carry a national number or canonical E.164 with its "+".
 func isDialable(number string) bool {
+	return isDigits(strings.TrimPrefix(number, "+"))
+}
+
+// isExtension is the strict form for an agent's phone: digits only, no "+".
+func isExtension(number string) bool {
+	return isDigits(number)
+}
+
+func isDigits(number string) bool {
 	if len(number) < 3 || len(number) > 20 {
 		return false
 	}
@@ -236,7 +249,7 @@ type AgentDialRequest struct {
 func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, error) {
 	agentExtension, destination := req.AgentExtension, req.To
 	userData, callcenterName := req.UserData, req.CallcenterName
-	if !isDialable(destination) || !isDialable(agentExtension) {
+	if !isDialable(destination) || !isExtension(agentExtension) {
 		return uuid.Nil, ErrBadNumber
 	}
 

@@ -360,3 +360,23 @@ func TestOriginateKeepsAHeaderValueWithCommaSpaceAndQuoteAsOneVariable(t *testin
 		t.Errorf("command = %q, want %q", c.last(), want)
 	}
 }
+
+// A "+" is not special in an originate line: neither the variable block nor the
+// endpoint escapes it, so a canonical E.164 destination reaches the carrier
+// gateway as written.
+func TestOriginateKeepsAPlusInTheEndpointAndInVariables(t *testing.T) {
+	t.Parallel()
+	a, c := newTestAdapter()
+	party := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	if _, err := a.Originate(party, "sofia/gateway/pstn_gateway/+8613800138000", map[string]string{
+		"aicc_destination": "+8613800138000",
+	}); err != nil {
+		t.Fatalf("Originate: %v", err)
+	}
+	const want = `originate {aicc_destination=+8613800138000,ignore_early_media=true,` +
+		`origination_uuid=11111111-2222-3333-4444-555555555555}` +
+		`sofia/gateway/pstn_gateway/+8613800138000 &park()`
+	if c.last() != want {
+		t.Errorf("command = %q, want %q", c.last(), want)
+	}
+}
