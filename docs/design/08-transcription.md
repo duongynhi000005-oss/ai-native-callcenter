@@ -2896,10 +2896,37 @@ POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/mul
   never sends `task-finished`, so neither is used. `-filetrans` (async, needs a URL the vendor
   can reach) is not used either: chunking keeps the audio inside this process.
 - The response parser accepts `output.text` and `output.sentence` or `output.sentences`
-  (`text`, `begin_time`, `end_time` in ms). The exact sentence shape of the non-diarized
-  response was not captured in the probe, so the parser is tolerant (a single object, a list,
-  or text alone) and falls back to one segment spanning the clip. **First real run: compare the
-  stored segments with the raw response and tighten the parser.**
+  (`text`, `begin_time`, `end_time` in ms). **Still unsettled:** no request has returned
+  speech yet (see below), so the exact sentence shape of a successful, non-diarized response
+  is unconfirmed. The parser stays tolerant (a single object, a list, or text alone) and
+  falls back to one segment spanning the clip. When the first real speech clip succeeds,
+  compare the stored segments with the raw response and tighten the parser and its test.
+
+**Probe 2026-10-12 (the first real run failed on both calls with 3 requests; then 4 probe requests and a 3-request re-run).** A clip with
+nothing the model recognises as speech is answered `HTTP 400`,
+`{"request_id":"...","code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS"}`, not an
+empty 200. The client now treats exactly that status, code and message as an empty clip
+(`BatchResult.NoSpeech`): the run keeps what its other clips said and a recording with no
+speech at all is `DONE` with no segments. Any other 400 still fails the run at once.
+Evidence, all from the two dev recordings used for the run:
+
+| Recording | Channel | Content (offline analysis) | Result |
+|---|---|---|---|
+| zh `01a0b9e9-...` 41 s | CUSTOMER (ch0) | near silent: peak 1820, RMS 31, 7 of 2058 frames above RMS 50; two quiet bursts at 9-19 s | 400 NO_WORDS (clip 7-21 s) |
+| zh `01a0b9e9-...` | FAR_END (ch1) | 41 s of steady low-frequency sound, RMS about 900, no pauses: the call left the bot after 3 s and sat in the queue (hold music) | 400 NO_WORDS: whole channel, the 3-9 s slice at 8 kHz, the same slice with `sample_rate` 16000, and upsampled to a 16 kHz file |
+| en `01a037c1-...` 29 s | CUSTOMER (ch0) | digital silence (peak 1) | dropped by the silence filter, not sent |
+| en `01a037c1-...` | FAR_END (ch1) | 30 s steady, RMS about 1900, abandoned in the queue after 29 s (hold music) | 400 NO_WORDS |
+
+The clips we encode are valid (afinfo: mono, 8000 Hz, Int16, the expected length; header
+`RIFF/WAVE/fmt /data`, 44 bytes), and neither the sample-rate parameter nor a 16 kHz file
+changed the answer. A recording with real speech (a dev call whose live transcript has
+`BOT` and `CUSTOMER` lines shows speech as bursts with pauses, unlike these two) was **not**
+sent, because the probe budget was limited to these two recordings. So "the encoding is
+right" rests on the clips being valid and on the issue's earlier HTTP 200 measurements, not
+on a speech control in this run. The first run over a call with spoken audio settles it.
+
+Hold music and line noise are therefore billed (they are audio minutes sent) and return
+nothing. The silence filter only drops digital silence; it cannot tell music from speech.
 
 ### 18.2 Pieces
 
@@ -2983,6 +3010,7 @@ Failures:
 | Failure | Result |
 |---|---|
 | HTTP 429, 5xx, timeout, network error, Throttling code | retry: `PENDING`, `error` set, `next_attempt_at` = 30 s, then 2 min, then 8 min |
+| 400 `CLIENT_ERROR` `ASR_RESPONSE_HAVE_NO_WORDS` (a clip with no speech) | not a failure: the clip is empty, the run goes on |
 | Any other vendor rejection (400, 401, 200 with an error code) | `FAILED` at once |
 | Recording deleted, not a 16-bit PCM WAV | `FAILED` at once |
 | `AICC_POSTCALL_TRANSCRIBE_MAX_ATTEMPTS` (3) reached | `FAILED` |
@@ -3023,7 +3051,7 @@ returned unchanged; a `DONE` or `FAILED` one starts over (`run` + 1).
 policy over existing recordings with no run (newest first), prints each call id with its
 seconds and the total audio minutes, and exits without sending anything. With `-run` it queues
 them and drains the same workers until each is `DONE` or `FAILED`. `-calls` names calls
-explicitly and bypasses the policy. It needs `AICC_POSTCALL_TRANSCRIBE_ENABLED=true`, the
+explicitly, bypasses the policy, and starts over a run that is `DONE` or `FAILED` (a run in flight is left alone). It needs `AICC_POSTCALL_TRANSCRIBE_ENABLED=true`, the
 endpoint and `ALIYUN_API_KEY`.
 
 ### 18.8 Config

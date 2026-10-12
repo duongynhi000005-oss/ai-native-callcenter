@@ -675,3 +675,86 @@ func TestThePlanSpendsNothingAndAppliesThePolicy(t *testing.T) {
 		t.Error("planning queued something")
 	}
 }
+
+// A clip the vendor heard nothing in is an empty clip. The run keeps what the
+// other clips said, and a recording with no speech at all is DONE with no
+// segments rather than FAILED.
+func TestAClipWithNoSpeechDoesNotFailTheRun(t *testing.T) {
+	t.Parallel()
+	const rate = 8000
+	n := rate * 600
+	left, right := tone(n, 1000), tone(n, -1000)
+	aud := fakeAudio{b: stereo(left, right, rate)}
+
+	run := func(t *testing.T, reply func(n int, req transcribe.BatchRequest) (transcribe.BatchResult, error)) (string, []store.TranscriptionSegment) {
+		db := newFakeLedger()
+		rec := db.addRecording(600)
+		s := newService(db, aud, &fakeRecognizer{reply: reply}, defaultCfg)
+		db.EnqueueTranscription(context.Background(), rec.CallID, rec.ID, 600)
+		if err := s.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer s.Stop()
+		waitFor(t, "the run to settle", func() bool {
+			st := db.status(rec.CallID)
+			return st == store.TranscriptionDone || st == store.TranscriptionFailed
+		})
+		return db.status(rec.CallID), db.segs[rec.CallID]
+	}
+
+	t.Run("some clips empty", func(t *testing.T) {
+		status, segs := run(t, func(n int, _ transcribe.BatchRequest) (transcribe.BatchResult, error) {
+			if n%2 == 1 {
+				return transcribe.BatchResult{NoSpeech: true}, nil
+			}
+			return transcribe.BatchResult{Text: "x", Sentences: []transcribe.BatchSentence{{Text: "x", EndMs: 100}}}, nil
+		})
+		if status != store.TranscriptionDone || len(segs) == 0 {
+			t.Errorf("status %s, %d segments; want DONE with the clips that did have speech", status, len(segs))
+		}
+	})
+	t.Run("every clip empty", func(t *testing.T) {
+		status, segs := run(t, func(int, transcribe.BatchRequest) (transcribe.BatchResult, error) {
+			return transcribe.BatchResult{NoSpeech: true}, nil
+		})
+		if status != store.TranscriptionDone || len(segs) != 0 {
+			t.Errorf("status %s, %d segments; want DONE with none", status, len(segs))
+		}
+	})
+}
+
+// The backfill names calls on purpose: a FAILED run for one of them starts
+// over, a run in flight is left alone, and without that choice nothing is
+// disturbed.
+func TestTheBackfillCanRerunAFailedCall(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := newFakeLedger()
+	failed, running := db.addRecording(60), db.addRecording(60)
+	for _, r := range []store.Recording{failed, running} {
+		db.EnqueueTranscription(ctx, r.CallID, r.ID, 60)
+	}
+	db.runs[failed.CallID].Status = store.TranscriptionFailed
+	db.runs[running.CallID].Status = store.TranscriptionRunning
+	cands := []Candidate{
+		{CallID: failed.CallID, RecordingID: failed.ID, DurationSec: 60},
+		{CallID: running.CallID, RecordingID: running.ID, DurationSec: 60},
+	}
+	s := newService(db, fakeAudio{}, &fakeRecognizer{}, defaultCfg)
+
+	if n, err := s.Enqueue(ctx, cands, false); err != nil || n != 0 {
+		t.Fatalf("without again: %d, %v", n, err)
+	}
+	if db.status(failed.CallID) != store.TranscriptionFailed {
+		t.Fatal("a failed run was disturbed without being asked")
+	}
+	if n, err := s.Enqueue(ctx, cands, true); err != nil || n != 1 {
+		t.Fatalf("with again: %d, %v; want only the failed run restarted", n, err)
+	}
+	if r := db.runs[failed.CallID]; r.Status != store.TranscriptionPending || r.Run != 2 {
+		t.Errorf("failed run = %+v", r)
+	}
+	if db.status(running.CallID) != store.TranscriptionRunning {
+		t.Error("a run in flight was restarted")
+	}
+}

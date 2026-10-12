@@ -82,7 +82,7 @@ func runTranscribeRecordings(args []string) error {
 	fs := flag.NewFlagSet("transcribe-recordings", flag.ExitOnError)
 	since := fs.Duration("since", 7*24*time.Hour, "only recordings booked within this long ago")
 	limit := fs.Int("limit", 10, "at most this many recordings")
-	calls := fs.String("calls", "", "comma-separated call ids to transcribe regardless of policy (ignores -since and -limit)")
+	calls := fs.String("calls", "", "comma-separated call ids to transcribe regardless of policy (ignores -since and -limit); a finished or failed run for them starts over")
 	run := fs.Bool("run", false, "do it; without this flag the command only prints the plan")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -137,7 +137,7 @@ func runTranscribeRecordings(args []string) error {
 		fmt.Println("dry run: nothing was sent; add -run to transcribe")
 		return nil
 	}
-	if _, err := svc.Enqueue(ctx, cands); err != nil {
+	if _, err := svc.Enqueue(ctx, cands, *calls != ""); err != nil {
 		return err
 	}
 	if err := svc.Drain(ctx); err != nil {

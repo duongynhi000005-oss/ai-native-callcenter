@@ -45,6 +45,10 @@ type BatchResult struct {
 	Language string
 	// Sentences are the timed pieces; empty when the engine returned only Text.
 	Sentences []BatchSentence
+	// NoSpeech is set when the engine found nothing to transcribe in the clip
+	// (music, line noise, a murmur). It is a result, not an error: the clip is
+	// simply empty.
+	NoSpeech bool
 }
 
 // BatchRecognizer recognises a finished clip in one request. It is the batch
@@ -89,6 +93,9 @@ func IsRetryable(err error) bool {
 	}
 	return true
 }
+
+// noWordsMessage is the vendor's message for a clip it heard nothing in.
+const noWordsMessage = "ASR_RESPONSE_HAVE_NO_WORDS"
 
 // DashScopeBatch is the synchronous HTTP client for the DashScope
 // multimodal-generation endpoint (design 08 section 18, issue #27). One clip
@@ -207,6 +214,13 @@ type batchWireSentence struct {
 func parseBatchResponse(status int, raw []byte) (BatchResult, error) {
 	var r batchWireResponse
 	_ = json.Unmarshal(raw, &r)
+
+	// A clip with no recognisable speech is answered with a 400, not an empty
+	// 200 (measured 2026-10-12: hold music and line noise, at 8 kHz and 16 kHz).
+	// That exact code, and only that one, is an empty result.
+	if status == http.StatusBadRequest && r.Code == "CLIENT_ERROR" && r.Message == noWordsMessage {
+		return BatchResult{NoSpeech: true}, nil
+	}
 
 	if status != http.StatusOK || r.Code != "" {
 		be := &BatchError{Status: status, Code: r.Code, Message: r.Message}

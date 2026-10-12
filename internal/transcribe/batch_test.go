@@ -138,3 +138,28 @@ func TestBatchClientRefusesWhatCannotWork(t *testing.T) {
 		t.Error("an empty key was accepted")
 	}
 }
+
+// The vendor answers a clip with no speech in it (hold music, line noise) with
+// a 400, measured live on 2026-10-12. That is an empty clip, and only that.
+func TestAClipWithNoSpeechIsEmptyNotAnError(t *testing.T) {
+	t.Parallel()
+	const noWords = `{"request_id":"c631f0b7","code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS"}`
+	res, err := parseBatchResponse(400, []byte(noWords))
+	if err != nil || !res.NoSpeech || res.Text != "" || len(res.Sentences) != 0 {
+		t.Fatalf("got %+v, %v; want an empty NoSpeech result", res, err)
+	}
+
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+	}{
+		"another CLIENT_ERROR":       {400, `{"code":"CLIENT_ERROR","message":"AUDIO_TOO_LONG"}`},
+		"the same words, wrong code": {400, `{"code":"InvalidParameter","message":"ASR_RESPONSE_HAVE_NO_WORDS"}`},
+		"the same body on a 500":     {500, noWords},
+		"the same body on a 200":     {200, noWords},
+	} {
+		if _, err := parseBatchResponse(tc.status, []byte(tc.body)); err == nil {
+			t.Errorf("%s: no error, want a failure", name)
+		}
+	}
+}

@@ -402,11 +402,16 @@ func (s *Service) CandidateFor(ctx context.Context, callID string) (Candidate, e
 	return Candidate{CallID: id, RecordingID: rec.ID, DurationSec: rec.DurationSec}, nil
 }
 
-// Enqueue queues planned candidates and reports how many were new.
-func (s *Service) Enqueue(ctx context.Context, cands []Candidate) (int, error) {
+// Enqueue queues candidates and reports how many started a run. With
+// again set, a candidate whose run is DONE or FAILED starts over (the operator
+// named the call); a run in flight is left alone either way.
+func (s *Service) Enqueue(ctx context.Context, cands []Candidate, again bool) (int, error) {
 	n := 0
 	for _, c := range cands {
 		ok, err := s.db.EnqueueTranscription(ctx, c.CallID, c.RecordingID, c.DurationSec)
+		if err == nil && !ok && again {
+			ok, err = s.db.RequeueTranscription(ctx, c.CallID, c.RecordingID, c.DurationSec)
+		}
 		if err != nil {
 			return n, err
 		}
@@ -594,6 +599,9 @@ func (s *Service) transcribe(ctx context.Context, job store.CallTranscription) (
 			})
 			if err != nil {
 				return nil, err
+			}
+			if res.NoSpeech {
+				continue
 			}
 			clipEnd := clip.OffsetMs + len(clip.Samples)*1000/pcm.Rate
 			if len(res.Sentences) == 0 && res.Text != "" {
