@@ -271,7 +271,14 @@ type DID struct {
 	// nothing names one. At most one in the deployment, enforced by a partial
 	// unique index rather than by whoever remembers to clear the last one.
 	IsDefaultOutbound bool `json:"isDefaultOutbound"`
+	// MaxOutboundChannels is how many outbound calls the number may carry at
+	// once (ringing plus talking): what the carrier sells per number. Nil is no
+	// limit. Inbound lines are neither counted nor limited by it.
+	MaxOutboundChannels *int `json:"maxOutboundChannels,omitempty"`
 }
+
+// MaxOutboundChannelsLimit is the largest outbound line limit a number may be given.
+const MaxOutboundChannelsLimit = 100000
 
 // NewDID is the shape a create or update body is decoded into. See
 // NewExtension for why the boolean defaults are seeded rather than applied in
@@ -308,6 +315,10 @@ func (d *DID) validate() error {
 	}
 	if d.IsDefaultOutbound && !d.AllowOutbound {
 		return invalid("isDefaultOutbound", "DEFAULT_NEEDS_OUTBOUND", "a number that cannot place calls cannot be the default one")
+	}
+	if d.MaxOutboundChannels != nil && (*d.MaxOutboundChannels < 1 || *d.MaxOutboundChannels > MaxOutboundChannelsLimit) {
+		return invalid("maxOutboundChannels", "OUT_OF_RANGE",
+			"the outbound line limit must be between 1 and 100000; leave it out for no limit")
 	}
 	return nil
 }

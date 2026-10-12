@@ -209,18 +209,19 @@ type Contact struct {
 }
 
 type Did struct {
-	ID                 uuid.UUID          `json:"id"`
-	Number             string             `json:"number"`
-	Language           string             `json:"language"`
-	FlowID             *uuid.UUID         `json:"flowId"`
-	FallbackQueueID    *uuid.UUID         `json:"fallbackQueueId"`
-	IsRecordingEnabled bool               `json:"isRecordingEnabled"`
-	Description        string             `json:"description"`
-	IsEnabled          bool               `json:"isEnabled"`
-	CreatedAt          pgtype.Timestamptz `json:"createdAt"`
-	AllowInbound       bool               `json:"allowInbound"`
-	AllowOutbound      bool               `json:"allowOutbound"`
-	IsDefaultOutbound  bool               `json:"isDefaultOutbound"`
+	ID                  uuid.UUID          `json:"id"`
+	Number              string             `json:"number"`
+	Language            string             `json:"language"`
+	FlowID              *uuid.UUID         `json:"flowId"`
+	FallbackQueueID     *uuid.UUID         `json:"fallbackQueueId"`
+	IsRecordingEnabled  bool               `json:"isRecordingEnabled"`
+	Description         string             `json:"description"`
+	IsEnabled           bool               `json:"isEnabled"`
+	CreatedAt           pgtype.Timestamptz `json:"createdAt"`
+	AllowInbound        bool               `json:"allowInbound"`
+	AllowOutbound       bool               `json:"allowOutbound"`
+	IsDefaultOutbound   bool               `json:"isDefaultOutbound"`
+	MaxOutboundChannels *int32             `json:"maxOutboundChannels"`
 }
 
 type Disposition struct {

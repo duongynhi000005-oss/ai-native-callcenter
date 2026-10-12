@@ -3,6 +3,7 @@
 package voice
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,5 +55,33 @@ func TestEveryWayCapacityAppearsTellsTheListener(t *testing.T) {
 	b.Reserve("z")
 	if told.Load() != 3 {
 		t.Errorf("told %d times by acquisitions, want still 3", told.Load())
+	}
+}
+
+// An answered leg parked for a slot is visible to the dialer for exactly as long
+// as it is parked.
+func TestUsageCountsTheLegsWaitingForASlot(t *testing.T) {
+	t.Parallel()
+	b, err := NewBotSlots(BotSlotsConfig{Cap: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.TryAcquire()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.ReserveWait(context.Background(), "waiter", 5*time.Second)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Usage().Waiting != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting = %d, want 1 while a leg is parked", b.Usage().Waiting)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	b.Free() // the slot goes to the waiter
+	<-done
+	if u := b.Usage(); u.Waiting != 0 || u.Reserved != 1 {
+		t.Errorf("usage = %+v after the wait ended, want nothing waiting and one reserved", u)
 	}
 }

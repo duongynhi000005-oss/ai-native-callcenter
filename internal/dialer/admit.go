@@ -44,6 +44,10 @@ func (d *Dialer) pass(ctx context.Context) {
 		d.nextWake = now.Add(5 * time.Second)
 		return
 	}
+	nextSample := d.matureSamples(now)
+	if !nextSample.IsZero() && nextSample.Before(d.nextWake) {
+		d.nextWake = nextSample
+	}
 	if d.dncDirty {
 		d.dncDirty = false
 		d.skipDNC(ctx, now)
@@ -58,6 +62,14 @@ func (d *Dialer) pass(ctx context.Context) {
 			if err := d.st.RearmUntried(ctx, c.ID, now); err != nil {
 				d.log.Error("dialer: cannot re-arm contacts", "campaignId", c.ID, "error", err)
 			}
+		}
+	}
+
+	if d.ln != nil {
+		if limits, err := d.ln.DIDLimits(ctx); err != nil {
+			d.log.Error("dialer: cannot read the DIDs' outbound line limits; the last known ones apply", "error", err)
+		} else {
+			d.limits = limits
 		}
 	}
 
@@ -141,7 +153,7 @@ func (d *Dialer) admitOne(ctx context.Context, c campaign.Campaign, b *bucket, n
 			return moved
 		}
 	}
-	if reason := d.limit(c); reason != "" {
+	if reason := d.limit(ctx, c); reason != "" {
 		b.done, b.blocked = true, reason
 		obs.RecordDialerBlocked(reason)
 		return false
@@ -152,25 +164,91 @@ func (d *Dialer) admitOne(ctx context.Context, c campaign.Campaign, b *bucket, n
 	return true
 }
 
-// limit says which limit forbids one more call for the campaign, if any: the
-// conservative rule, which never over-dials (design 10 section 6; expected-
-// answer admission is a later slice).
-func (d *Dialer) limit(c campaign.Campaign) string {
+// limit says which limit forbids one more call for the campaign, if any (design
+// 10 section 6):
+//
+//	ringing < maxRinging
+//	campaign in flight < max_concurrent
+//	DID outbound lines in use < the DID's limit
+//	botInUse + sum over campaigns (p_c x ringing_c) + 1 <= cap - inboundReserve
+//
+// botInUse counts the slots in use, those reserved for answered legs that have
+// not bridged yet, and the answered legs waiting in the overflow hold for one.
+// p_c is the campaign's answer-rate bound (CapacityStats.Bound).
+func (d *Dialer) limit(ctx context.Context, c campaign.Campaign) string {
 	if d.inflight[c.ID] >= c.MaxConcurrent {
 		return obs.DialerBlockedCampaign
 	}
 	if d.ringing >= d.cfg.MaxRinging {
 		return obs.DialerBlockedRinging
 	}
+	if d.ln != nil {
+		if limit, ok := d.limits[c.DIDNumber]; ok && d.ln.LinesInUse(c.DIDNumber) >= limit {
+			return obs.DialerBlockedDIDLines
+		}
+	}
 	if d.sl != nil {
 		u := d.sl.Usage()
-		// Slots in use and reserved are held already; every leg still ringing
-		// will want one if it is answered, and so will this one.
-		if u.InUse+u.Reserved+d.ringing+1 > u.Cap-u.InboundReserve {
+		reserve := max(d.cfg.InboundReserve, u.InboundReserve)
+		held := float64(u.InUse + u.Reserved + u.Waiting)
+		if held+d.expectedAnswers(ctx)+1 > float64(u.Cap-reserve)+1e-9 {
 			return obs.DialerBlockedBot
 		}
 	}
 	return ""
+}
+
+// expectedAnswers is the sum over campaigns of the bound on the answer rate
+// times the legs ringing, which is how many of the ringing legs are expected to
+// need a bot slot.
+func (d *Dialer) expectedAnswers(ctx context.Context) float64 {
+	sum := 0.0
+	for id, n := range d.ringingBy {
+		bound := d.statsFor(ctx, id).Bound()
+		if d.cfg.noOverdial {
+			bound = 1
+		}
+		sum += bound * float64(n)
+	}
+	return sum
+}
+
+// ringBy moves a campaign's ringing count.
+func (d *Dialer) ringBy(id uuid.UUID, delta int) {
+	if d.ringingBy[id] += delta; d.ringingBy[id] <= 0 {
+		delete(d.ringingBy, id)
+	}
+}
+
+// warmStart is how many of a campaign's latest finished attempts are replayed
+// to rebuild its statistics after a restart: three windows, because attempts
+// that never rang do not fill the answer-rate window.
+const warmStart = 3 * campaign.RateWindow
+
+// statsFor is the campaign's answer-rate and overflow history. It is read from
+// the store the first time it is needed and kept current by onFinished, so no
+// admission scans the database. A history that cannot be read is a fresh one
+// (bound 1, which never over-dials) that is not kept, so the read is tried again.
+//
+// A finish that lands between the load and its own message being handled is
+// counted twice; the effect is one sample in a window of two hundred.
+func (d *Dialer) statsFor(ctx context.Context, id uuid.UUID) *campaign.CapacityStats {
+	if s, ok := d.stats[id]; ok {
+		return s
+	}
+	s := campaign.NewCapacityStats(d.cfg.OverflowTightenRate, d.cfg.OverflowStopRate)
+	recent, err := d.st.RecentOutcomesSince(ctx, id, time.Unix(0, 0), warmStart)
+	if err != nil {
+		d.log.Warn("dialer: cannot read a campaign's recent outcomes; planning with every ringing leg answering",
+			"campaignId", id, "error", err)
+		return s
+	}
+	for i := len(recent) - 1; i >= 0; i-- { // newest first in, oldest first out
+		s.Observe(recent[i])
+	}
+	d.stats[id] = s
+	obs.SetCampaignAnswerRateUCB(id.String(), s.Bound())
+	return s
 }
 
 // refill fetches the next batch of due contacts and judges each against its
@@ -287,6 +365,7 @@ func (d *Dialer) admit(ctx context.Context, c campaign.Campaign, ct campaign.Con
 	d.flights[att.CallID] = f
 	d.inflight[c.ID]++
 	d.ringing++
+	d.ringBy(c.ID, 1)
 	obsInFlight(false, 1)
 
 	pctx, cancel := context.WithTimeout(ctx, d.cfg.DialTimeout)
@@ -319,6 +398,7 @@ func (d *Dialer) dialFailed(ctx context.Context, c campaign.Campaign, f *flight,
 	}
 	verdict := campaign.ClassifyDialError(err, campaign.DialErrorKinds{
 		NumberOnDNC: outbound.ErrNumberOnDNC, BadNumber: outbound.ErrBadNumber,
+		LineLimit: outbound.ErrDIDChannelsExhausted,
 	})
 	if verdict.IsVoid {
 		d.voidAttempt(ctx, f, now)
@@ -374,6 +454,7 @@ func (d *Dialer) drop(callID uuid.UUID) *flight {
 		obsInFlight(true, -1)
 	} else {
 		d.ringing--
+		d.ringBy(f.campaignID, -1)
 		obsInFlight(false, -1)
 	}
 	return f
@@ -389,14 +470,97 @@ func obsInFlight(isTalking bool, delta int64) {
 
 // onFinished is an attempt's outcome having been written and committed.
 func (d *Dialer) onFinished(ctx context.Context, f campaign.Finished) {
-	d.drop(f.CallID)
+	fl := d.drop(f.CallID)
 	d.isDirty = true
 	d.touch(f.CampaignID)
 	if f.IsRevision {
 		return
 	}
 	obs.RecordCampaignAttempt(string(f.Outcome))
+	if f.Outcome == campaign.OutcomeOverflow {
+		obs.RecordCampaignOverflow(f.CampaignID.String())
+	}
+	d.feedStats(f, fl)
 	d.judgeBreakers(ctx, f)
+}
+
+// feedStats moves the campaign's capacity statistics by a finished attempt, if
+// they are loaded (a campaign whose history is read later finds it in the
+// store). An attempt the dialer was never told was answered is told now.
+func (d *Dialer) feedStats(f campaign.Finished, fl *flight) {
+	s, ok := d.stats[f.CampaignID]
+	if !ok || !campaign.DoesRing(f.Outcome) {
+		return
+	}
+	now := d.clock.Now()
+	if fl == nil {
+		fl = &flight{campaignID: f.CampaignID, callID: f.CallID, startedAt: now}
+	}
+	if campaign.IsAnsweredOutcome(f.Outcome) {
+		if !fl.isAnswered {
+			s.Answered(f.CallID)
+			d.sample(fl, true, now)
+		}
+		if f.Outcome == campaign.OutcomeOverflow {
+			s.Overflowed(f.CallID)
+		}
+	} else {
+		d.sample(fl, false, now)
+	}
+	obs.SetCampaignAnswerRateUCB(f.CampaignID.String(), s.Bound())
+}
+
+// rangSample is one attempt's answer-rate sample, held until its ring timeout
+// has passed.
+type rangSample struct {
+	at         time.Time // when the sample is due
+	dialledAt  time.Time
+	campaignID uuid.UUID
+	isAnswered bool
+}
+
+// sampleMargin is how long past the ring timeout an attempt's sample waits for
+// the non-answers of its cohort, whose hangups arrive a moment after the
+// timeout.
+const sampleMargin = 3 * time.Second
+
+// sample queues an attempt's answer-rate sample for the moment its ring timeout
+// is over, or now if that has passed: every attempt enters the window in the
+// order it was dialled, not in the order its ring happened to resolve.
+func (d *Dialer) sample(f *flight, isAnswered bool, now time.Time) {
+	at := f.startedAt.Add(f.ring + sampleMargin)
+	if at.Before(now) {
+		at = now
+	}
+	d.samples = append(d.samples, rangSample{at: at, dialledAt: f.startedAt, campaignID: f.campaignID, isAnswered: isAnswered})
+}
+
+// matureSamples moves the samples whose time has come into their campaigns'
+// windows, and returns when the next one is due (zero for none). The window
+// orders them by when the attempt was dialled, so the order they arrive in does
+// not matter.
+func (d *Dialer) matureSamples(now time.Time) time.Time {
+	var next time.Time
+	touched := map[uuid.UUID]bool{}
+	keep := d.samples[:0]
+	for _, sm := range d.samples {
+		if sm.at.After(now) {
+			keep = append(keep, sm)
+			if next.IsZero() || sm.at.Before(next) {
+				next = sm.at
+			}
+			continue
+		}
+		if s, ok := d.stats[sm.campaignID]; ok {
+			s.Rang(sm.dialledAt, sm.isAnswered)
+			touched[sm.campaignID] = true
+		}
+	}
+	d.samples = keep
+	for id := range touched {
+		obs.SetCampaignAnswerRateUCB(id.String(), d.stats[id].Bound())
+	}
+	return next
 }
 
 // judgeBreakers pauses the campaign when its run of failures says the trunk or

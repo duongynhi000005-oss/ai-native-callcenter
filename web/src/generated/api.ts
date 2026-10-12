@@ -367,6 +367,8 @@ export interface paths {
          *     Authorization differs by kind. calls:create reaches the operation; AI_OUTBOUND additionally requires calls:create:ai, which an agent does not hold. A caller missing it is refused INSUFFICIENT_SCOPE naming calls:create:ai. The machine-readable form is x-body-scopes: scopes a credential of either kind must hold, beyond the security block, when the named request-body property has the listed value. A security block cannot say this, because its alternatives choose between credentials, not between request bodies.
          *
          *     A destination on the do-not-call list is refused with 422 NUMBER_ON_DNC, for both kinds: no call is placed and no CDR is written (the CDR is the ledger of calls placed). The destination is compared as canonical E.164, completed with AICC_DEFAULT_COUNTRY_CODE when it is national; with that unset, a national number cannot be matched and is not checked, while a number written with + or 00 always is.
+         *
+         *     A call whose DID is at its outbound line limit (maxOutboundChannels on the DID) is refused with 409 DID_CHANNELS_EXHAUSTED, for both kinds: no call is placed and no CDR is written. For AGENT_OUTBOUND the DID is the number the call goes out from (the default outbound number).
          */
         post: operations["createCall"];
         delete?: never;
@@ -1788,7 +1790,7 @@ export interface components {
          * @description Machine-readable, translatable failure identifier. The frontend renders errors.<CODE>; the backend never localizes.
          * @enum {string}
          */
-        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
+        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "DID_CHANNELS_EXHAUSTED" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
         /** @description The single error envelope body: an error code plus interpolation params. Message is diagnostic English, never shown to end users. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -2350,6 +2352,8 @@ export interface components {
             allowOutbound: boolean;
             /** @description The number an agent's call goes out from when nothing names one. At most one number in the deployment carries this, enforced by the database rather than by whoever remembers to clear the last one. */
             isDefaultOutbound: boolean;
+            /** @description How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit. */
+            maxOutboundChannels?: number;
         };
         /**
          * @description Create or update a number. Omitted fields take server defaults (language en, inbound, isEnabled true, isRecordingEnabled true).
@@ -2372,6 +2376,8 @@ export interface components {
             allowOutbound?: boolean;
             /** @description The number an agent's call goes out from when nothing names one. At most one number in the deployment carries this, enforced by the database rather than by whoever remembers to clear the last one. */
             isDefaultOutbound?: boolean;
+            /** @description How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit. */
+            maxOutboundChannels?: number;
         };
         DIDList: {
             items: components["schemas"]["DID"][];

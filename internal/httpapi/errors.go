@@ -50,7 +50,10 @@ const (
 	// CodeNumberOnDNC refuses a call to a number on the do-not-call list.
 	// Nothing was placed and nothing was recorded.
 	CodeNumberOnDNC ErrorCode = "NUMBER_ON_DNC"
-	CodeNotFound    ErrorCode = "NOT_FOUND"
+	// CodeDIDChannelsExhausted refuses a call from a DID that is at its
+	// outbound line limit. Nothing was placed and nothing was recorded.
+	CodeDIDChannelsExhausted ErrorCode = "DID_CHANNELS_EXHAUSTED"
+	CodeNotFound             ErrorCode = "NOT_FOUND"
 
 	// The campaign codes (docs/design/10-campaigns.md section 14).
 	//

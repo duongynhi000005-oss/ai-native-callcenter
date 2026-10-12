@@ -44,6 +44,7 @@ func (d *Dialer) recoverAttempts(ctx context.Context) {
 			}
 			d.inflight[a.CampaignID]++
 			d.ringing++
+			d.ringBy(a.CampaignID, 1)
 			obsInFlight(false, 1)
 			adopted++
 			continue

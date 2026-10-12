@@ -52,6 +52,9 @@ var (
 	campaignAttempts      metric.Int64Counter
 	dialerInFlight        metric.Int64UpDownCounter
 	dialerBlocked         metric.Int64Counter
+	didOutboundInUse      metric.Int64UpDownCounter
+	campaignAnswerUCB     metric.Float64Gauge
+	campaignOverflow      metric.Int64Counter
 )
 
 // CallKind labels a live call. The two populations overlap rather than sum:
@@ -174,7 +177,20 @@ func init() {
 			"customer answers, TALKING from the answer to the end of the call."))
 	dialerBlocked, _ = meter.Int64Counter("aicc_dialer_admission_blocked_total",
 		metric.WithDescription("Times the dialer had a contact to dial and did not, by "+
-			"reason: CAMPAIGN_CONCURRENCY, OUTBOUND_RINGING or BOT_CAPACITY."))
+			"reason: CAMPAIGN_CONCURRENCY, OUTBOUND_RINGING, BOT_CAPACITY (the expected "+
+			"answers would not fit in the bot's free capacity) or DID_LINES (the campaign's "+
+			"DID is at its outbound line limit)."))
+	didOutboundInUse, _ = meter.Int64UpDownCounter("aicc_did_outbound_in_use",
+		metric.WithDescription("Outbound lines held on a DID: calls the platform placed "+
+			"or is placing from it, plus hand-dialled legs it observed. Compare with "+
+			"the DID's maxOutboundChannels."))
+	campaignAnswerUCB, _ = meter.Float64Gauge("aicc_campaign_answer_rate_ucb",
+		metric.WithDescription("The answer rate the dialer plans with for a campaign: the "+
+			"upper confidence bound over its recent rung attempts, 1 while samples are "+
+			"few or overflow control has fallen back."))
+	campaignOverflow, _ = meter.Int64Counter("aicc_campaign_overflow_total",
+		metric.WithDescription("Campaign calls the customer answered and no bot slot "+
+			"could take (outcome OVERFLOW), by campaign."))
 	outboundFirstAudio, _ = meter.Float64Histogram("aicc_outbound_first_audio_seconds",
 		metric.WithDescription("Time to the first word of an AI outbound call, by stage "+
 			"(design 10 section 13.1): ANSWER_TO_INVITE is the customer leg answering to the "+
@@ -447,7 +463,32 @@ const (
 	DialerBlockedCampaign = "CAMPAIGN_CONCURRENCY"
 	DialerBlockedRinging  = "OUTBOUND_RINGING"
 	DialerBlockedBot      = "BOT_CAPACITY"
+	DialerBlockedDIDLines = "DID_LINES"
 )
+
+// DIDOutboundInUseChanged moves the outbound-lines gauge of a DID.
+func DIDOutboundInUseChanged(did string, delta int64) {
+	if didOutboundInUse != nil {
+		didOutboundInUse.Add(context.Background(), delta,
+			metric.WithAttributes(attribute.String("did", did)))
+	}
+}
+
+// SetCampaignAnswerRateUCB publishes the answer rate a campaign is admitted by.
+func SetCampaignAnswerRateUCB(campaignID string, p float64) {
+	if campaignAnswerUCB != nil {
+		campaignAnswerUCB.Record(context.Background(), p,
+			metric.WithAttributes(attribute.String("campaign", campaignID)))
+	}
+}
+
+// RecordCampaignOverflow counts an answered campaign call that met no bot.
+func RecordCampaignOverflow(campaignID string) {
+	if campaignOverflow != nil {
+		campaignOverflow.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("campaign", campaignID)))
+	}
+}
 
 // RecordCampaignAttempt counts a finished campaign attempt by outcome.
 func RecordCampaignAttempt(outcome string) {

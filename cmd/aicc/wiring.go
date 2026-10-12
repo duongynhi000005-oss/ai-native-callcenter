@@ -84,17 +84,20 @@ type connectHook interface {
 // nil when transcription is disabled, which is the one connection that is
 // conditional.
 type composition struct {
-	Registry      *telephony.Registry
-	Coordinator   switchWiring
-	Agents        presenceWiring
-	Catalog       staffingWiring
-	Link          connectHook
-	CDR           *telephony.CDRAssembler
-	Queues        telephony.QueueCatalog
-	WrapUps       agents.WrapUpLedger
-	Transcripts   transcriptRegistry
-	Audiences     telephony.Audiences
-	Taps          telephony.Tapper
+	Registry    *telephony.Registry
+	Coordinator switchWiring
+	Agents      presenceWiring
+	Catalog     staffingWiring
+	Link        connectHook
+	CDR         *telephony.CDRAssembler
+	Queues      telephony.QueueCatalog
+	WrapUps     agents.WrapUpLedger
+	Transcripts transcriptRegistry
+	Audiences   telephony.Audiences
+	Taps        telephony.Tapper
+	// Lines gives back the outbound line a placed call held when the call ends.
+	// Nil is allowed: the AI path may be off.
+	Lines         lineReleaser
 	Registrations func() ([]telephony.Registration, error)
 	Events        systemPublisher
 	Log           *slog.Logger
@@ -174,6 +177,14 @@ func (c composition) connect() {
 	// on top of the assembler rather than replacing it, and a CDR is not
 	// something to lose in order to free a goroutine.
 	c.Registry.OnCallFinished = retireTranscriptWithCall(c.Registry.OnCallFinished, c.Transcripts)
+
+	// A line on a DID is held until the call's last leg is gone, on whichever
+	// of the two hooks ends the call: finished (the last party released) or
+	// retired (the actor exits, however it ended). Releasing is idempotent.
+	if c.Lines != nil {
+		c.Registry.OnCallFinished = releaseLinesOnFinish(c.Registry.OnCallFinished, c.Lines)
+		c.Registry.OnCallRetired = releaseLinesOnRetire(c.Registry.OnCallRetired, c.Lines)
+	}
 
 	if c.Taps != nil {
 		c.Coordinator.AttachTaps(c.Taps)
@@ -299,6 +310,33 @@ func retireTranscriptWithCall(prior func(telephony.Snapshot), transcripts transc
 			prior(snap)
 		}
 		transcripts.Close(snap.CallID)
+	}
+}
+
+// lineReleaser is the part of the outbound service that gives lines back.
+type lineReleaser interface {
+	CallEnded(callID uuid.UUID)
+}
+
+// releaseLinesOnFinish composes the call-finished hook so that a call's
+// outbound line is given back, without displacing the CDR writer before it.
+func releaseLinesOnFinish(prior func(telephony.Snapshot), lines lineReleaser) func(telephony.Snapshot) {
+	return func(snap telephony.Snapshot) {
+		if prior != nil {
+			prior(snap)
+		}
+		lines.CallEnded(snap.CallID)
+	}
+}
+
+// releaseLinesOnRetire is the same for the hook that always runs when a call's
+// actor exits, which is the net under a call that never finished.
+func releaseLinesOnRetire(prior func(uuid.UUID), lines lineReleaser) func(uuid.UUID) {
+	return func(callID uuid.UUID) {
+		if prior != nil {
+			prior(callID)
+		}
+		lines.CallEnded(callID)
 	}
 }
 

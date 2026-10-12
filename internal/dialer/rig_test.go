@@ -36,10 +36,13 @@ type fakeTimer struct {
 	at   time.Time
 	c    chan time.Time
 	done bool
+	mu   *sync.Mutex // the clock's, which guards done
 }
 
 func (t *fakeTimer) C() <-chan time.Time { return t.c }
 func (t *fakeTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	was := !t.done
 	t.done = true
 	return was
@@ -54,7 +57,7 @@ func (c *fakeClock) Now() time.Time {
 func (c *fakeClock) NewTimer(d time.Duration) Timer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	t := &fakeTimer{at: c.now.Add(d), c: make(chan time.Time, 1)}
+	t := &fakeTimer{at: c.now.Add(d), c: make(chan time.Time, 1), mu: &c.mu}
 	if d <= 0 {
 		t.c <- c.now
 		t.done = true
@@ -228,6 +231,7 @@ type opts struct {
 	trunkN     int
 	providerM  int
 	slots      *fakeSlots
+	lines      Lines
 	// outer calling hours; default 08:00-21:00.
 	outer string
 	// held keeps the reconcile gate closed until released.
@@ -325,6 +329,9 @@ func newRig(t *testing.T, o opts) *rig {
 	r.dep = Deps{Store: st.Dialer(), Placer: r.placer, IsLive: r.placer.isLive, Clock: clock, Log: slog.New(slog.DiscardHandler), OnChange: o.onChange}
 	if o.slots != nil {
 		r.dep.Slots = o.slots
+	}
+	if o.lines != nil {
+		r.dep.Lines = o.lines
 	}
 	if o.held {
 		r.gate = make(chan struct{})

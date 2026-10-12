@@ -74,6 +74,15 @@ type Slots interface {
 	Usage() voice.Usage
 }
 
+// Lines is the DIDs' outbound line account (outbound.Service); nil means no
+// DID is limited.
+type Lines interface {
+	// DIDLimits lists the DIDs that have an outbound line limit.
+	DIDLimits(ctx context.Context) (map[string]int, error)
+	// LinesInUse is the lines held on a DID now, by calls placed and observed.
+	LinesInUse(did string) int
+}
+
 // Clock is the time the dialer runs on. Tests replace it.
 type Clock interface {
 	Now() time.Time
@@ -117,6 +126,18 @@ type Config struct {
 	// campaign names none.
 	DialForm           phonenum.DialForm
 	DefaultCountryCode string
+	// InboundReserve is how many bot slots admission keeps free for inbound
+	// (config.CampaignInboundReserve). The counter's own reserve
+	// (Usage.InboundReserve) applies as well; the larger of the two holds.
+	InboundReserve int
+	// OverflowTightenRate and OverflowStopRate are overflow control's
+	// thresholds (design 10 section 6.5). Defaults 0.01 and 0.03.
+	OverflowTightenRate float64
+	OverflowStopRate    float64
+	// noOverdial plans every ringing leg as an answer, whatever the history says:
+	// the conservative rule on its own. Unexported on purpose; tests set it to
+	// have the baseline the expected-answer rule is compared with.
+	noOverdial bool
 	// SafetyScan is the longest the actor sleeps. Default 60s.
 	SafetyScan time.Duration
 	// BackstopMargin is how long past its ring timeout an attempt may stay
@@ -138,6 +159,9 @@ func (c Config) withDefaults() Config {
 	if c.ProviderBreakerCount < 1 {
 		c.ProviderBreakerCount = 5
 	}
+	if c.OverflowTightenRate <= 0 || c.OverflowStopRate <= c.OverflowTightenRate {
+		c.OverflowTightenRate, c.OverflowStopRate = 0.01, 0.03
+	}
 	if c.SafetyScan <= 0 {
 		c.SafetyScan = 60 * time.Second
 	}
@@ -158,6 +182,7 @@ type Deps struct {
 	Store  Store
 	Placer Placer
 	Slots  Slots
+	Lines  Lines
 	// IsLive says whether the registry holds the call (a live call is never
 	// reconciled away).
 	IsLive func(callID uuid.UUID) bool
@@ -179,6 +204,7 @@ type Dialer struct {
 	st  Store
 	pl  Placer
 	sl  Slots
+	ln  Lines
 	// isLive and the clock are read by the actor only.
 	isLive     func(uuid.UUID) bool
 	reconciled <-chan struct{}
@@ -205,6 +231,16 @@ type Dialer struct {
 	inflight map[uuid.UUID]int     // per campaign
 	ringing  int
 	talking  int
+	// ringingBy is the ringing legs of each campaign: the weights of the
+	// expected-answer sum. stats is each campaign's answer-rate and overflow
+	// history, loaded from the store on first use and moved by each finish.
+	ringingBy map[uuid.UUID]int
+	stats     map[uuid.UUID]*campaign.CapacityStats
+	// samples are the attempts whose ring has resolved but whose sample has not
+	// yet entered the answer-rate window (see CapacityStats).
+	samples []rangSample
+	// limits is the DIDs' outbound line limits, read once per pass.
+	limits   map[string]int
 	halted   map[uuid.UUID]bool      // paused by a breaker this pass, not yet re-read
 	since    map[uuid.UUID]time.Time // breaker run starts
 	rearm    map[uuid.UUID]bool
@@ -236,18 +272,20 @@ func New(cfg Config, d Deps) *Dialer {
 		d.Log = slog.Default()
 	}
 	x := &Dialer{
-		cfg: cfg.withDefaults(), st: d.Store, pl: d.Placer, sl: d.Slots,
+		cfg: cfg.withDefaults(), st: d.Store, pl: d.Placer, sl: d.Slots, ln: d.Lines,
 		isLive: d.IsLive, reconciled: d.Reconciled, clock: d.Clock, log: d.Log, onChange: d.OnChange,
-		wake:     make(chan struct{}, 1),
-		flights:  map[uuid.UUID]*flight{},
-		inflight: map[uuid.UUID]int{},
-		halted:   map[uuid.UUID]bool{},
-		since:    map[uuid.UUID]time.Time{},
-		rearm:    map[uuid.UUID]bool{},
-		warnedCC: map[uuid.UUID]bool{},
-		progress: map[uuid.UUID]campaign.Progress{},
-		schedule: map[string]campaign.Schedule{},
-		isDirty:  true, dncDirty: true,
+		wake:      make(chan struct{}, 1),
+		flights:   map[uuid.UUID]*flight{},
+		inflight:  map[uuid.UUID]int{},
+		ringingBy: map[uuid.UUID]int{},
+		stats:     map[uuid.UUID]*campaign.CapacityStats{},
+		halted:    map[uuid.UUID]bool{},
+		since:     map[uuid.UUID]time.Time{},
+		rearm:     map[uuid.UUID]bool{},
+		warnedCC:  map[uuid.UUID]bool{},
+		progress:  map[uuid.UUID]campaign.Progress{},
+		schedule:  map[string]campaign.Schedule{},
+		isDirty:   true, dncDirty: true,
 	}
 	if x.isLive == nil {
 		x.isLive = func(uuid.UUID) bool { return false }
@@ -511,7 +549,10 @@ func (d *Dialer) handle(ctx context.Context, m any) {
 	case answeredMsg:
 		if f := d.flights[uuid.UUID(m)]; f != nil && !f.isAnswered {
 			f.isAnswered = true
+			d.statsFor(ctx, f.campaignID).Answered(f.callID)
+			d.sample(f, true, d.clock.Now())
 			d.ringing--
+			d.ringBy(f.campaignID, -1)
 			d.talking++
 			obsInFlight(false, -1)
 			obsInFlight(true, 1)

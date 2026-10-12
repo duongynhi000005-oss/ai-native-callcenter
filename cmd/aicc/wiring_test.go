@@ -67,6 +67,27 @@ func TestDetachingTapsWorksWithNoPredecessor(t *testing.T) {
 	}
 }
 
+type lineGiver struct{ ended []uuid.UUID }
+
+func (l *lineGiver) CallEnded(id uuid.UUID) { l.ended = append(l.ended, id) }
+
+// A line on a DID is given back on either ending signal, and the writer of the
+// CDR before it still runs.
+func TestAPlacedCallsLineIsReleasedOnFinishAndOnRetire(t *testing.T) {
+	t.Parallel()
+	lines := &lineGiver{}
+	callID := uuid.New()
+	var priorRan int
+
+	releaseLinesOnFinish(func(telephony.Snapshot) { priorRan++ }, lines)(telephony.Snapshot{CallID: callID})
+	releaseLinesOnRetire(func(uuid.UUID) { priorRan++ }, lines)(callID)
+	releaseLinesOnFinish(nil, lines)(telephony.Snapshot{CallID: callID})
+
+	if priorRan != 2 || len(lines.ended) != 3 || lines.ended[0] != callID {
+		t.Errorf("prior ran %d times, lines released for %v", priorRan, lines.ended)
+	}
+}
+
 // What a deployment demands of a flow follows from what answers its calls.
 //
 // The three engines reached over the Realtime protocol can all be prompted into

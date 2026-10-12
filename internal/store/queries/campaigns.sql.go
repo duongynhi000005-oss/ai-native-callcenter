@@ -259,7 +259,7 @@ func (q *Queries) GetCampaignForUpdate(ctx context.Context, id uuid.UUID) (GetCa
 }
 
 const getDIDByID = `-- name: GetDIDByID :one
-SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound FROM dids WHERE id = $1
+SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels FROM dids WHERE id = $1
 `
 
 func (q *Queries) GetDIDByID(ctx context.Context, id uuid.UUID) (Did, error) {
@@ -278,6 +278,7 @@ func (q *Queries) GetDIDByID(ctx context.Context, id uuid.UUID) (Did, error) {
 		&i.AllowInbound,
 		&i.AllowOutbound,
 		&i.IsDefaultOutbound,
+		&i.MaxOutboundChannels,
 	)
 	return i, err
 }

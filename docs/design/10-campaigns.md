@@ -438,6 +438,27 @@ admit iff  ringing < maxRinging
 - The sum runs over the ringing legs of every running campaign, since they compete for the same
   bot capacity.
 
+**As built (S4).**
+
+- `botInUse` is the slots in use, the slots reserved for answered legs that have not bridged yet, and
+  the answered legs waiting in the overflow hold for one (`voice.Usage.Waiting`). The last term closes
+  the gap in which a leg that had stopped ringing and not yet reserved was counted nowhere.
+- The reserve is one number with two uses. `AICC_BOT_INBOUND_RESERVE` set explicitly is both what
+  campaign admission keeps free and what every outbound reservation respects. Unset, campaign
+  admission keeps `max(2, 10 % x AICC_BOT_MAX_CALLS)` free (never so many that no slot is left for
+  outbound), while an admitted call that answers may still take any free slot, because refusing it
+  would lose the lead the admission rule already paid for.
+- A sample enters a campaign's answer-rate window when its ring timeout (plus 3 s) is over, whichever
+  way the ring went, and the window orders samples by when the attempt was dialled. Entering at the
+  answer, or at the end of the conversation, makes the window lag or lead its own cohort: answers are
+  known seconds after the dial and non-answers only at the timeout, so a burst larger than the window
+  fed in arrival order leaves the window holding nothing but non-answers and the dialer plans its way
+  into overflow (found in the capacity simulation, `internal/dialer/sim_test.go`). `TRANSIENT`,
+  `ORIGINATE_FAILED`, `INVALID_NUMBER` and `DNC_SKIPPED` never rang and `UNKNOWN` left no trace, so none
+  is a sample.
+- After a restart the window is rebuilt from the campaign's last 600 finished attempts, then kept by
+  each finish; no admission reads the database.
+
 ### 6.4 Take a slot on answer; wait briefly if there is none
 
 The slot is taken **after answer and before the bridge**, not discovered full when the INVITE
@@ -468,6 +489,15 @@ deterministically.
 - Above 3 %: the campaign falls back to `p̂ = 1` (no over-dial) until the rolling rate is back
   under 1 %.
 - Both thresholds are deployment configuration; these are the defaults.
+
+**As built (S4).** The overflow window is fed at the answer and turned into an overflow 1.5 s later
+if no bot came. It starts without a minimum sample count: one overflow among the first few answers
+is above both rates and plans for every answer, which is the safe direction; it leaves the stopped
+state when the rate is under the tighten rate (`AICC_OVERFLOW_TIGHTEN_RATE`,
+`AICC_OVERFLOW_STOP_RATE`, 1 % and 3 %). Because a campaign that keeps the bot nearly full has few legs
+ringing at any moment (its ringing population is the free capacity divided by the answer rate), a
+shift of the answer rate alone seldom causes overflow; a stale history, a cut quota or an inbound
+surge does, and those are what the simulation uses.
 
 Compliance note [ASSUMPTION]: rules such as the US FTC TSR set a 2-second and a 3 % limit on
 abandoned calls, and whether an AI answering counts as "connected to a sales representative" is

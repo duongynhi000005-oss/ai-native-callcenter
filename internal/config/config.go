@@ -74,8 +74,19 @@ type Config struct {
 	BotRTPPortHigh int
 	BotMaxCalls    int
 	// BotInboundReserve is how many of BotMaxCalls an outbound reservation may
-	// not take, kept for inbound calls. 0 (the default) reserves nothing.
-	BotInboundReserve int
+	// not take, kept for inbound calls (AICC_BOT_INBOUND_RESERVE). 0 (the
+	// default) reserves nothing at reservation time. IsBotInboundReserveSet says
+	// whether the variable was set at all, which decides what campaign
+	// admission keeps free: see CampaignInboundReserve.
+	BotInboundReserve      int
+	IsBotInboundReserveSet bool
+	// OverflowTightenRate and OverflowStopRate are overflow control's two
+	// thresholds (AICC_OVERFLOW_TIGHTEN_RATE, AICC_OVERFLOW_STOP_RATE): the
+	// share of a campaign's last 200 answered calls that met no bot above which
+	// the dialer plans with the 99 % answer-rate bound, and above which it plans
+	// for every ringing leg to answer until the rate is back under the first.
+	OverflowTightenRate float64
+	OverflowStopRate    float64
 	// OverflowHold is how long an answered outbound call waits for a bot slot
 	// before it is hung up as OVERFLOW (AICC_OVERFLOW_HOLD). 0 waits not at all.
 	OverflowHold time.Duration
@@ -387,6 +398,9 @@ func Load() (Config, error) {
 		BotRTPPortHigh:          envInt("AICC_BOT_RTP_PORT_HIGH", 40999),
 		BotMaxCalls:             envInt("AICC_BOT_MAX_CALLS", 220),
 		BotInboundReserve:       envInt("AICC_BOT_INBOUND_RESERVE", 0),
+		IsBotInboundReserveSet:  envIsSet("AICC_BOT_INBOUND_RESERVE"),
+		OverflowTightenRate:     envFloat("AICC_OVERFLOW_TIGHTEN_RATE", DefaultOverflowTightenRate),
+		OverflowStopRate:        envFloat("AICC_OVERFLOW_STOP_RATE", DefaultOverflowStopRate),
 		OverflowHold:            envDuration("AICC_OVERFLOW_HOLD", DefaultOverflowHold),
 		TrunkBreakerCount:       envInt("AICC_TRUNK_BREAKER_COUNT", DefaultTrunkBreakerCount),
 		ProviderBreakerCount:    envInt("AICC_PROVIDER_BREAKER_COUNT", DefaultProviderBreakerCount),
@@ -579,6 +593,11 @@ func (c Config) validate() error {
 			"AICC_BOT_INBOUND_RESERVE must be 0 or more and below AICC_BOT_MAX_CALLS (%d), got %d",
 			c.BotMaxCalls, c.BotInboundReserve))
 	}
+	if c.OverflowTightenRate <= 0 || c.OverflowTightenRate >= c.OverflowStopRate || c.OverflowStopRate > 1 {
+		errs = append(errs, fmt.Errorf(
+			"AICC_OVERFLOW_TIGHTEN_RATE must be above 0 and below AICC_OVERFLOW_STOP_RATE, which must be at most 1; got %g and %g",
+			c.OverflowTightenRate, c.OverflowStopRate))
+	}
 	if c.OverflowHold < 0 || c.OverflowHold > MaxOverflowHold {
 		errs = append(errs, fmt.Errorf(
 			"AICC_OVERFLOW_HOLD must be between 0 and %s, got %s", MaxOverflowHold, c.OverflowHold))
@@ -731,6 +750,26 @@ const (
 	MaxCampaignFrequencyWindow     = 30 * 24 * time.Hour
 )
 
+// Overflow control's defaults (design 10 section 6.5).
+const (
+	DefaultOverflowTightenRate = 0.01
+	DefaultOverflowStopRate    = 0.03
+)
+
+// CampaignInboundReserve is how many bot slots campaign admission keeps free
+// for inbound calls. An explicit AICC_BOT_INBOUND_RESERVE is the figure, and it
+// is then also what every outbound reservation respects, so there is one number.
+// Left unset, campaigns keep max(2, 10 % of AICC_BOT_MAX_CALLS) free (never
+// more than leaves one slot for outbound) while a call that was admitted and
+// answers may still take any free slot: refusing it would lose the lead the
+// admission rule already paid for.
+func (c Config) CampaignInboundReserve() int {
+	if c.IsBotInboundReserveSet {
+		return c.BotInboundReserve
+	}
+	return min(max(2, c.BotMaxCalls/10), max(c.BotMaxCalls-1, 0))
+}
+
 func envInt(key string, def int) int {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -738,6 +777,22 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+// envIsSet reports a variable that is set to something: an empty value means
+// unset everywhere in this file.
+func envIsSet(key string) bool {
+	v, ok := os.LookupEnv(key)
+	return ok && v != ""
 }
 
 func envBool(key string, def bool) bool {

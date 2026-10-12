@@ -347,10 +347,14 @@ func run() error {
 			DefaultCountryCode:   cfg.DefaultCountryCode,
 			TrunkBreakerCount:    cfg.TrunkBreakerCount,
 			ProviderBreakerCount: cfg.ProviderBreakerCount,
+			InboundReserve:       cfg.CampaignInboundReserve(),
+			OverflowTightenRate:  cfg.OverflowTightenRate,
+			OverflowStopRate:     cfg.OverflowStopRate,
 		}, dialer.Deps{
 			Store:  st.Dialer(),
 			Placer: outboundSvc,
 			Slots:  botSlots,
+			Lines:  outboundSvc,
 			IsLive: func(callID uuid.UUID) bool {
 				_, err := registry.Snapshot(callID)
 				return err == nil
@@ -360,6 +364,7 @@ func run() error {
 			OnChange:   campaignReporter.Touch,
 		})
 		outboundSvc.SetAnswerObserver(dlr.Answered)
+		outboundSvc.SetLinesFreedObserver(dlr.Wake)
 		botSlots.SetOnFree(dlr.SlotFreed)
 		campaignDialer.Store(dlr)
 		campaignController, campaignProgress, campaignObserver = dlr, dlr, dlr
@@ -391,6 +396,7 @@ func run() error {
 		Transcripts: transcripts,
 		Audiences:   transcripts,
 		Taps:        tap,
+		Lines:       outboundSvc,
 		Registrations: func() ([]telephony.Registration, error) {
 			return adapter.Registrations(cfg.SIPProfile)
 		},

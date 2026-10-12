@@ -1273,7 +1273,7 @@
           "calls"
         ],
         "summary": "Place a call",
-        "description": "One entry point for every call the platform places, told apart by kind.\n\nAI_OUTBOUND originates the customer leg with the DID as caller id; on answer the call bridges to the bot running the DID's flow. AGENT_OUTBOUND is click-to-dial: an agent's own phone is raised first and the destination is dialled when that leg answers. A signed-in agent may omit extensionNumber and place it from the phone they are signed in at; a supervisor or an API-key caller must name the extension, and the phone at it has to be registered.\n\nIdempotent by client-minted callId either way: a retry with the same id answers isDuplicate instead of redialing.\n\nAuthorization differs by kind. calls:create reaches the operation; AI_OUTBOUND additionally requires calls:create:ai, which an agent does not hold. A caller missing it is refused INSUFFICIENT_SCOPE naming calls:create:ai. The machine-readable form is x-body-scopes: scopes a credential of either kind must hold, beyond the security block, when the named request-body property has the listed value. A security block cannot say this, because its alternatives choose between credentials, not between request bodies.\n\nA destination on the do-not-call list is refused with 422 NUMBER_ON_DNC, for both kinds: no call is placed and no CDR is written (the CDR is the ledger of calls placed). The destination is compared as canonical E.164, completed with AICC_DEFAULT_COUNTRY_CODE when it is national; with that unset, a national number cannot be matched and is not checked, while a number written with + or 00 always is.",
+        "description": "One entry point for every call the platform places, told apart by kind.\n\nAI_OUTBOUND originates the customer leg with the DID as caller id; on answer the call bridges to the bot running the DID's flow. AGENT_OUTBOUND is click-to-dial: an agent's own phone is raised first and the destination is dialled when that leg answers. A signed-in agent may omit extensionNumber and place it from the phone they are signed in at; a supervisor or an API-key caller must name the extension, and the phone at it has to be registered.\n\nIdempotent by client-minted callId either way: a retry with the same id answers isDuplicate instead of redialing.\n\nAuthorization differs by kind. calls:create reaches the operation; AI_OUTBOUND additionally requires calls:create:ai, which an agent does not hold. A caller missing it is refused INSUFFICIENT_SCOPE naming calls:create:ai. The machine-readable form is x-body-scopes: scopes a credential of either kind must hold, beyond the security block, when the named request-body property has the listed value. A security block cannot say this, because its alternatives choose between credentials, not between request bodies.\n\nA destination on the do-not-call list is refused with 422 NUMBER_ON_DNC, for both kinds: no call is placed and no CDR is written (the CDR is the ledger of calls placed). The destination is compared as canonical E.164, completed with AICC_DEFAULT_COUNTRY_CODE when it is national; with that unset, a national number cannot be matched and is not checked, while a number written with + or 00 always is.\n\nA call whose DID is at its outbound line limit (maxOutboundChannels on the DID) is refused with 409 DID_CHANNELS_EXHAUSTED, for both kinds: no call is placed and no CDR is written. For AGENT_OUTBOUND the DID is the number the call goes out from (the default outbound number).",
         "x-body-scopes": {
           "property": "kind",
           "values": {
@@ -6998,6 +6998,7 @@
           "TERMINAL_ANNOUNCE_REQUIRED",
           "USER_DATA_TOO_LARGE",
           "NUMBER_ON_DNC",
+          "DID_CHANNELS_EXHAUSTED",
           "CAMPAIGN_FLOW_HAS_TRANSFER",
           "CAMPAIGN_DID_NOT_OUTBOUND",
           "CAMPAIGN_RING_TIMEOUT_TOO_LONG",
@@ -8463,6 +8464,12 @@
           "isDefaultOutbound": {
             "type": "boolean",
             "description": "The number an agent's call goes out from when nothing names one. At most one number in the deployment carries this, enforced by the database rather than by whoever remembers to clear the last one."
+          },
+          "maxOutboundChannels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000,
+            "description": "How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit."
           }
         },
         "required": [
@@ -8517,6 +8524,12 @@
           "isDefaultOutbound": {
             "type": "boolean",
             "description": "The number an agent's call goes out from when nothing names one. At most one number in the deployment carries this, enforced by the database rather than by whoever remembers to clear the last one."
+          },
+          "maxOutboundChannels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000,
+            "description": "How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit."
           }
         },
         "required": [

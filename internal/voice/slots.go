@@ -63,6 +63,9 @@ type BotSlots struct {
 	mu       sync.Mutex
 	inUse    int
 	reserved map[string]*reservation
+	// waiting is the answered legs parked in ReserveWait for a slot: they hold
+	// none yet, but each wants one the moment one frees.
+	waiting int
 	// changed is closed, and replaced, whenever capacity may have appeared.
 	// Waiting is therefore event-driven: no polling, and no missed wake-up
 	// (a waiter takes the channel under the same lock as its failed attempt).
@@ -224,6 +227,10 @@ type Usage struct {
 	// InUse and Reserved are the slots held by accepted dialogs and by
 	// reservations awaiting their INVITE.
 	InUse, Reserved int
+	// Waiting is the answered outbound legs parked for a slot (the overflow
+	// hold). They hold nothing yet, and admitting new calls as if they were
+	// not there would only add to the overflow.
+	Waiting int
 	// Cap is AICC_BOT_MAX_CALLS and InboundReserve AICC_BOT_INBOUND_RESERVE.
 	Cap, InboundReserve int
 }
@@ -232,7 +239,7 @@ type Usage struct {
 func (b *BotSlots) Usage() Usage {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return Usage{InUse: b.inUse, Reserved: len(b.reserved), Cap: b.cfg.Cap, InboundReserve: b.cfg.InboundReserve}
+	return Usage{InUse: b.inUse, Reserved: len(b.reserved), Waiting: b.waiting, Cap: b.cfg.Cap, InboundReserve: b.cfg.InboundReserve}
 }
 
 // ReserveWait reserves a slot under key, waiting up to hold for one to free.
@@ -246,6 +253,15 @@ func (b *BotSlots) ReserveWait(ctx context.Context, key string, hold time.Durati
 	if hold <= 0 {
 		return false, 0
 	}
+
+	b.mu.Lock()
+	b.waiting++
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.waiting--
+		b.mu.Unlock()
+	}()
 
 	start := b.cfg.Clock.Now()
 	timedOut := make(chan struct{})
