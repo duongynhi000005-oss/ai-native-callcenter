@@ -9,6 +9,7 @@ import { I18nextProvider } from 'react-i18next'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import i18n from '@/lib/i18n'
+import { ApiError } from '@/lib/api'
 import { Route as CampaignListRoute } from '@/routes/_app.admin.campaigns.index'
 import { Route as DncRoute } from '@/routes/_app.admin.dnc'
 import { applyToCache } from '@/lib/use-event-stream'
@@ -56,7 +57,7 @@ afterEach(() => {
 
 // --- the form's locks ----------------------------------------------------------
 
-function FormHarness({ campaign }: { campaign?: Campaign }) {
+function FormHarness({ campaign, error }: { campaign?: Campaign; error?: unknown }) {
   const [form, setForm] = useState<CampaignForm>(() => (campaign ? formFrom(campaign) : blankForm('UTC')))
   return (
     <CampaignFormView
@@ -69,6 +70,7 @@ function FormHarness({ campaign }: { campaign?: Campaign }) {
         { id: 'did-in', number: '95001', description: '', isEnabled: true, allowOutbound: false, allowInbound: true, isDefaultOutbound: false, isRecordingEnabled: true, language: 'en' },
       ]}
       queues={[]}
+      error={error}
       submitLabel="Save"
     />
   )
@@ -109,7 +111,18 @@ describe('the campaign form', () => {
       expect(screen.getByLabelText(label)).toBeDisabled()
     }
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
-    expect(screen.getAllByText('A finished campaign cannot be changed.').length).toBeGreaterThan(0)
+    // Once, at the top, not under every field.
+    expect(screen.getAllByText('A finished campaign cannot be changed.')).toHaveLength(1)
+  })
+
+  it('drops a field’s refusal as soon as that field changes, and only that one', async () => {
+    const refusal = new ApiError(422, { code: 'CAMPAIGN_WINDOW_OUTSIDE_LIMIT', message: 'x' })
+    const { user } = renderWithProviders(<FormHarness campaign={campaignFixture()} error={refusal} />)
+    expect(screen.getByText(/hours this deployment permits/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Name'), '!')
+    expect(screen.getByText(/hours this deployment permits/)).toBeInTheDocument()
+    await user.clear(screen.getByLabelText('Range 1 end'))
+    expect(screen.queryByText(/hours this deployment permits/)).not.toBeInTheDocument()
   })
 
   it('offers only numbers that can dial out', () => {
@@ -264,8 +277,12 @@ describe('the contact import', () => {
 
     expect(await screen.findByText('contacts.csv: 4 rows, 3 columns')).toBeInTheDocument()
     expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
+    // Other columns start ignored; the operator opts the ones the flow reads in.
+    expect(screen.getByLabelText('What column 姓名 is')).toHaveValue('ignore')
+    await user.selectOptions(screen.getByLabelText('What column 姓名 is'), 'slot')
+    await user.selectOptions(screen.getByLabelText('What column 备注 is'), 'slot')
     expect(screen.getByLabelText('Field name for column 姓名')).toHaveValue('姓名')
-    expect(screen.getByText(/1 rows have a different number of columns/)).toBeInTheDocument()
+    expect(screen.getByText(/^1 row has a different number of columns/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Import 4 rows' }))
 
@@ -298,6 +315,15 @@ describe('the contact import', () => {
     await user.click(await screen.findByRole('button', { name: 'Import 12345 rows' }))
     await screen.findByText('12345 imported', undefined, { timeout: 10000 })
     expect(bodies.map((b) => b.contacts.length)).toEqual([5000, 5000, 2345])
+  })
+
+  it('sends only the number when no other column is opted in', async () => {
+    const bodies = stubImport()
+    const { user } = open()
+    await user.upload(screen.getByLabelText('CSV file'), csvFile('number,name\n1,a\n'))
+    await user.click(await screen.findByRole('button', { name: 'Import 1 row' }))
+    await screen.findByText('1 imported')
+    expect(bodies[0].contacts).toEqual([{ number: '1' }])
   })
 
   it('will not import without a number column', async () => {
@@ -391,5 +417,23 @@ describe('the do-not-call page', () => {
     await waitFor(() =>
       expect(seen).toContainEqual({ method: 'DELETE', url: '/api/v1/dnc-numbers/%2B8613800138000' }),
     )
+  })
+})
+
+// --- a call with no record ----------------------------------------------------------
+
+describe('a call page for a call with no record', () => {
+  it('says so at once instead of loading', async () => {
+    const { Route } = await import('@/routes/_app.admin.cdr.$callId')
+    vi.spyOn(Route, 'useParams').mockReturnValue({ callId: 'c-1' } as never)
+    const started = Date.now()
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      json({ error: { code: 'NOT_FOUND', message: 'no such call' } }, 404),
+    ))
+    const Page = Route.options.component as () => ReactElement
+    renderWithProviders(<Page />)
+    expect(await screen.findByText('No call record')).toBeInTheDocument()
+    expect(Date.now() - started).toBeLessThan(900)
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

@@ -172,7 +172,9 @@ export function useCampaignMutations() {
   const queryClient = useQueryClient()
   const store = (campaign: Campaign) => {
     queryClient.setQueryData(campaignKey(campaign.id), campaign)
-    void queryClient.invalidateQueries({ queryKey: LIST_KEY })
+    // Every cached list, mounted or not: the list page is not on screen while a
+    // campaign is being created, and must not open on a copy without it.
+    void queryClient.invalidateQueries({ queryKey: LIST_KEY, refetchType: 'all' })
   }
   return {
     create: useMutation({ mutationFn: campaignApi.create, onSuccess: store }),
@@ -304,6 +306,16 @@ export function isFieldEditable(status: CampaignStatus | undefined, field: Campa
   return false
 }
 
+/**
+ * Whether an attempt's call can have a CDR. A number skipped for the
+ * do-not-call list or refused as invalid never reached the switch.
+ * ORIGINATE_FAILED may or may not have a placement-failure record, so it keeps
+ * its link and the call page copes with either.
+ */
+export function hasCallRecord(outcome: CampaignOutcome | undefined): boolean {
+  return outcome !== 'DNC_SKIPPED' && outcome !== 'INVALID_NUMBER'
+}
+
 export function isFinished(status: CampaignStatus): boolean {
   return status === 'COMPLETED' || status === 'CANCELLED'
 }
@@ -361,8 +373,24 @@ export const DEFAULT_RETRY_POLICY: CampaignRetryPolicy = {
 }
 
 export const DEFAULT_WINDOW: CampaignCallingWindow = {
-  days: ['MON', 'TUE', 'WED', 'THU', 'FRI'],
+  days: [...WEEKDAYS],
   ranges: [{ start: '09:00', end: '18:00' }],
+}
+
+/**
+ * The zone a new campaign starts in: the browser's own when the list of zones
+ * the browser can name holds it, else UTC. A name outside that list would be
+ * offered nowhere and is the kind of value the server rejects.
+ */
+export function defaultTimeZone(): string {
+  const own = Intl.DateTimeFormat().resolvedOptions().timeZone
+  let known: string[] = []
+  try {
+    known = Intl.supportedValuesOf('timeZone')
+  } catch {
+    return own || 'UTC'
+  }
+  return own && known.includes(own) ? own : 'UTC'
 }
 
 const minutesOf = (sec: number | undefined) => (sec === undefined ? '' : String(sec / 60))

@@ -1,5 +1,7 @@
-import { QueryClient } from '@tanstack/react-query'
-import { describe, expect, it } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import { describe, expect, it, vi } from 'vitest'
 
 import i18n from '@/lib/i18n'
 import en from '@/locales/en/translation.json'
@@ -7,9 +9,9 @@ import zh from '@/locales/zh/translation.json'
 
 import { ApiError } from './api'
 import {
-  CAMPAIGN_ERROR_CODES, CAMPAIGN_FIELDS, actionsFor, applyCampaignUpdated, blankForm,
+  CAMPAIGN_ERROR_CODES, CAMPAIGN_FIELDS, campaignApi, hasCallRecord, useCampaignMutations, actionsFor, applyCampaignUpdated, blankForm,
   campaignFieldError, campaignKey, campaignPayloadOf, createBodyOf, describeState, formFrom,
-  isFieldEditable, patchOf, type Campaign, type CampaignStatus, type SseCampaignUpdatedPayload,
+  defaultTimeZone, isFieldEditable, patchOf, type Campaign, type CampaignStatus, type SseCampaignUpdatedPayload,
 } from './campaigns'
 import { applyToCache } from './use-event-stream'
 
@@ -228,7 +230,7 @@ describe('which fields can change in which status', () => {
         name: 'Q4',
         didId: 'did-1',
         timeZone: 'Asia/Shanghai',
-        callingWindow: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI'], ranges: [{ start: '09:00', end: '18:00' }] },
+        callingWindow: { days: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'], ranges: [{ start: '09:00', end: '18:00' }] },
       })
     })
 
@@ -249,6 +251,63 @@ describe('which fields can change in which status', () => {
 
 const refusal = (code: string, params: Record<string, unknown> = {}) =>
   new ApiError(422, { code: code as never, message: 'x', params })
+
+describe('the defaults of a new campaign', () => {
+  it('checks all seven days', () => {
+    expect(blankForm('UTC').days).toEqual(['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'])
+  })
+
+  it('starts in the browser’s zone when the browser lists it, else in UTC', () => {
+    const own = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const listed = Intl.supportedValuesOf('timeZone').includes(own)
+    expect(defaultTimeZone()).toBe(listed ? own : 'UTC')
+    const spy = vi.spyOn(Intl, 'supportedValuesOf').mockReturnValue(['Asia/Singapore', 'UTC'])
+    const resolved = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions')
+    resolved.mockReturnValue({ timeZone: 'Asia/Shanghai' } as Intl.ResolvedDateTimeFormatOptions)
+    expect(defaultTimeZone()).toBe('UTC')
+    resolved.mockReturnValue({ timeZone: 'Asia/Singapore' } as Intl.ResolvedDateTimeFormatOptions)
+    expect(defaultTimeZone()).toBe('Asia/Singapore')
+    spy.mockRestore()
+    resolved.mockRestore()
+  })
+})
+
+describe('which attempts link to a call record', () => {
+  it('offers no link for a number that never reached the switch', () => {
+    expect(hasCallRecord('DNC_SKIPPED')).toBe(false)
+    expect(hasCallRecord('INVALID_NUMBER')).toBe(false)
+  })
+  it('keeps it for every outcome that placed a call, and for a failed placement', () => {
+    for (const o of ['ANSWERED', 'NO_ANSWER', 'BUSY', 'REJECTED', 'UNKNOWN', 'TRANSIENT', 'BOT_FAILED', 'OVERFLOW', 'ORIGINATE_FAILED'] as const) {
+      expect(hasCallRecord(o)).toBe(true)
+    }
+  })
+})
+
+describe('creating a campaign', () => {
+  it('refetches the campaign lists, mounted or not', async () => {
+    const urls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      urls.push(`${init.method ?? 'GET'} ${String(input)}`)
+      const body = init.method === 'POST' ? campaignFixture() : { items: [], total: 0 }
+      return new Response(JSON.stringify(body), { status: init.method === 'POST' ? 201 : 200 })
+    }))
+    const client = new QueryClient()
+    await client.fetchQuery({
+      queryKey: ['campaigns', 'list', { limit: 50, offset: 0 }],
+      queryFn: () => campaignApi.list({ limit: 50, offset: 0 }),
+    })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => useCampaignMutations(), { wrapper })
+    await act(async () => {
+      await result.current.create.mutateAsync(createBodyOf({ ...blankForm('UTC'), name: 'n', didId: 'd' }))
+    })
+    await waitFor(() => expect(urls.filter((u) => u === 'GET /api/v1/campaigns?limit=50&offset=0')).toHaveLength(2))
+    vi.unstubAllGlobals()
+  })
+})
 
 describe('what a refusal says and where', () => {
   const t = i18n.getFixedT('en')

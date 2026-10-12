@@ -21,17 +21,20 @@ const TIME_ZONE_HEADERS = /^(time.?zone|tz|timezone|时区)$/i
 /**
  * A first guess at what each column is: the first column that reads like a
  * number is the number, one that reads like a zone is the zone, and every
- * other column becomes a slot under its own header. The operator corrects it.
+ * other column is ignored until the operator makes it a flow field.
  */
 export function guessRoles(header: string[]): ColumnRole[] {
   const numberAt = header.findIndex((h) => NUMBER_HEADERS.test(h.trim()))
   const zoneAt = header.findIndex((h) => TIME_ZONE_HEADERS.test(h.trim()))
   // With no header that reads like a number, the first column is the best bet.
   const chosenNumber = numberAt >= 0 ? numberAt : 0
-  return header.map((h, i): ColumnRole => {
+  return header.map((_h, i): ColumnRole => {
     if (i === chosenNumber) return { kind: 'number' }
     if (i === zoneAt) return { kind: 'timeZone' }
-    return h.trim() === '' ? { kind: 'ignore' } : { kind: 'slot', name: h.trim() }
+    // Every other column starts ignored: a field the flow does not read makes
+    // the server refuse the whole row, so a column is sent only when the
+    // operator opts it in.
+    return { kind: 'ignore' }
   })
 }
 

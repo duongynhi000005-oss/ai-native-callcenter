@@ -148,7 +148,7 @@ export function CampaignImportDialog({
                 {table
                   ? t('campaign.import.parsed', {
                       name: fileName,
-                      rows: table.rows.length,
+                      count: table.rows.length,
                       columns: table.header.length,
                     })
                   : t('campaign.import.noFile')}
@@ -239,7 +239,7 @@ export function CampaignImportDialog({
                   <p className="mt-1 text-xs text-muted-foreground">
                     {t('campaign.import.previewNote', {
                       shown: Math.min(PREVIEW_ROWS, table.rows.length),
-                      total: table.rows.length,
+                      count: table.rows.length,
                     })}
                   </p>
                 </div>

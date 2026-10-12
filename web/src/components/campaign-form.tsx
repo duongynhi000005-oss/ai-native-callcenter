@@ -1,5 +1,5 @@
 import { Plus, Trash2 } from 'lucide-react'
-import type { FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Field, Input, Select } from '@/components/record-dialog'
@@ -18,6 +18,26 @@ function timeZoneNames(): string[] {
     return Intl.supportedValuesOf('timeZone')
   } catch {
     return []
+  }
+}
+
+/** The wire field each form key is sent as, so an edit can clear that field's refusal. */
+function wireFieldOf(key: keyof CampaignForm): string {
+  switch (key) {
+    case 'days':
+    case 'ranges':
+      return 'callingWindow'
+    case 'isDefaultRetry':
+    case 'maxAttempts':
+    case 'maxSystemRetries':
+    case 'retryOutcomes':
+    case 'intervalMin':
+    case 'backoffBaseSec':
+    case 'backoffFactor':
+    case 'backoffCapSec':
+      return 'retryPolicy'
+    default:
+      return key
   }
 }
 
@@ -55,10 +75,21 @@ export function CampaignFormView({
   const status: CampaignStatus | undefined = campaign?.status
   const can = (field: CampaignField) => isFieldEditable(status, field)
   const isFinished = status === 'COMPLETED' || status === 'CANCELLED'
+  // A finished campaign says so once, at the top; per field it would repeat.
   const lockedHint = (field: CampaignField) =>
-    can(field) ? undefined : t(isFinished ? 'campaign.form.finishedHint' : 'campaign.form.lockedHint')
-  const err = (field: string) => campaignFieldError(error, field, t)
-  const set = (patch: Partial<CampaignForm>) => onChange({ ...value, ...patch })
+    can(field) || isFinished ? undefined : t('campaign.form.lockedHint')
+  // A refusal belongs to the value that was sent. Once its field changes it no
+  // longer describes anything on screen, so it goes; a new refusal (a new
+  // error object) starts the list again.
+  const [cleared, setCleared] = useState<{ error: unknown; fields: string[] }>({ error, fields: [] })
+  const clearedFields = cleared.error === error ? cleared.fields : []
+  const err = (field: string) =>
+    clearedFields.includes(field) ? undefined : campaignFieldError(error, field, t)
+  const set = (patch: Partial<CampaignForm>) => {
+    const touched = (Object.keys(patch) as Array<keyof CampaignForm>).map(wireFieldOf)
+    setCleared({ error, fields: [...new Set([...clearedFields, ...touched])] })
+    onChange({ ...value, ...patch })
+  }
   const hasEditable = !status || !isFinished
 
   // Only DIDs a campaign can dial from are offered; the one already chosen is
@@ -95,6 +126,11 @@ export function CampaignFormView({
 
   return (
     <form onSubmit={submit} className="max-w-3xl space-y-6">
+      {isFinished && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t('campaign.form.finishedHint')}
+        </p>
+      )}
       <section className="space-y-3 rounded-md border bg-card p-4">
         <h2 className="text-sm font-medium">{t('campaign.form.general')}</h2>
         <Field label={t('campaign.form.name')} error={err('name')} hint={lockedHint('name')}>
@@ -287,7 +323,7 @@ export function CampaignFormView({
             {t('campaign.form.useDefaultRetry')}
           </label>
         )}
-        {isRetryLocked && (
+        {isRetryLocked && lockedHint('retryPolicy') && (
           <p className="text-xs text-muted-foreground">{lockedHint('retryPolicy')}</p>
         )}
         {showRetryFields && (
@@ -385,7 +421,7 @@ export function CampaignFormView({
         )}
       </section>
 
-      {Boolean(error) && !isFieldBound(error) && (
+      {Boolean(error) && !isFieldBound(error) && clearedFields.length === 0 && (
         <p role="alert" className="text-xs" style={{ color: 'var(--state-breach)' }}>
           {describeError(error, t)}
         </p>

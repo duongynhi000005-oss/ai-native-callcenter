@@ -493,7 +493,9 @@
       "CUSTOMER": "Customer",
       "BOT": "Bot",
       "HUMAN_AGENT": "Agent"
-    }
+    },
+    "noRecord": "No call record",
+    "noRecordHint": "This call has no record in the ledger. Calls that never reached the switch, such as a skipped number, leave none."
   },
   "callbacks": {
     "hint": "Promises the bot made on the phone. Claim one before you ring.",
@@ -1051,12 +1053,13 @@
       "file": "CSV file",
       "choose": "Choose file",
       "noFile": "No file chosen.",
-      "parsed": "{{name}}: {{rows}} rows, {{columns}} columns",
+      "parsed_one": "{{name}}: {{count}} row, {{columns}} columns",
+      "parsed_other": "{{name}}: {{count}} rows, {{columns}} columns",
       "empty": "The file has no rows.",
       "badEncoding": "The file contains characters that are not valid UTF-8, so some text may be garbled. Save it as UTF-8 and choose it again.",
       "unterminatedQuote": "A quoted value is never closed; the rows after it may be merged into one.",
       "mapping": "Columns",
-      "mappingHint": "Pick the number column and, if the file has one, a time zone column. Every other column you keep becomes a field the flow can read, under the name shown.",
+      "mappingHint": "Pick the number column and, if the file has one, a time zone column. Other columns are ignored; choose Flow field for each one the flow reads, under the name shown. A field the flow does not read makes the row fail.",
       "unnamed": "Column {{n}}",
       "roleOf": "What column {{name}} is",
       "slotNameOf": "Field name for column {{name}}",
@@ -1066,7 +1069,8 @@
         "slot": "Flow field",
         "ignore": "Ignore"
       },
-      "previewNote": "Showing {{shown}} of {{total}} rows.",
+      "previewNote_one": "Showing {{shown}} of {{count}} row.",
+      "previewNote_other": "Showing {{shown}} of {{count}} rows.",
       "problems": {
         "NO_NUMBER": "Choose the number column.",
         "MANY_NUMBERS": "Only one column can be the number.",
@@ -1074,11 +1078,14 @@
         "EMPTY_SLOT_NAME": "A flow field needs a name.",
         "DUPLICATE_SLOT": "Two columns have the same field name."
       },
-      "badShape": "{{count}} rows have a different number of columns than the header and will be rejected without being sent.",
-      "start": "Import {{count}} rows",
+      "badShape_one": "{{count}} row has a different number of columns than the header and will be rejected without being sent.",
+      "badShape_other": "{{count}} rows have a different number of columns than the header and will be rejected without being sent.",
+      "start_one": "Import {{count}} row",
+      "start_other": "Import {{count}} rows",
       "progress": "Imported {{done}} of {{total}} rows",
       "imported": "{{count}} imported",
-      "duplicates": "{{count}} duplicates",
+      "duplicates_one": "{{count}} duplicate",
+      "duplicates_other": "{{count}} duplicates",
       "rejected": "{{count}} rejected",
       "failed": "The import stopped at row {{row}}: {{reason}} Rows before it were handled; retrying sends the rest, and a number already added is reported as a duplicate.",
       "retry": "Retry the rest",

@@ -491,7 +491,9 @@
       "CUSTOMER": "客户",
       "BOT": "机器人",
       "HUMAN_AGENT": "坐席"
-    }
+    },
+    "noRecord": "没有通话记录",
+    "noRecordHint": "账本中没有这通电话的记录。从未到达交换机的呼叫（例如被跳过的号码）不会留下记录。"
   },
   "callbacks": {
     "hint": "机器人在电话里承诺的回访。回拨前先认领。",
@@ -957,7 +959,7 @@
       "MEDIUM": "中",
       "LOW": "低",
       "NONE": "无",
-      "DO_NOT_CALL": "请勿再拨"
+      "DO_NOT_CALL": "免打扰"
     },
     "leadNotes": "备注",
     "callback": "回电",
@@ -1048,12 +1050,12 @@
       "file": "CSV 文件",
       "choose": "选择文件",
       "noFile": "尚未选择文件。",
-      "parsed": "{{name}}：{{rows}} 行，{{columns}} 列",
+      "parsed_other": "{{name}}：{{count}} 行，{{columns}} 列",
       "empty": "文件中没有数据行。",
       "badEncoding": "文件包含无效的 UTF-8 字符，部分文字可能乱码。请另存为 UTF-8 后重新选择。",
       "unterminatedQuote": "有引号没有闭合，其后的多行可能被合并成一行。",
       "mapping": "列",
-      "mappingHint": "选择号码列；如果文件有时区列也请指定。其余保留的列会成为流程可读取的字段，字段名如下所示。",
+      "mappingHint": "选择号码列；如果文件有时区列也请指定。其余列默认忽略；流程会读取的列请选择“流程字段”，字段名如下所示。流程不读取的字段会导致该行失败。",
       "unnamed": "第 {{n}} 列",
       "roleOf": "列 {{name}} 的用途",
       "slotNameOf": "列 {{name}} 的字段名",
@@ -1063,7 +1065,7 @@
         "slot": "流程字段",
         "ignore": "忽略"
       },
-      "previewNote": "显示 {{total}} 行中的前 {{shown}} 行。",
+      "previewNote_other": "显示 {{count}} 行中的前 {{shown}} 行。",
       "problems": {
         "NO_NUMBER": "请选择号码列。",
         "MANY_NUMBERS": "只能有一列作为号码。",
@@ -1071,11 +1073,11 @@
         "EMPTY_SLOT_NAME": "流程字段需要名称。",
         "DUPLICATE_SLOT": "有两列使用了相同的字段名。"
       },
-      "badShape": "有 {{count}} 行的列数与表头不一致，将直接判为失败，不会发送。",
-      "start": "导入 {{count}} 行",
+      "badShape_other": "有 {{count}} 行的列数与表头不一致，将直接判为失败，不会发送。",
+      "start_other": "导入 {{count}} 行",
       "progress": "已处理 {{done}} / {{total}} 行",
       "imported": "导入 {{count}} 行",
-      "duplicates": "重复 {{count}} 行",
+      "duplicates_other": "重复 {{count}} 行",
       "rejected": "失败 {{count}} 行",
       "failed": "导入在第 {{row}} 行中断：{{reason}} 此前的行已处理；重试只发送其余行，已添加的号码会标记为重复。",
       "retry": "重试其余行",

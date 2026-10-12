@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { PageHeader } from '@/components/page-header'
 import { RecordingPlayer } from '@/components/recording-player'
 import { useNameThisPage } from '@/lib/breadcrumb'
+import { ApiError } from '@/lib/api'
 import { describeError } from '@/lib/errors'
 import { requireRole } from '@/lib/guards'
 import {
@@ -28,6 +29,14 @@ function CallDetail() {
 
   if (isPending) {
     return <p className="text-xs text-muted-foreground">{t('common.loading')}</p>
+  }
+  if (error instanceof ApiError && error.status === 404) {
+    return (
+      <div role="status" className="max-w-md rounded-md border bg-card p-4 text-sm">
+        <div className="font-medium">{t('cdr.noRecord')}</div>
+        <p className="mt-1 text-xs text-muted-foreground">{t('cdr.noRecordHint')}</p>
+      </div>
+    )
   }
   if (isError || !data) {
     return <p className="text-xs text-muted-foreground">{describeError(error, t)}</p>

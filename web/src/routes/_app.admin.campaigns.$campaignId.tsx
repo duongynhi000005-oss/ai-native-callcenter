@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNameThisPage } from '@/lib/breadcrumb'
 import { useDIDs, useQueues } from '@/lib/catalog'
 import {
-  CAMPAIGN_OUTCOMES, CONTACT_STATUSES, LEAD_INTENTS, actionsFor, formFrom, isFinished, patchOf,
+  CAMPAIGN_OUTCOMES, CONTACT_STATUSES, hasCallRecord, LEAD_INTENTS, actionsFor, formFrom, isFinished, patchOf,
   useCampaign, useCampaignAttempts, useCampaignContacts, useCampaignMutations,
   useInvalidateContacts, type Campaign, type CampaignContactStatus, type CampaignLeadIntent,
   type CampaignOutcome,
@@ -498,7 +498,7 @@ function AttemptsTab({ campaign }: { campaign: Campaign }) {
                 {row.talkSec === undefined ? '—' : formatDuration(row.talkSec)}
               </Td>
               <Td align="right" className="text-xs">
-                {row.state === 'FINISHED' ? (
+                {row.state === 'FINISHED' && hasCallRecord(row.outcome) ? (
                   <Link
                     to="/admin/cdr/$callId"
                     params={{ callId: row.callId }}

@@ -8,18 +8,20 @@ import type { CampaignContactRow, CampaignImportResult } from './campaigns'
 import { parseCsv } from './csv'
 
 describe('guessing what each column is', () => {
-  it('finds a number and a time zone column by their headers, English or Chinese', () => {
+  it('finds a number and a time zone column by their headers, and ignores the rest', () => {
+    // A column the flow does not read would fail every row, so none is sent
+    // unless the operator opts it in.
     expect(guessRoles(['name', 'phone', 'tz', 'plan'])).toEqual([
-      { kind: 'slot', name: 'name' },
+      { kind: 'ignore' },
       { kind: 'number' },
       { kind: 'timeZone' },
-      { kind: 'slot', name: 'plan' },
+      { kind: 'ignore' },
     ])
     expect(guessRoles(['姓名', '手机号', '时区', '套餐'])).toEqual([
-      { kind: 'slot', name: '姓名' },
+      { kind: 'ignore' },
       { kind: 'number' },
       { kind: 'timeZone' },
-      { kind: 'slot', name: '套餐' },
+      { kind: 'ignore' },
     ])
   })
 
