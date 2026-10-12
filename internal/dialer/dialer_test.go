@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -388,4 +389,33 @@ func TestCallsCarryTheirContactsSlotsAndTheCampaignsRingTimeout(t *testing.T) {
 	}
 	_ = fmt.Sprint
 	_ = uuid.Nil
+}
+
+// The change hook hears about a campaign when its status, its activity, its
+// in-flight count or its counters move, and about the one that completes.
+func TestTheChangeHookHearsOfEveryMovementOfACampaign(t *testing.T) {
+	var mu sync.Mutex
+	touched := map[uuid.UUID]int{}
+	r := newRig(t, opts{onChange: func(id uuid.UUID) { mu.Lock(); touched[id]++; mu.Unlock() }})
+	count := func(id uuid.UUID) int { mu.Lock(); defer mu.Unlock(); return touched[id] }
+
+	c := r.newCampaign("Hook", func(s *camSpec) { s.max = 10 })
+	r.importContacts(c, numbers("6", 2))
+	r.start(c)
+	afterStart := count(c.ID)
+	if afterStart == 0 {
+		t.Fatal("starting a campaign told nobody")
+	}
+	live := r.placer.liveCalls()
+	r.end(live[0], endAnswered)
+	r.settle()
+	afterFinish := count(c.ID)
+	if afterFinish <= afterStart {
+		t.Error("an attempt finishing told nobody")
+	}
+	r.end(live[1], endAnswered)
+	r.settle()
+	if got := r.campaignNow(c); got.Status != campaign.StatusCompleted || count(c.ID) <= afterFinish {
+		t.Errorf("status %s touches %d: completion told nobody", got.Status, count(c.ID))
+	}
 }

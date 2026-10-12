@@ -78,17 +78,19 @@ SELECT count(*) FROM cdrs
 WHERE started_at >= coalesce($1::timestamptz, '-infinity'::timestamptz)
   AND started_at <  coalesce($2::timestamptz,   'infinity'::timestamptz)
   AND ($3::uuid IS NULL OR queue_id = $3)
-  AND ($4::uuid IS NULL OR primary_agent_id = $4
-       OR $4 = ANY (agent_ids))
-  AND ($5::text = '' OR status = $5)
-  AND ($6::text = '' OR did = $6)
-  AND ($7::text = '' OR from_number LIKE '%' || $7 || '%')
+  AND ($4::uuid IS NULL OR campaign_id = $4)
+  AND ($5::uuid IS NULL OR primary_agent_id = $5
+       OR $5 = ANY (agent_ids))
+  AND ($6::text = '' OR status = $6)
+  AND ($7::text = '' OR did = $7)
+  AND ($8::text = '' OR from_number LIKE '%' || $8 || '%')
 `
 
 type CountCDRsParams struct {
 	FromAt     pgtype.Timestamptz `json:"fromAt"`
 	ToAt       pgtype.Timestamptz `json:"toAt"`
 	QueueID    *uuid.UUID         `json:"queueId"`
+	CampaignID *uuid.UUID         `json:"campaignId"`
 	AgentID    *uuid.UUID         `json:"agentId"`
 	Status     string             `json:"status"`
 	Did        string             `json:"did"`
@@ -100,6 +102,7 @@ func (q *Queries) CountCDRs(ctx context.Context, arg CountCDRsParams) (int64, er
 		arg.FromAt,
 		arg.ToAt,
 		arg.QueueID,
+		arg.CampaignID,
 		arg.AgentID,
 		arg.Status,
 		arg.Did,
@@ -164,7 +167,7 @@ func (q *Queries) ExpiredRecordings(ctx context.Context, arg ExpiredRecordingsPa
 }
 
 const getCDR = `-- name: GetCDR :one
-SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims FROM cdrs WHERE call_id = $1
+SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims, campaign_id FROM cdrs WHERE call_id = $1
 `
 
 func (q *Queries) GetCDR(ctx context.Context, callID uuid.UUID) (Cdr, error) {
@@ -200,6 +203,7 @@ func (q *Queries) GetCDR(ctx context.Context, callID uuid.UUID) (Cdr, error) {
 		&i.Legs,
 		&i.BillSec,
 		&i.UnbackedClaims,
+		&i.CampaignID,
 	)
 	return i, err
 }
@@ -342,14 +346,16 @@ INSERT INTO cdrs (
     agent_ids, primary_agent_id,
     ring_sec, bot_sec, queue_wait_sec, talk_sec, bill_sec, total_sec,
     status, hangup_cause, missed_reason, disposition,
-    is_contained, has_recording, user_data, tech, legs, unbacked_claims
+    is_contained, has_recording, user_data, tech, legs, unbacked_claims, campaign_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8, $9, $10, $11,
     $12, $13,
     $14, $15, $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27, $28, $29
+    $24, $25, $26, $27, $28, $29,
+    -- The campaign whose attempt carries this call, else NULL (migration 00039).
+    (SELECT a.campaign_id FROM campaign_attempts a WHERE a.call_id = $1)
 ) ON CONFLICT (call_id) DO UPDATE SET
     started_at = EXCLUDED.started_at,
     answered_at = EXCLUDED.answered_at,
@@ -378,7 +384,8 @@ INSERT INTO cdrs (
     user_data = EXCLUDED.user_data,
     tech = EXCLUDED.tech,
     legs = EXCLUDED.legs,
-    unbacked_claims = EXCLUDED.unbacked_claims
+    unbacked_claims = EXCLUDED.unbacked_claims,
+    campaign_id = EXCLUDED.campaign_id
 WHERE CASE
     -- A placement failure (an originate that never made a channel, tech
     -- isPlacementFailure) knows the least about a call. It never replaces a
@@ -771,23 +778,25 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 }
 
 const listCDRs = `-- name: ListCDRs :many
-SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims FROM cdrs
+SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims, campaign_id FROM cdrs
 WHERE started_at >= coalesce($1::timestamptz, '-infinity'::timestamptz)
   AND started_at <  coalesce($2::timestamptz,   'infinity'::timestamptz)
   AND ($3::uuid IS NULL OR queue_id = $3)
-  AND ($4::uuid IS NULL OR primary_agent_id = $4
-       OR $4 = ANY (agent_ids))
-  AND ($5::text = '' OR status = $5)
-  AND ($6::text = '' OR did = $6)
-  AND ($7::text = '' OR from_number LIKE '%' || $7 || '%')
+  AND ($4::uuid IS NULL OR campaign_id = $4)
+  AND ($5::uuid IS NULL OR primary_agent_id = $5
+       OR $5 = ANY (agent_ids))
+  AND ($6::text = '' OR status = $6)
+  AND ($7::text = '' OR did = $7)
+  AND ($8::text = '' OR from_number LIKE '%' || $8 || '%')
 ORDER BY started_at DESC
-LIMIT $9 OFFSET $8
+LIMIT $10 OFFSET $9
 `
 
 type ListCDRsParams struct {
 	FromAt     pgtype.Timestamptz `json:"fromAt"`
 	ToAt       pgtype.Timestamptz `json:"toAt"`
 	QueueID    *uuid.UUID         `json:"queueId"`
+	CampaignID *uuid.UUID         `json:"campaignId"`
 	AgentID    *uuid.UUID         `json:"agentId"`
 	Status     string             `json:"status"`
 	Did        string             `json:"did"`
@@ -804,6 +813,7 @@ func (q *Queries) ListCDRs(ctx context.Context, arg ListCDRsParams) ([]Cdr, erro
 		arg.FromAt,
 		arg.ToAt,
 		arg.QueueID,
+		arg.CampaignID,
 		arg.AgentID,
 		arg.Status,
 		arg.Did,
@@ -848,6 +858,7 @@ func (q *Queries) ListCDRs(ctx context.Context, arg ListCDRsParams) ([]Cdr, erro
 			&i.Legs,
 			&i.BillSec,
 			&i.UnbackedClaims,
+			&i.CampaignID,
 		); err != nil {
 			return nil, err
 		}

@@ -23,6 +23,7 @@ func (s *Server) ListCDRs(w http.ResponseWriter, r *http.Request, params api.Lis
 		DID:        stringOr(params.DID),
 		FromNumber: stringOr(params.FromNumber),
 		QueueID:    params.QueueID,
+		CampaignID: params.CampaignID,
 		AgentID:    params.AgentID,
 		Limit:      intOr(params.Limit, 50),
 		Offset:     intOr(params.Offset, 0),

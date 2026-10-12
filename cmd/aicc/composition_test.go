@@ -820,3 +820,32 @@ func TestTheScreensAreToldWhenTheSwitchGoesAndComesBack(t *testing.T) {
 		t.Errorf("getting it back announced isUp=%v", back.Payload["isUp"])
 	}
 }
+
+// A campaign's progress goes to supervision only: the zero Scope, which the
+// hub reads as "subjects that see every call". Not a broadcast, so an agent's
+// stream never carries it.
+func TestACampaignUpdateIsAnnouncedToSupervisionOnly(t *testing.T) {
+	t.Parallel()
+	pub := &recordingPublisher{}
+	next := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	snap := campaign.Snapshot{CampaignID: uuid.New(), Status: campaign.StatusRunning,
+		Activity: campaign.ActivityWaitingRetry, NextDialAt: &next, InFlight: 2,
+		Contacts: campaign.ContactCounts{Total: 10, Active: 7, Done: 3}}
+
+	announceCampaign(t.Context(), pub)(snap)
+
+	if len(pub.events) != 1 || pub.events[0].Type != events.TypeCampaignUpdated {
+		t.Fatalf("published %+v", pub.events)
+	}
+	if pub.scopes[0].IsBroadcast || len(pub.scopes[0].AgentIDs) != 0 || pub.scopes[0].QueueID != nil {
+		t.Errorf("scope = %+v, want the zero scope", pub.scopes[0])
+	}
+	p := pub.events[0].Payload
+	if p["campaignId"] != snap.CampaignID || p["status"] != campaign.StatusRunning || p["inFlight"] != 2 ||
+		p["activity"] != campaign.ActivityWaitingRetry || p["nextDialAt"] == nil {
+		t.Errorf("payload = %+v", p)
+	}
+	if _, has := p["pauseReason"]; has {
+		t.Error("an empty pauseReason must be absent")
+	}
+}

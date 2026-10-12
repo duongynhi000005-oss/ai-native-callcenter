@@ -50,6 +50,19 @@ func (q *Queries) AttemptIsLatest(ctx context.Context, id uuid.UUID) (*bool, err
 	return is_latest, err
 }
 
+const campaignOfCall = `-- name: CampaignOfCall :one
+SELECT campaign_id FROM campaign_attempts WHERE call_id = $1
+`
+
+// The campaign a call was placed for, within the CDR's transaction, so the
+// webhook filter and the delivered payload agree with the row just written.
+func (q *Queries) CampaignOfCall(ctx context.Context, callID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, campaignOfCall, callID)
+	var campaign_id uuid.UUID
+	err := row.Scan(&campaign_id)
+	return campaign_id, err
+}
+
 const claimContactForDial = `-- name: ClaimContactForDial :one
 
 

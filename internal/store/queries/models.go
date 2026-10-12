@@ -192,6 +192,7 @@ type Cdr struct {
 	Legs           []byte             `json:"legs"`
 	BillSec        int32              `json:"billSec"`
 	UnbackedClaims []string           `json:"unbackedClaims"`
+	CampaignID     *uuid.UUID         `json:"campaignId"`
 }
 
 type Contact struct {

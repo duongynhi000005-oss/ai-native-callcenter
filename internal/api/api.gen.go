@@ -965,6 +965,7 @@ const (
 	SSEEventTypeCALLTRANSCRIPT         SSEEventType = "CALL_TRANSCRIPT"
 	SSEEventTypeCALLTRANSCRIPTIONSTATE SSEEventType = "CALL_TRANSCRIPTION_STATE"
 	SSEEventTypeCALLUSERDATA           SSEEventType = "CALL_USER_DATA"
+	SSEEventTypeCAMPAIGNUPDATED        SSEEventType = "CAMPAIGN_UPDATED"
 	SSEEventTypeDEVICEREACHABLE        SSEEventType = "DEVICE_REACHABLE"
 	SSEEventTypeDEVICEREGISTERED       SSEEventType = "DEVICE_REGISTERED"
 	SSEEventTypeDEVICEUNREACHABLE      SSEEventType = "DEVICE_UNREACHABLE"
@@ -1015,6 +1016,8 @@ func (e SSEEventType) Valid() bool {
 	case SSEEventTypeCALLTRANSCRIPTIONSTATE:
 		return true
 	case SSEEventTypeCALLUSERDATA:
+		return true
+	case SSEEventTypeCAMPAIGNUPDATED:
 		return true
 	case SSEEventTypeDEVICEREACHABLE:
 		return true
@@ -1470,7 +1473,10 @@ type CDR struct {
 	CallID openapi_types.UUID `json:"callId"`
 
 	// CallType Caller-perspective call type, stamped at creation and immutable across transfers.
-	CallType     CallType            `json:"callType"`
+	CallType CallType `json:"callType"`
+
+	// CampaignID The campaign this call was placed for. Absent for every other call. Set when the call's record is written (and again when a fuller record replaces it), from the campaign attempt that carries the call's id.
+	CampaignID   *openapi_types.UUID `json:"campaignId,omitempty"`
 	DID          *string             `json:"did,omitempty"`
 	Disposition  *string             `json:"disposition,omitempty"`
 	EndedAt      time.Time           `json:"endedAt"`
@@ -2781,13 +2787,13 @@ type SSEEvent struct {
 	// Seq Global order. Echo the last seen value as Last-Event-ID to resume.
 	Seq int64 `json:"seq"`
 
-	// Type Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
+	// Type Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, CAMPAIGN_* describe an outbound campaign (supervision only). SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
 	Type     SSEEventType            `json:"type"`
 	UserData *map[string]interface{} `json:"userData,omitempty"`
 	Version  int                     `json:"version"`
 }
 
-// SSEEventType Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
+// SSEEventType Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, CAMPAIGN_* describe an outbound campaign (supervision only). SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
 type SSEEventType string
 
 // StaffQueueRequest defines model for StaffQueueRequest.
@@ -3020,7 +3026,10 @@ type WebhookDeliveryList struct {
 // WebhookFilter Which finished calls this subscription wants. A key present means the CDR's field must be one of the listed values; keys are ANDed; an absent key does not constrain, so {} means every call. Deliberately not an expression language: the keys are a closed list checked when the subscription is written, because a filter validated at delivery time is discovered as a customer receiving silence (design 09 §5).
 type WebhookFilter struct {
 	CallType *[]CallType `json:"callType,omitempty"`
-	DID      *[]string   `json:"did,omitempty"`
+
+	// CampaignID Calls placed for one of these campaigns. A call that belongs to no campaign matches no campaign filter.
+	CampaignID *[]openapi_types.UUID `json:"campaignId,omitempty"`
+	DID        *[]string             `json:"did,omitempty"`
 
 	// IsContained Calls the bot handled without ever reaching a person.
 	IsContained *[]bool               `json:"isContained,omitempty"`
@@ -3187,9 +3196,12 @@ type ListCDRsParams struct {
 	// To RFC 3339 window end.
 	To      *time.Time          `form:"to,omitempty" json:"to,omitempty"`
 	QueueID *openapi_types.UUID `form:"queueId,omitempty" json:"queueId,omitempty"`
-	AgentID *openapi_types.UUID `form:"agentId,omitempty" json:"agentId,omitempty"`
-	Limit   *int                `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset  *int                `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// CampaignID Only calls placed for this campaign.
+	CampaignID *openapi_types.UUID `form:"campaignId,omitempty" json:"campaignId,omitempty"`
+	AgentID    *openapi_types.UUID `form:"agentId,omitempty" json:"agentId,omitempty"`
+	Limit      *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset     *int                `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
 // ListMyCDRsParams defines parameters for ListMyCDRs.
@@ -6030,6 +6042,19 @@ func (siw *ServerInterfaceWrapper) ListCDRs(w http.ResponseWriter, r *http.Reque
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "queueId"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "queueId", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "campaignId" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "campaignId", r.URL.Query(), &params.CampaignID, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "campaignId"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "campaignId", Err: err})
 		}
 		return
 	}

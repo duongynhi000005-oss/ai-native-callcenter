@@ -203,6 +203,9 @@ func storeFilter(in api.WebhookFilter) store.WebhookFilter {
 	if in.IsContained != nil {
 		out.IsContained = *in.IsContained
 	}
+	if in.CampaignID != nil {
+		out.CampaignID = *in.CampaignID
+	}
 	return out
 }
 
@@ -230,6 +233,10 @@ func apiFilter(in store.WebhookFilter) api.WebhookFilter {
 	if len(in.IsContained) > 0 {
 		contained := in.IsContained
 		out.IsContained = &contained
+	}
+	if len(in.CampaignID) > 0 {
+		campaigns := in.CampaignID
+		out.CampaignID = &campaigns
 	}
 	return out
 }

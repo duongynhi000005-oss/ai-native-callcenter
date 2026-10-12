@@ -327,3 +327,48 @@ func TestReplayStillGivesSupervisorsEverything(t *testing.T) {
 		t.Errorf("supervisor replay = %d events, want 2", len(replay))
 	}
 }
+
+// A campaign's progress is supervision's: published under the zero Scope it
+// reaches the subjects that see every call, live and on resume, and never an
+// agent's stream, whatever queues that agent staffs.
+func TestCampaignUpdatesReachSupervisionAndNoAgent(t *testing.T) {
+	t.Parallel()
+	h, _ := newTestHub()
+	ctx := context.Background()
+	agent, queue := uuid.New(), uuid.New()
+
+	h.Publish(ctx, Event{Type: TypeSystemLink}, Scope{})
+	sup, _, _ := h.Subscribe(Subscriber{SeesEveryCall: true}, 0)
+	defer sup.Close()
+	ag, _, _ := h.Subscribe(Subscriber{AgentID: &agent, QueueIDs: []uuid.UUID{queue}}, 0)
+	defer ag.Close()
+
+	first := h.Publish(ctx, Event{Type: TypeCampaignUpdated,
+		Payload: map[string]any{"campaignId": uuid.New()}}, Scope{})
+
+	select {
+	case ev := <-sup.C:
+		if ev.Seq != first.Seq || ev.Type != TypeCampaignUpdated {
+			t.Errorf("supervisor got %+v", ev)
+		}
+	default:
+		t.Error("a supervisor's stream did not carry CAMPAIGN_UPDATED")
+	}
+	select {
+	case ev := <-ag.C:
+		t.Errorf("an agent's stream carried %+v", ev)
+	default:
+	}
+
+	// Resume from before the event: the supervisor is replayed it, the agent not.
+	supR, replay, _ := h.Subscribe(Subscriber{SeesEveryCall: true}, first.Seq-1)
+	defer supR.Close()
+	if len(replay) != 1 || replay[0].Seq != first.Seq {
+		t.Errorf("supervisor replay = %+v, want the campaign event", replay)
+	}
+	agR, replay, _ := h.Subscribe(Subscriber{AgentID: &agent}, first.Seq-1)
+	defer agR.Close()
+	if len(replay) != 0 {
+		t.Errorf("agent replay = %+v, want nothing", replay)
+	}
+}

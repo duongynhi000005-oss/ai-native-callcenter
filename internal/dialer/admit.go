@@ -47,6 +47,10 @@ func (d *Dialer) pass(ctx context.Context) {
 	if d.dncDirty {
 		d.dncDirty = false
 		d.skipDNC(ctx, now)
+		// Contacts on the list moved to DNC_SKIPPED in any campaign.
+		for _, c := range running {
+			d.touch(c.ID)
+		}
 	}
 	for _, c := range running {
 		if d.rearm[c.ID] {
@@ -387,6 +391,7 @@ func obsInFlight(isTalking bool, delta int64) {
 func (d *Dialer) onFinished(ctx context.Context, f campaign.Finished) {
 	d.drop(f.CallID)
 	d.isDirty = true
+	d.touch(f.CampaignID)
 	if f.IsRevision {
 		return
 	}
@@ -425,6 +430,7 @@ func (d *Dialer) judgeBreakers(ctx context.Context, f campaign.Finished) {
 		return
 	}
 	if paused {
+		d.touch(f.CampaignID)
 		d.halted[f.CampaignID] = true
 		d.isDirty = true
 		d.log.Warn("dialer: campaign paused by a breaker", "campaignId", f.CampaignID, "reason", reason)
@@ -449,6 +455,7 @@ func (d *Dialer) account(ctx context.Context, c campaign.Campaign, b *bucket, no
 			d.log.Error("dialer: cannot complete the campaign", "campaignId", c.ID, "error", err)
 		} else if done {
 			d.log.Info("dialer: campaign completed", "campaignId", c.ID)
+			d.touch(c.ID)
 			delete(d.progress, c.ID)
 			return time.Time{}
 		}
@@ -479,12 +486,34 @@ func (d *Dialer) account(ctx context.Context, c campaign.Campaign, b *bucket, no
 // publish replaces the read side with the account of each running campaign,
 // the in-flight counts as they are now.
 func (d *Dialer) publish() {
+	prev := *d.view.Load()
 	view := make(map[uuid.UUID]campaign.Progress, len(d.progress))
 	for id, p := range d.progress {
 		p.InFlight = d.inflight[id]
 		view[id] = p
 	}
 	d.view.Store(&view)
+	// What the dialer says about a campaign moved: tell the change hook.
+	for id, p := range view {
+		if old, ok := prev[id]; !ok || !sameProgress(old, p) {
+			d.touch(id)
+		}
+	}
+	for id := range prev {
+		if _, ok := view[id]; !ok {
+			d.touch(id)
+		}
+	}
+}
+
+func sameProgress(a, b campaign.Progress) bool {
+	if a.Activity != b.Activity || a.InFlight != b.InFlight {
+		return false
+	}
+	if (a.NextDialAt == nil) != (b.NextDialAt == nil) {
+		return false
+	}
+	return a.NextDialAt == nil || a.NextDialAt.Equal(*b.NextDialAt)
 }
 
 // dialString writes the contact's canonical number in the form the trunk

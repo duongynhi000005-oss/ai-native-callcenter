@@ -59,6 +59,9 @@ type CDR struct {
 	DID        string     `json:"did,omitempty"`
 	FlowID     *uuid.UUID `json:"flowId,omitempty"`
 	QueueID    *uuid.UUID `json:"queueId,omitempty"`
+	// CampaignID is the campaign this call was placed for, from the attempt
+	// that carries its call id; nil for every other call.
+	CampaignID *uuid.UUID `json:"campaignId,omitempty"`
 
 	AgentIDs       []uuid.UUID `json:"agentIds,omitempty"`
 	PrimaryAgentID *uuid.UUID  `json:"primaryAgentId,omitempty"`
@@ -257,6 +260,16 @@ func (l *LedgerStore) InsertCDR(ctx context.Context, cdr CDR) error {
 		if finished, err = l.attempts.fromCDR(ctx, q, cdr); err != nil {
 			return err
 		}
+		// The row carries the campaign of that attempt (InsertCDR copies it);
+		// the deliveries below are filtered and written from the same fact.
+		switch id, err := q.CampaignOfCall(ctx, cdr.CallID); {
+		case errors.Is(err, pgx.ErrNoRows):
+			cdr.CampaignID = nil
+		case err != nil:
+			return fmt.Errorf("read the call's campaign: %w", err)
+		default:
+			cdr.CampaignID = &id
+		}
 		return enqueueFor(ctx, q, cdr)
 	})
 	if err == nil && finished != nil && l.onAttemptFinished != nil {
@@ -275,6 +288,8 @@ type CDRFilter struct {
 	From    time.Time
 	To      time.Time
 	QueueID *uuid.UUID
+	// CampaignID keeps the calls placed for one campaign.
+	CampaignID *uuid.UUID
 	// AgentID keeps the calls this agent was a party to. It also decides
 	// whose wrap-up rides on each row: an agent's own listing shows what
 	// they filed, everyone else's shows the primary agent's.
@@ -297,6 +312,7 @@ func (l *LedgerStore) ListCDRs(ctx context.Context, filter CDRFilter) ([]CDR, in
 		FromAt:     stamp(filter.From),
 		ToAt:       stamp(filter.To),
 		QueueID:    filter.QueueID,
+		CampaignID: filter.CampaignID,
 		AgentID:    filter.AgentID,
 		Status:     filter.Status,
 		Did:        filter.DID,
@@ -311,6 +327,7 @@ func (l *LedgerStore) ListCDRs(ctx context.Context, filter CDRFilter) ([]CDR, in
 		FromAt:     stamp(filter.From),
 		ToAt:       stamp(filter.To),
 		QueueID:    filter.QueueID,
+		CampaignID: filter.CampaignID,
 		AgentID:    filter.AgentID,
 		Status:     filter.Status,
 		Did:        filter.DID,
@@ -419,6 +436,7 @@ func fromRow(row queries.Cdr) CDR {
 		DID:            row.Did,
 		FlowID:         row.FlowID,
 		QueueID:        row.QueueID,
+		CampaignID:     row.CampaignID,
 		AgentIDs:       row.AgentIds,
 		PrimaryAgentID: row.PrimaryAgentID,
 		RingSec:        int(row.RingSec),
