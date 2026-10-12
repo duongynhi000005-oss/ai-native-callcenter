@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,23 @@ import (
 )
 
 func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// newWorker is New with a connection pool of its own. The worker's client
+// otherwise uses http.DefaultTransport, which every parallel test in the
+// package shares, and httptest.Server.Close calls
+// http.DefaultTransport.CloseIdleConnections: one test closing its server
+// breaks a connection another test is about to post on ("transport
+// connection broken: http: CloseIdleConnections called"), and a POST on a
+// reused connection is not retried. A pool of its own keeps a test's outcome
+// a function of its own server only.
+func newWorker(t *testing.T, st Store, m Metrics) *Worker {
+	t.Helper()
+	tr := &http.Transport{}
+	t.Cleanup(tr.CloseIdleConnections)
+	w := New(st, m, discard())
+	w.client.Transport = tr
+	return w
+}
 
 // fakeStore is the outbox, in memory, recording how each delivery settled.
 type fakeStore struct {
@@ -32,6 +50,9 @@ type fakeStore struct {
 	delivered   map[uuid.UUID]int
 	failed      map[uuid.UUID]string
 	rescheduled map[uuid.UUID]time.Time
+	// reasons keeps why each delivery was rescheduled or failed, so an
+	// assertion that a delivery was not marked delivered can say why.
+	reasons map[uuid.UUID]string
 	// deliveredCh announces each settled delivery, so a test can wait on
 	// progress instead of sleeping and hoping.
 	deliveredCh chan uuid.UUID
@@ -44,6 +65,7 @@ func newFakeStore(url, token string, due ...store.WebhookDelivery) *fakeStore {
 		delivered:   map[uuid.UUID]int{},
 		failed:      map[uuid.UUID]string{},
 		rescheduled: map[uuid.UUID]time.Time{},
+		reasons:     map[uuid.UUID]string{},
 		deliveredCh: make(chan uuid.UUID, 256),
 	}
 }
@@ -76,6 +98,17 @@ func (f *fakeStore) MarkDelivered(_ context.Context, id uuid.UUID, code int) err
 	return nil
 }
 
+// whyNot is the recorded reason a delivery was rescheduled or failed instead
+// of delivered, for a failure message.
+func (f *fakeStore) whyNot(id uuid.UUID) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r, ok := f.reasons[id]; ok {
+		return r
+	}
+	return "no settlement was recorded at all"
+}
+
 // deliveredCount is how many deliveries have been marked so far.
 func (f *fakeStore) deliveredCount() int {
 	f.mu.Lock()
@@ -83,10 +116,11 @@ func (f *fakeStore) deliveredCount() int {
 	return len(f.delivered)
 }
 
-func (f *fakeStore) Reschedule(_ context.Context, id uuid.UUID, at time.Time, _ int, _ string) error {
+func (f *fakeStore) Reschedule(_ context.Context, id uuid.UUID, at time.Time, _ int, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rescheduled[id] = at
+	f.reasons[id] = reason
 	return nil
 }
 
@@ -94,6 +128,7 @@ func (f *fakeStore) MarkFailed(_ context.Context, id uuid.UUID, _ int, reason st
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failed[id] = reason
+	f.reasons[id] = reason
 	return nil
 }
 
@@ -137,10 +172,11 @@ func TestWhatTheCustomersEndpointReceives(t *testing.T) {
 
 	d := pending(1)
 	st := newFakeStore(srv.URL, "their-token", d)
-	New(st, nil, discard()).drain(t.Context())
+	newWorker(t, st, nil).drain(t.Context())
 
 	if code, ok := st.delivered[d.DeliveryID]; !ok || code != http.StatusOK {
-		t.Fatalf("delivered = %d, ok = %v, want 200", code, ok)
+		t.Fatalf("delivered = %d, ok = %v, want 200; settled instead as: %s",
+			code, ok, st.whyNot(d.DeliveryID))
 	}
 	// Their credential, not ours. This deployment's own API keys point the
 	// other way and must
@@ -187,7 +223,7 @@ func TestNoTokenMeansNoAuthorizationHeader(t *testing.T) {
 	defer srv.Close()
 
 	d := pending(1)
-	New(newFakeStore(srv.URL, "", d), nil, discard()).drain(t.Context())
+	newWorker(t, newFakeStore(srv.URL, "", d), nil).drain(t.Context())
 	if had {
 		t.Error("an Authorization header was sent for a subscription with no token")
 	}
@@ -205,7 +241,7 @@ func TestAFailedAttemptIsRescheduledOnTheSchedule(t *testing.T) {
 
 	d := pending(1)
 	st := newFakeStore(srv.URL, "t", d)
-	w := New(st, nil, discard())
+	w := newWorker(t, st, nil)
 	base := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
 	w.now = func() time.Time { return base }
 	w.drain(t.Context())
@@ -236,7 +272,7 @@ func TestRunningOutOfAttemptsFailsTheDeliveryAndSaysSo(t *testing.T) {
 	d := pending(len(Backoff)) // the last attempt the schedule allows
 	st := newFakeStore(srv.URL, "t", d)
 	counted := &countingMetrics{}
-	New(st, counted, discard()).drain(t.Context())
+	newWorker(t, st, counted).drain(t.Context())
 
 	if _, ok := st.failed[d.DeliveryID]; !ok {
 		t.Fatalf("the delivery was not failed after %d attempts", d.AttemptCount)
@@ -258,7 +294,7 @@ func TestAnUnreachableEndpointIsRetriedLikeAnyOtherFailure(t *testing.T) {
 	d := pending(1)
 	// A port nothing is listening on.
 	st := newFakeStore("http://127.0.0.1:1/hook", "t", d)
-	w := New(st, nil, discard())
+	w := newWorker(t, st, nil)
 	w.drain(t.Context())
 
 	if _, ok := st.rescheduled[d.DeliveryID]; !ok {
@@ -270,20 +306,41 @@ func TestAnUnreachableEndpointIsRetriedLikeAnyOtherFailure(t *testing.T) {
 // the delivery, and retrying it would post them a duplicate.
 func TestEveryTwoHundredIsSuccess(t *testing.T) {
 	t.Parallel()
+	// No socket at all: the worker's client gets a transport that answers
+	// with the status under test. Classifying a status is not about
+	// networking, and a real server per code on the shared default transport
+	// failed in CI when a parallel test's server Close broke the connection
+	// mid-request (see newWorker), which read as "HTTP 201 was treated as a
+	// failure". The wire path is covered by the tests above.
 	for _, code := range []int{200, 201, 202, 204} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(code)
-		}))
 		d := pending(1)
-		st := newFakeStore(srv.URL, "t", d)
-		New(st, nil, discard()).drain(t.Context())
-		srv.Close()
+		st := newFakeStore("http://receiver.invalid/hook", "t", d)
+		w := New(st, nil, discard())
+		w.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: code,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     http.Header{},
+			}, nil
+		})
+		w.drain(t.Context())
 
-		if _, ok := st.delivered[d.DeliveryID]; !ok {
-			t.Errorf("HTTP %d was treated as a failure", code)
+		st.mu.Lock()
+		got, ok := st.delivered[d.DeliveryID]
+		st.mu.Unlock()
+		if !ok {
+			t.Errorf("HTTP %d (attempt %d) was treated as a failure, want delivered; settled as: %s",
+				code, d.AttemptCount, st.whyNot(d.DeliveryID))
+		} else if got != code {
+			t.Errorf("HTTP %d was recorded as %d", code, got)
 		}
 	}
 }
+
+// roundTripFunc is an http.RoundTripper that never touches the network.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // A backlog here must not arrive at one customer as a burst. Ten deliveries
 // for one subscription are worked concurrently — the point of the fan-out —
@@ -320,7 +377,7 @@ func TestOneSubscriptionIsNeverHitByMoreThanTheCap(t *testing.T) {
 		due = append(due, pendingFor(sub, 1))
 	}
 	st := newFakeStore(srv.URL, "t", due...)
-	New(st, nil, discard()).drain(t.Context())
+	newWorker(t, st, nil).drain(t.Context())
 
 	mu.Lock()
 	got := peak
@@ -374,7 +431,7 @@ func TestASlowSubscriberDoesNotHoldUpAnotherOne(t *testing.T) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		New(st, nil, discard()).drain(t.Context())
+		newWorker(t, st, nil).drain(t.Context())
 	}()
 
 	// Every one of B's deliveries settles while A is still hanging.
