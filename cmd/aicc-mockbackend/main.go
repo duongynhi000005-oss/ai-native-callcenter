@@ -329,6 +329,7 @@ func (s *store) leadSubmit(b map[string]any) (any, string) {
 	s.leads++
 	n := s.leads
 	s.mu.Unlock()
-	log.Printf("  线索已记录，评级 %s，累计 %d 条", grade, n)
+	log.Printf("  线索已记录，评级 %s，累计 %d 条 (interest=%q budget=%q timeline=%q)",
+		grade, n, str(b["interest"]), str(b["budget"]), str(b["timeline"]))
 	return map[string]any{"lead_grade": grade, "recorded": "1"}, ""
 }

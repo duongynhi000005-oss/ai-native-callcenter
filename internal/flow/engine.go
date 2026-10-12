@@ -166,7 +166,7 @@ func (e *Engine) Announce() string {
 // Staying put is the common case and is deliberate: when nothing matches, the
 // model is left in the same phase with the same instruction, which reads to the
 // caller as being asked again rather than as an error.
-func (e *Engine) OnToolResult(tool string, result map[string]any) string {
+func (e *Engine) OnToolResult(tool string, args, result map[string]any) string {
 	e.turns++
 	e.slots["turns"] = e.turns
 	e.slots["lastTool"] = tool
@@ -190,6 +190,7 @@ func (e *Engine) OnToolResult(tool string, result map[string]any) string {
 		e.slots[tool+"."+key] = value
 	}
 	e.slots[tool+".calls"] = e.countOf(tool+".calls") + 1
+	e.recordArgs(tool, args)
 
 	node := e.guardRunawayLoop()
 	if node == "" {

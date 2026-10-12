@@ -62,10 +62,13 @@
         "en": "Hi, this is StarCom Mobile. You signed up for our new-product trial campaign — may I take one minute for a quick follow-up?"
       },
       "instruction": {
-        "zh": "对方同意后依次问三个问题(每个只问一遍):一,最近有购买新手机的打算吗(据回答定 interest:明确想买=high,有兴趣再看看=mid,兴趣不大=low);二,预算大概什么范围;三,预计什么时候入手。问完(或用户中途不愿继续)就把已获得的信息调用 lead_submit 提交,没答的字段传空串。对方一开始就不方便或不感兴趣:感谢并调用 lead_submit(interest=\"none\",其它传空串)后结束。",
-        "en": "If they agree, ask three questions (each only once): one, are they planning to buy a new phone soon (map to interest: ready to buy = high, interested but comparing = mid, barely = low); two, roughly what budget; three, when they expect to buy. Then call lead_submit with what you gathered — unanswered fields as empty strings. If they are busy or uninterested from the start: thank them and call lead_submit with interest=\"none\" and empty fields."
+        "zh": "对方同意后依次问三个问题(每个只问一遍):一,最近有购买新手机的打算吗;二,预算大概什么范围;三,预计什么时候入手。用户每答一个就立即调用对应的记录工具,一次说了几个就记几个。只记用户明确说出的原话:预算要具体金额或范围,时间要具体时间,意向要用户明确表态(“再看看”“还在比较”是 mid,不是 high)。“不知道”“看情况”“不确定”不是答案:不要记录,当作拒答。听不清就问一次;绝不替用户举例或建议金额、时间。用户拒答或不愿回答时,说一句“好的”,直接问下一题,不要回头再问。已记录的信息(空白表示还没回答):意向={slots.interest};预算={slots.budget};时间={slots.timeline}。已记录的不要再问。三个问题都问过、用户答完最后一题后,再调用 lead_submit。对方一开始就不方便或不感兴趣:感谢并调用 record_interest(none),再调用 lead_submit 后结束。",
+        "en": "If they agree, ask three questions (each only once): one, are they planning to buy a new phone soon; two, roughly what budget; three, when they expect to buy. Record each answer with its tool the moment the caller gives it, as many as one reply covers. Record only what the caller actually said: a budget must be a concrete amount or range, a timeline a concrete time, and interest must be stated (\"still comparing\" is mid, not high). \"Don't know\", \"it depends\" and \"not sure\" are not answers: do not record them, treat them as a decline. If you could not make out the answer, ask once. Never suggest example amounts or times. When the caller declines a question, say OK and go straight to the next one; never return to it. Recorded so far (blank means not answered yet): interest={slots.interest}; budget={slots.budget}; timeline={slots.timeline}. Never ask a recorded question again. Call lead_submit only after the caller has finished answering the last question. If they are busy or uninterested from the start: thank them, call record_interest with none, then lead_submit."
       },
       "tools": [
+        "record_interest",
+        "record_budget",
+        "record_timeline",
         "lead_submit"
       ],
       "transitions": [
@@ -121,48 +124,57 @@
     }
   },
   "tools": {
+    "record_interest": {
+      "kind": "slot",
+      "description": {
+        "zh": "记录用户的购买意向,仅当用户明确表态后调用。high=明确想买 mid=有兴趣、再看看、还在比较 low=兴趣不大 none=无意向。含糊或没回答就不要调用。",
+        "en": "Record the caller's purchase intent, only once they have clearly stated it. high=ready to buy, mid=interested, still comparing, low=barely interested, none=no intent. If the answer is vague or missing, do not call it."
+      },
+      "slot": "interest",
+      "enum": [
+        "high",
+        "mid",
+        "low",
+        "none"
+      ]
+    },
+    "record_budget": {
+      "kind": "slot",
+      "description": {
+        "zh": "记录用户说的预算,仅当用户给出具体金额或范围时调用,用用户的原话。“不知道”“看情况”“不确定”或没回答不是答案,不要调用。不要自己编造或建议金额。",
+        "en": "Record the budget the caller gave, only when it is a concrete amount or range, in their own words. \"Don't know\", \"it depends\", \"not sure\" or no answer is not an answer: do not call it. Never invent or suggest an amount."
+      },
+      "slot": "budget"
+    },
+    "record_timeline": {
+      "kind": "slot",
+      "description": {
+        "zh": "记录用户说的预计购买时间,仅当用户给出具体时间时调用,用用户的原话。“不知道”“看情况”“不确定”或没回答不是答案,不要调用。不要自己编造或建议时间。",
+        "en": "Record when the caller expects to buy, only when they gave a concrete time, in their own words. \"Don't know\", \"it depends\", \"not sure\" or no answer is not an answer: do not call it. Never invent or suggest a time."
+      },
+      "slot": "timeline"
+    },
     "lead_submit": {
       "description": {
-        "zh": "提交线索筛选结果。interest:high=明确想买 mid=有兴趣再看看 low=兴趣不大 none=无意向/未回答。",
-        "en": "Submit the lead-qualification result. interest: high=ready to buy, mid=interested but comparing, low=barely interested, none=no intent / declined."
+        "zh": "提交线索筛选结果。意向、预算、预计时间取自已记录的信息;notes 填其它值得记录的信息。",
+        "en": "Submit the lead-qualification result. Interest, budget and timeline are taken from what was recorded; notes is anything else worth recording."
       },
       "parameters": {
         "type": "object",
         "properties": {
-          "interest": {
-            "type": "string",
-            "enum": [
-              "high",
-              "mid",
-              "low",
-              "none"
-            ],
-            "description": "购买意向档位 / purchase-intent tier"
-          },
-          "budget": {
-            "type": "string",
-            "description": "预算区间,未回答传空串 / budget range, empty string if unanswered"
-          },
-          "timeline": {
-            "type": "string",
-            "description": "预计购买时间,未回答传空串 / expected purchase time, empty string if unanswered"
-          },
           "notes": {
             "type": "string",
             "description": "其它值得记录的信息,没有传空串 / anything else worth recording, empty string if none"
           }
-        },
-        "required": [
-          "interest"
-        ]
+        }
       },
       "http": {
         "path": "/api/lead/submit",
         "body": {
           "phone": "{slots.caller}",
-          "interest": "{args.interest}",
-          "budget": "{args.budget}",
-          "timeline": "{args.timeline}",
+          "interest": "{slots.interest}",
+          "budget": "{slots.budget}",
+          "timeline": "{slots.timeline}",
           "notes": "{args.notes}"
         },
         "successWhen": {

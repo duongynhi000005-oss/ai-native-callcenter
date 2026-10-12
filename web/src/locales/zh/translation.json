@@ -692,6 +692,7 @@
     "tool": "工具",
     "description": "说明",
     "httpPath": "HTTP 调用",
+    "slotTool": "记录到 slots.{{slot}}",
     "parameters": "参数",
     "resultSlots": "结果 → 槽位",
     "persona": "人设",

@@ -75,7 +75,7 @@ Every user-facing string (`persona`, `instruction`, `announce`, tool `descriptio
 
 ### 2.4 A tool
 
-A declarative tool is an HTTP call to your backend. The model sees `description` and `parameters` (a JSON Schema object, passed to the model unchanged); the engine runs the `http` block.
+A declarative tool is by default an HTTP call to your backend (a second kind, the slot tool, records what the caller said and calls nothing: see 2.8). The model sees `description` and `parameters` (a JSON Schema object, passed to the model unchanged); the engine runs the `http` block.
 
 | Field | Meaning |
 | --- | --- |
@@ -126,7 +126,13 @@ Slots are the call's structured state. They live in this application, not in the
 
 A tool result that changes what the current phase's instruction renders from slots re-pins the instruction without a phase change, so an instruction never quotes a superseded value.
 
-The only way a value becomes a slot is a `http.result` mapping over a backend response. Section 6 explains what that means for facts the caller merely says.
+A value becomes a slot in four ways: a `http.result` mapping over a backend response; a slot tool recording a fact the caller said (2.8); the arguments of any tool call, stored as `<tool>.args.<k>`; and the business data an outbound call was placed with, seeded as `userData.<k>`.
+
+| Slot | Value |
+| --- | --- |
+| `<slot>` | What a slot tool (2.8) recorded. |
+| `<tool>.args.<k>` | The scalar arguments of the tool's **last** call. Replaced wholesale on every call, so an argument left out this time is not read from the time before. Strings are cut to 256 characters; objects and arrays are not stored. |
+| `userData.<k>` | Business data the call was placed with. Read-only: the model cannot write it. Nested objects are flattened with dots (`userData.order.id`); arrays are skipped. |
 
 ### 2.7 Built-in tools
 
@@ -144,6 +150,55 @@ Two details that matter when authoring:
 - `reason` is a free string, not an enum, even though the design text in `docs/design/02-ai-voice.md` §6 shows one.
 
 A built-in's refusal is a conversation, not an error. When a queue is closed the model explains and offers a message. Business hours therefore belong to the queue, not to a branch in the flow.
+
+### 2.8 Slot tools: facts the caller states
+
+A fact the caller merely said ("my budget is 5000", "next month") lives only in the model's conversation history, which a long call can truncate. A slot tool writes it down. It is declared in `tools` with `"kind": "slot"` and calls nothing:
+
+```json
+"record_budget": {
+  "kind": "slot",
+  "slot": "budget",
+  "description": {
+    "en": "Record the budget the caller gave, in their own words, as soon as they answer. Do not call it if they did not answer.",
+    "zh": "记录用户说的预算，用用户自己的说法。用户没回答就不要调用。"
+  }
+},
+"record_interest": {
+  "kind": "slot", "slot": "interest", "enum": ["high", "mid", "low", "none"],
+  "description": { "en": "...", "zh": "..." }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `"slot"`. Absent or `"http"` is an HTTP tool; anything else is a load error. |
+| `slot` | Required. The slot written: `slots.<slot>`. A single name of letters, digits and underscores, unique among slot tools, and never one the engine owns (`caller`, `did`, `entry`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `result`, `userData`, `noInput`). |
+| `enum` | Optional. The only values accepted; passed to the model as the enum of its one argument. |
+| `description` | Required, bilingual like any tool. Say when to call it and when not to. |
+
+A slot tool has no `http` and no `parameters`; declaring either is a load error. The model is offered one string argument, `value`, generated from the declaration. List the tool in the allowlist of each phase where the fact may be stated, like any other tool.
+
+How it behaves (`internal/flow/slottool.go`):
+
+- **Reading it back.** `{slots.<slot>}` in an `instruction`, an `announce` or an `http.body` renders the value, and a condition can test it (`IS_EMPTY`, `IS_NOT_EMPTY`, `EQ` and the rest). A tool that stays in the phase but changes what the instruction renders re-pins the instruction (2.6), so the bot can be told what is already answered: `Recorded so far (blank means not answered yet): budget={slots.budget}; ...`. A fact recorded in one phase is still there in every later phase and in an HTTP tool's body.
+- **Branching.** A slot call is a tool result: `result.ok` is `"1"` and `<tool>.calls` counts calls, so a `TOOL_RESULT` transition on the tool fires, with or without a condition on the slot.
+- **The latest call overwrites.** Recording a correction ("not 5000, 8000") replaces the earlier value.
+- **Refusals.** An empty or whitespace-only value, a value over **256 characters**, and a value outside the `enum` are answered with `ok: "0"` and the reason. Nothing is stored, no slot changes, and a `TOOL_RESULT` rule that requires `result.ok` of `"1"` does not fire. Over-long is rejected, not truncated: half a fact is never recorded. The model reads the reason and can retry.
+- **A declined question stays blank.** If the caller will not answer, the model should not call the tool (say so in its `description`), and the slot stays unset. Write the instruction so a blank is a state: do not ask again, submit what you have. In an `http.body`, a value that is nothing but `{slots.<slot>}` arrives as JSON `null` when the slot is unset (a lone reference keeps the value's type, and there is none); a reference inside other text renders as an empty string. The backend should read `null` as "not answered".
+- **A late answer is lost.** A slot tool is an ordinary tool, so it is refused (`ok: "0"`, the current phase's instruction) in any phase whose allowlist does not name it. Once the flow has moved on, for example from the question phase to `done` after the submit, a late answer or correction from the caller is refused and lost. A flow that must accept corrections keeps the slot tools allowed in the later phase and submits again; the seed `lead_qualification` flow does not do that.
+- **Models record what you do not mean.** On qwen a model has recorded "it depends" as a budget, invented a value from a noisy transcript, re-asked a declined question, and offered example amounts. Say in the `description` and the instruction what counts as an answer (a concrete amount or range, a concrete time), that "don't know" is a decline, that only the caller's own words are recorded, and that a declined question is not asked again. `lead_qualification` is the reference wording.
+- **Normalisation.** Surrounding space is trimmed and line breaks become spaces, so a value cannot add lines to the instruction it is rendered into.
+- **Values are untrusted caller text.** They are what a person said, transcribed, and they are rendered into the model's instructions and sent to your backend. Treat them as input: validate them in the backend, and do not let a rule's meaning depend on a slot's content.
+
+Other slots you can read back:
+
+- **`<tool>.args.<k>`** exists for every tool, built-in ones included. It is readable in a template or condition **only for arguments the tool declares** in its `parameters.properties` (a slot tool declares `value`). Referencing anything else is a load error.
+- **`userData.<k>`** is accepted for any `k`, because the keys come from whoever placed the call.
+
+**Declared-slot rule, checked at load.** `{slots.x}` in an `instruction`, an `announce` or an `http.body`, and the `slot` of a transition condition, must name something the flow can write, or the flow does not load (a typo would otherwise be heard on a call as an empty gap). The accepted names are: `caller`, `entry`, `did`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `noInput.count`; `userData.<k>`; a slot tool's `slot`; `<node>.visits` for a phase of the flow; `<tool>.calls` and `<tool>.ok`; `<tool>.<field>` where `field` is a key of that HTTP tool's `http.result`; `<tool>.args.<k>` where `k` is a declared parameter; and `result.<field>` for a field some tool maps (`ok` included). `persona` and `rules` are not rendered, so they are not checked.
+
+**Providers.** A slot is engine state, so it is exact in templates and HTTP bodies on every engine. How soon the *model* is re-told differs: the Realtime engines (OpenAI, Qwen, the gateway) re-pin at once; **Doubao and Gemini re-pin best effort**. Gemini cannot change its instructions mid-call, and they reach the model with the next tool result or turn that carries something; Doubao's frame is sent but its effect on a call in progress is not measured. Do not depend on an instant re-pin there: keep the "never ask a recorded question again" rule cheap to obey, and carry a fact that must not be lost in an HTTP body rather than only in the prompt.
 
 ## 3. What the platform already does for you
 
@@ -329,7 +384,7 @@ Say these to the business rather than working around them in the prompt.
 
 | Need | Status |
 | --- | --- |
-| **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Not durable as slots. Tool arguments are discarded after the request is built, and only mapped backend response fields become slots. A stated fact survives only if the model passes it to a tool and the backend echoes it into a field named in `http.result`; otherwise it lives in the model's conversation history, which a long call can truncate. There is also no per-question state, so "ask each question only once" is prompt text with nothing behind it. Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
+| **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Supported: a slot tool records the fact, see 2.8. Tool arguments are also kept as `<tool>.args.<k>`, and an outbound call's business data as `userData.<k>` (2.6). Still absent: a list of values (the slot keeps only the latest, so "all the orders looked up" needs your backend's memory), and a start-of-call lookup (issue [#84](https://github.com/rasonyang/ai-native-callcenter/issues/84)). Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
 | **Collecting digits, a keypad menu, masked secrets.** | Not supported. Keypad input is not a flow event. Today each key reaches the model as a text cue (`(The caller pressed 5 on their keypad.)`), interrupts the bot, and asks for a reply; the model assembles the digits and follows your prompt. That is not deterministic, and digits pass through the model, the transcript and the logs. Do not collect PINs or card numbers this way. Issue [#91](https://github.com/rasonyang/ai-native-callcenter/issues/91). |
 | **Knowledge retrieval as a platform feature.** | Not provided. A knowledge tool is an ordinary HTTP tool (4.2) against a service you run. A neutral contract and store templates are planned in issue [#92](https://github.com/rasonyang/ai-native-callcenter/issues/92). |
 | **Testing a flow without a call.** | No text-mode simulator. See 8. Issue [#85](https://github.com/rasonyang/ai-native-callcenter/issues/85). |

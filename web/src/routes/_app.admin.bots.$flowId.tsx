@@ -807,7 +807,9 @@ function ToolTable({ spec, lang }: { spec: FlowSpec; lang: SpecLang }) {
               {textFor(tool.description, lang)}
             </Td>
             <Td className="py-2 align-top font-mono text-xs">
-              {tool.http?.method ?? 'POST'} {tool.http?.path ?? '—'}
+              {tool.kind === 'slot'
+                ? t('bots.slotTool', { slot: tool.slot ?? '—' })
+                : `${tool.http?.method ?? 'POST'} ${tool.http?.path ?? '—'}`}
             </Td>
             <Td className="py-2 align-top text-xs text-muted-foreground">
               <Parameters tool={tool} />
@@ -831,6 +833,17 @@ function ToolTable({ spec, lang }: { spec: FlowSpec; lang: SpecLang }) {
  */
 function Parameters({ tool }: { tool: FlowTool }) {
   const { t } = useTranslation()
+  if (tool.kind === 'slot') {
+    return (
+      <span>
+        <span className="font-mono text-foreground">value</span>
+        <span className="ml-1 font-mono">string</span>
+        {tool.enum && tool.enum.length > 0 && (
+          <span className="ml-1 font-mono">{tool.enum.join(' | ')}</span>
+        )}
+      </span>
+    )
+  }
   const properties = Object.entries(tool.parameters?.properties ?? {})
   if (properties.length === 0) return <>—</>
   const required = new Set(tool.parameters?.required ?? [])

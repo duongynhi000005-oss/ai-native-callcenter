@@ -109,19 +109,48 @@ func (s *Spec) validate() error {
 		s.validateTransitions("phase "+id, node.Transitions, &problems)
 	}
 
+	slotOwners := map[string]string{}
 	for name, tool := range s.Tools {
 		if tool.Description.IsEmpty() {
 			report("tool %q has no description, so the model cannot tell when to use it", name)
 		}
-		if tool.HTTP == nil {
-			report("tool %q declares no http call", name)
-			continue
+		if slices.Contains(BuiltinToolNames, name) {
+			report("tool %q is the name of a built-in tool", name)
 		}
-		if tool.HTTP.Path == "" {
-			report("tool %q declares no path", name)
+		switch tool.Kind {
+		case "", ToolKindHTTP:
+			if tool.Slot != "" || len(tool.Enum) > 0 {
+				report("tool %q is an http tool but declares slot or enum, which only a slot tool has", name)
+			}
+			if tool.HTTP == nil {
+				report("tool %q declares no http call", name)
+				continue
+			}
+			if tool.HTTP.Path == "" {
+				report("tool %q declares no path", name)
+			}
+			if len(tool.Parameters) > 0 && !json.Valid(tool.Parameters) {
+				report("tool %q has parameters that are not valid JSON", name)
+			}
+		case ToolKindSlot:
+			s.validateSlotTool(name, tool, slotOwners, report)
+		default:
+			report("tool %q has unknown kind %q; it is %q or %q", name, tool.Kind, ToolKindHTTP, ToolKindSlot)
 		}
-		if len(tool.Parameters) > 0 && !json.Valid(tool.Parameters) {
-			report("tool %q has parameters that are not valid JSON", name)
+	}
+
+	// A name nothing writes renders as empty or never matches: a typo the
+	// caller would hear instead of the author seeing it.
+	declared := newDeclaredSlots(s)
+	for id, node := range s.Nodes {
+		checkTemplate(declared, "phase "+id+" instruction", node.Instruction, report)
+		checkTemplate(declared, "phase "+id+" announce", node.Announce, report)
+		checkConditions(declared, "phase "+id, node.Transitions, report)
+	}
+	checkConditions(declared, "global", s.Global.Transitions, report)
+	for name, tool := range s.Tools {
+		if tool.HTTP != nil {
+			checkBody(declared, "tool "+name, tool.HTTP.Body, report)
 		}
 	}
 
@@ -260,4 +289,100 @@ func validateCondition(condition *Condition) error {
 		return fmt.Errorf("condition with operator %s names no slot", condition.Op)
 	}
 	return nil
+}
+
+// validateSlotTool checks a tool of kind "slot".
+func (s *Spec) validateSlotTool(name string, tool Tool, owners map[string]string, report func(string, ...any)) {
+	if tool.HTTP != nil {
+		report("tool %q is a slot tool and must not declare http: it records a value and calls nothing", name)
+	}
+	if len(tool.Parameters) > 0 {
+		report("tool %q is a slot tool and must not declare parameters: its one argument is %q", name, slotToolValueArg)
+	}
+	switch {
+	case tool.Slot == "":
+		report("slot tool %q names no slot", name)
+	case !slotNamePattern.MatchString(tool.Slot):
+		report("slot tool %q writes slot %q, which is not a single name of letters, digits and underscores", name, tool.Slot)
+	case slices.Contains(reservedSlotNames, tool.Slot):
+		report("slot tool %q writes slot %q, which the engine owns", name, tool.Slot)
+	default:
+		if other, taken := owners[tool.Slot]; taken {
+			report("slot tools %q and %q both write slot %q", other, name, tool.Slot)
+		}
+		owners[tool.Slot] = name
+	}
+	seen := map[string]bool{}
+	for _, v := range tool.Enum {
+		if strings.TrimSpace(v) == "" || strings.TrimSpace(v) != v || len([]rune(v)) > MaxSlotValueLen {
+			report("slot tool %q has enum value %q; it must be non-empty, trimmed and at most %d characters", name, v, MaxSlotValueLen)
+		}
+		if seen[v] {
+			report("slot tool %q lists enum value %q twice", name, v)
+		}
+		seen[v] = true
+	}
+}
+
+func checkTemplate(d declaredSlots, where string, text Text, report func(string, ...any)) {
+	for _, lang := range []string{text.EN, text.ZH} {
+		for _, name := range slotRefs(lang) {
+			if !d.has(name) {
+				report("%s references {slots.%s}, which nothing in this flow writes", where, name)
+			}
+		}
+	}
+}
+
+func checkBody(d declaredSlots, where string, body map[string]any, report func(string, ...any)) {
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			for _, m := range templateReference.FindAllStringSubmatch(x, -1) {
+				if m[1] == "slots" && !d.has(m[2]) {
+					report("%s body references {slots.%s}, which nothing in this flow writes", where, m[2])
+				}
+			}
+		case map[string]any:
+			for _, item := range x {
+				walk(item)
+			}
+		case []any:
+			for _, item := range x {
+				walk(item)
+			}
+		}
+	}
+	walk(body)
+}
+
+func checkConditions(d declaredSlots, where string, rules []Transition, report func(string, ...any)) {
+	var walk func(i int, c *Condition)
+	walk = func(i int, c *Condition) {
+		if c == nil {
+			return
+		}
+		if len(c.All) > 0 || len(c.Any) > 0 {
+			for _, sub := range append(slices.Clone(c.All), c.Any...) {
+				walk(i, &sub)
+			}
+			return
+		}
+		if c.Slot != "" && !d.has(c.Slot) {
+			report("%s transition %d tests slot %q, which nothing in this flow writes", where, i, c.Slot)
+		}
+	}
+	for i, rule := range rules {
+		walk(i, rule.Condition)
+	}
+}
+
+// slotRefs lists the names of the {slots.x} references in a template.
+func slotRefs(template string) []string {
+	var names []string
+	for _, m := range slotReference.FindAllStringSubmatch(template, -1) {
+		names = append(names, m[1])
+	}
+	return names
 }

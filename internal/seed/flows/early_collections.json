@@ -126,8 +126,8 @@
     },
     "promised": {
       "instruction": {
-        "zh": "已记录付款安排:用用户自己刚才说的时间复述确认(如“好的,那就等您本周五处理”),并提醒可以通过手机营业厅或线下网点缴费。然后感谢配合,调用 hangup 结束。",
-        "en": "Payment arrangement recorded: confirm using the caller's own words (e.g. \"Great, we'll expect it by this Friday then\"), and mention the mobile app or service centers for payment. Thank them and call hangup."
+        "zh": "已记录付款安排:用用户自己说的时间“{slots.promise_record.args.pay_date}”复述确认(如“好的,那就等您本周五处理”),并提醒可以通过手机营业厅或线下网点缴费。然后感谢配合,调用 hangup 结束。",
+        "en": "Payment arrangement recorded: confirm using the time the caller gave, \"{slots.promise_record.args.pay_date}\" (e.g. \"Great, we'll expect it by this Friday then\"), and mention the mobile app or service centers for payment. Thank them and call hangup."
       },
       "tools": []
     },

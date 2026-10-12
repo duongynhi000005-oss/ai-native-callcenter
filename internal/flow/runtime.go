@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 )
@@ -88,7 +89,7 @@ func (r *Runtime) Tools() []provider.ToolSpec {
 		specs = append(specs, provider.ToolSpec{
 			Name:        name,
 			Description: tool.Description.For(r.engine.Lang()),
-			Parameters:  tool.Parameters,
+			Parameters:  tool.ModelParameters(),
 		})
 	}
 	return specs
@@ -240,7 +241,7 @@ func (r *Runtime) Dispatch(ctx context.Context, name, arguments string) (output 
 	// can distinguish a transfer that happened from one that was refused.
 	recorded := map[string]any{"ok": boolAsFlag(result.IsOK)}
 	maps.Copy(recorded, result.Fields)
-	newNode = r.engine.OnToolResult(name, recorded)
+	newNode = r.engine.OnToolResult(name, args, recorded)
 	if newNode != "" {
 		// The flow is authoritative on progression: whatever the tool wanted to
 		// say next, the new phase's instruction replaces it.
@@ -312,10 +313,27 @@ func (r *Runtime) run(ctx context.Context, name string, args map[string]any) (Re
 	if !ok {
 		return Result{}, fmt.Errorf("there is no tool called %s", name)
 	}
+	if tool.Kind == ToolKindSlot {
+		return r.recordSlot(tool, args), nil
+	}
 	if r.backend == nil {
 		return Result{}, fmt.Errorf("no backend is configured for %s", name)
 	}
 	return r.backend.Call(ctx, tool, args, r.engine.Slots())
+}
+
+// recordSlot runs a slot tool. A value that is empty, too long or outside the
+// tool's enum is a refusal the model can read and correct, not an error, and
+// nothing is stored.
+func (r *Runtime) recordSlot(tool Tool, args map[string]any) Result {
+	value, err := cleanSlotValue(tool, args[slotToolValueArg])
+	if err != nil {
+		r.log.Info("slot not recorded", "tool", tool.Name(), "slot", tool.Slot, "reason", err.Error())
+		return Failed(err.Error(), "")
+	}
+	r.engine.RecordSlot(tool.Slot, value)
+	r.log.Info("slot recorded", "tool", tool.Name(), "slot", tool.Slot, "chars", utf8.RuneCountInString(value))
+	return Succeeded(nil, "")
 }
 
 // confidentialityRule keeps the model's instructions to itself. It is the

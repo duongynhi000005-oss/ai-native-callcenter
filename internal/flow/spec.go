@@ -228,12 +228,41 @@ type HTTPCall struct {
 	Result map[string]string `json:"result,omitempty"`
 }
 
+// ToolKind is what a flow-declared tool does when the model calls it.
+type ToolKind string
+
+const (
+	// ToolKindHTTP calls the flow's backend. It is the default, so a tool with
+	// no kind is an HTTP tool.
+	ToolKindHTTP ToolKind = "http"
+	// ToolKindSlot records a fact the caller stated into a declared slot. It
+	// makes no call: its only effect is slots.<Slot> = <value>, so the fact
+	// outlives the model's own context and can be rendered back into a phase
+	// instruction, an announce, an HTTP body or a transition condition.
+	ToolKindSlot ToolKind = "slot"
+)
+
+// MaxSlotValueLen bounds one recorded value, in characters. A slot tool
+// refuses a longer value (the model retries it shorter; half a fact is never
+// recorded), while a tool argument kept as <tool>.args.<k> is cut to it,
+// because a tool that has already run cannot be refused for what it was
+// given. It keeps the pinned instruction bounded.
+const MaxSlotValueLen = 256
+
 // Tool is a function the model may call.
 type Tool struct {
-	Description Text `json:"description"`
-	// Parameters is a JSON Schema object, passed to the model unchanged.
+	// Kind is "http" (the default) or "slot".
+	Kind        ToolKind `json:"kind,omitempty"`
+	Description Text     `json:"description"`
+	// Parameters is a JSON Schema object, passed to the model unchanged. A
+	// slot tool takes none of its own: its one argument is "value".
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	HTTP       *HTTPCall       `json:"http,omitempty"`
+	// Slot is the slot a ToolKindSlot tool writes (slots.<Slot>).
+	Slot string `json:"slot,omitempty"`
+	// Enum, when set on a slot tool, is the only values it accepts, and is
+	// passed to the model as the enum of "value".
+	Enum []string `json:"enum,omitempty"`
 
 	name string
 }

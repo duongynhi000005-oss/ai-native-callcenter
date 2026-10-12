@@ -65,6 +65,16 @@ export interface FlowParameter {
 }
 
 export interface FlowTool {
+  /**
+   * "slot" tools record a fact the caller stated into the slot named by
+   * `slot` and call nothing; absent or "http" is a backend call. Keep every
+   * field when a spec is read and written back.
+   */
+  kind?: 'http' | 'slot'
+  /** The slot a kind "slot" tool writes (slots.<slot>). */
+  slot?: string
+  /** The only values a kind "slot" tool accepts, when set. */
+  enum?: string[]
   description?: FlowText
   parameters?: {
     properties?: Record<string, FlowParameter>
@@ -73,6 +83,7 @@ export interface FlowTool {
   http?: {
     path?: string
     method?: string
+    body?: Record<string, unknown>
     successWhen?: { path?: string; equals?: string }
     errorFrom?: string
     result?: Record<string, string>

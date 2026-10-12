@@ -314,7 +314,7 @@ func TestAMatchingResultMovesThePhase(t *testing.T) {
 	t.Parallel()
 	e := testEngine(t, "en")
 
-	moved := e.OnToolResult("lookup_account",
+	moved := e.OnToolResult("lookup_account", nil,
 		map[string]any{"found": "1", "name": "Alice", "balance": "42.10"})
 	if moved != "report" {
 		t.Fatalf("moved to %q, want report", moved)
@@ -332,13 +332,13 @@ func TestRepeatedFailuresEscalateThroughThePriorityRule(t *testing.T) {
 	e := testEngine(t, "en")
 
 	notFound := map[string]any{"found": "0"}
-	if moved := e.OnToolResult("lookup_account", notFound); moved != "" {
+	if moved := e.OnToolResult("lookup_account", nil, notFound); moved != "" {
 		t.Fatalf("first failure moved to %q", moved)
 	}
-	if moved := e.OnToolResult("lookup_account", notFound); moved != "" {
+	if moved := e.OnToolResult("lookup_account", nil, notFound); moved != "" {
 		t.Fatalf("second failure moved to %q", moved)
 	}
-	if moved := e.OnToolResult("lookup_account", notFound); moved != "handoff" {
+	if moved := e.OnToolResult("lookup_account", nil, notFound); moved != "handoff" {
 		t.Fatalf("third failure moved to %q, want handoff", moved)
 	}
 }
@@ -348,8 +348,8 @@ func TestTransientResultSlotsAreReplacedWholesale(t *testing.T) {
 	t.Parallel()
 	e := testEngine(t, "en")
 
-	e.OnToolResult("lookup_account", map[string]any{"found": "0", "extra": "stale"})
-	e.OnToolResult("lookup_account", map[string]any{"found": "0"})
+	e.OnToolResult("lookup_account", nil, map[string]any{"found": "0", "extra": "stale"})
+	e.OnToolResult("lookup_account", nil, map[string]any{"found": "0"})
 
 	if _, ok := e.Slot("result.extra"); ok {
 		t.Error("a transient slot from the previous result survived")
@@ -369,11 +369,11 @@ func TestTheTurnLimitForcesTheFallback(t *testing.T) {
 	// No rule matches take_message in the welcome phase, so nothing moves —
 	// until the limit of six dispatches is crossed.
 	for i := range 6 {
-		if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "" {
+		if moved := e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}); moved != "" {
 			t.Fatalf("dispatch %d moved to %q before the limit", i+1, moved)
 		}
 	}
-	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "handoff" {
+	if moved := e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}); moved != "handoff" {
 		t.Fatalf("the dispatch past the limit moved to %q, want the fallback", moved)
 	}
 }
@@ -389,7 +389,7 @@ func TestATerminalPhaseNeverMoves(t *testing.T) {
 	if !e.IsTerminal() {
 		t.Fatal("farewell is not terminal")
 	}
-	if moved := e.OnToolResult("transfer_to_agent", map[string]any{"ok": "1"}); moved != "" {
+	if moved := e.OnToolResult("transfer_to_agent", nil, map[string]any{"ok": "1"}); moved != "" {
 		t.Errorf("a terminal phase moved to %q", moved)
 	}
 }
@@ -439,7 +439,7 @@ func withWelcomeNoInputRule(t *testing.T, spec, rule string) string {
 // nothing about silence.
 func toReport(t *testing.T, e *Engine) {
 	t.Helper()
-	if moved := e.OnToolResult("lookup_account",
+	if moved := e.OnToolResult("lookup_account", nil,
 		map[string]any{"found": "1", "name": "Alice"}); moved != "report" {
 		t.Fatalf("did not reach the phase under test: moved to %q", moved)
 	}
@@ -545,7 +545,7 @@ func TestConsecutiveSilenceResetsOnCallerProgressOnly(t *testing.T) {
 		{"words", func(e *Engine) { e.OnCallerSpoke("hello?") }, true},
 		{"a keypress", func(e *Engine) { e.OnCallerKeyed() }, true},
 		{"a tool result", func(e *Engine) {
-			e.OnToolResult("take_message", map[string]any{"ok": "1"})
+			e.OnToolResult("take_message", nil, map[string]any{"ok": "1"})
 		}, true},
 		{"an empty transcript", func(e *Engine) { e.OnCallerSpoke("") }, false},
 		{"a blank transcript", func(e *Engine) { e.OnCallerSpoke("  ") }, false},
@@ -654,7 +654,7 @@ func TestTheTurnsWithoutToolWallResetsOnAToolCall(t *testing.T) {
 
 	// Transcript first (gemini, doubao): the utterance leads to a tool call.
 	e.OnCallerSpoke("check my balance")
-	e.OnToolResult("take_message", map[string]any{"ok": "1"}) // matches no rule in welcome
+	e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}) // matches no rule in welcome
 	if e.OnBotTurnDone(true, false) {
 		t.Fatal("the tool-call turn reported the wall crossed")
 	}
@@ -667,7 +667,7 @@ func TestTheTurnsWithoutToolWallResetsOnAToolCall(t *testing.T) {
 
 	// Transcript last (openai): it arrives after the tool-call turn and must
 	// not be charged to the tool's answer.
-	e.OnToolResult("take_message", map[string]any{"ok": "1"})
+	e.OnToolResult("take_message", nil, map[string]any{"ok": "1"})
 	e.OnBotTurnDone(true, false)
 	e.OnCallerSpoke("check my balance")
 	e.OnBotTurnDone(false, false)
@@ -765,13 +765,13 @@ func TestToolsOfOneResponseAreJudgedInThePhaseItWasMadeIn(t *testing.T) {
 	e := testEngineFor(t, batchFlow, "en")
 
 	e.BeginToolBatch()
-	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "noted" {
+	if moved := e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}); moved != "noted" {
 		t.Fatalf("take_message moved to %q, want noted", moved)
 	}
 	if !e.IsToolAllowed("transfer_to_agent") {
 		t.Fatal("the second tool of the response was refused by the phase the first moved to")
 	}
-	if moved := e.OnToolResult("transfer_to_agent", map[string]any{"ok": "1"}); moved != "handoff" {
+	if moved := e.OnToolResult("transfer_to_agent", nil, map[string]any{"ok": "1"}); moved != "handoff" {
 		t.Fatalf("transfer_to_agent moved to %q, want handoff: the batch's phase has that rule", moved)
 	}
 	e.EndToolBatch()
@@ -789,7 +789,7 @@ func TestToolsOfSeparateResponsesAreJudgedWhereTheCallStands(t *testing.T) {
 	t.Parallel()
 	e := testEngineFor(t, batchFlow, "en")
 
-	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "noted" {
+	if moved := e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}); moved != "noted" {
 		t.Fatalf("take_message moved to %q, want noted", moved)
 	}
 	if e.IsToolAllowed("transfer_to_agent") {
@@ -804,13 +804,13 @@ func TestATerminalMoveInABatchIsNotOverridden(t *testing.T) {
 	e := testEngineFor(t, batchFlow, "en")
 
 	e.BeginToolBatch()
-	if moved := e.OnToolResult("hangup", map[string]any{"ok": "1"}); moved != "farewell" {
+	if moved := e.OnToolResult("hangup", nil, map[string]any{"ok": "1"}); moved != "farewell" {
 		t.Fatalf("hangup moved to %q, want farewell", moved)
 	}
 	if !e.IsToolAllowed("take_message") {
 		t.Fatal("the second tool of the response was refused")
 	}
-	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "" {
+	if moved := e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}); moved != "" {
 		t.Errorf("take_message moved a call that had ended to %q", moved)
 	}
 	e.EndToolBatch()
@@ -822,7 +822,7 @@ func TestATerminalMoveInABatchIsNotOverridden(t *testing.T) {
 func TestInstructionRendersMissingSlotsAsNothing(t *testing.T) {
 	t.Parallel()
 	e := testEngine(t, "en")
-	e.OnToolResult("lookup_account", map[string]any{"found": "1"}) // no name collected
+	e.OnToolResult("lookup_account", nil, map[string]any{"found": "1"}) // no name collected
 
 	if got := e.Instruction(); strings.Contains(got, "{slots.") {
 		t.Errorf("an unfilled template leaked to the model: %q", got)
@@ -854,7 +854,7 @@ func TestAPhaseAnnouncementIsTakenVerbatimInTheCallsLanguage(t *testing.T) {
 func TestAnAnnouncementRendersSlotsAndAcceptsOneWordingForEveryLanguage(t *testing.T) {
 	t.Parallel()
 	e := testEngine(t, "en")
-	if moved := e.OnToolResult("lookup_account",
+	if moved := e.OnToolResult("lookup_account", nil,
 		map[string]any{"found": "1", "name": "Alice"}); moved != "report" {
 		t.Fatalf("moved to %q, want report", moved)
 	}

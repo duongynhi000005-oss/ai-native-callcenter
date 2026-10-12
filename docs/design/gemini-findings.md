@@ -293,6 +293,13 @@ moves between phases by appending to its persona; instructions that diverge part
 way through a sentence were rewritten rather than extended, and half a sentence
 is not a phase.
 
+**Consequence for slots (issue #13, owner decision 2026-10-12).** A fact recorded
+by a slot tool, or any slot an instruction renders, reaches the model on gemini
+only with the next tool result, keypress or dead-air cue, not at once. The slot
+tool's own result does not repeat the value to close that gap: the re-pin stays
+best effort here, and the slot stays exact for templates and HTTP bodies, which
+read the engine.
+
 **NOT MEASURED**: two phase changes in one session, and a phase change that
 conflicts head-on with the one before it on the no-input path. §4.
 

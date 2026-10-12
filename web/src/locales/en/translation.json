@@ -695,6 +695,7 @@
     "tool": "Tool",
     "description": "Description",
     "httpPath": "HTTP call",
+    "slotTool": "Records slots.{{slot}}",
     "parameters": "Parameters",
     "resultSlots": "Result → slots",
     "persona": "Persona",
