@@ -207,6 +207,19 @@ func unbackedClaimsFrom(raw string) []string {
 	return out
 }
 
+// isObservedTrunkLeg recognizes the trunk leg of a call a person dialled out:
+// an outbound channel carrying an aicc_did that is neither the leg dialled at
+// the bot (its destination is the DID) nor the customer leg of an AI outbound
+// call (aicc_placed_by DIAL_AI, whose DID the ledger reads as the number the
+// call went out from). aicc_outbound.lua stamps the caller-id number on such a
+// leg so it can be counted per DID; that number is not the DID of a bot phase,
+// and read as one it would turn a human call's ledger row into a DID call.
+func isObservedTrunkLeg(ev SwitchEvent) bool {
+	return ev.Direction == DirectionOutbound && ev.LegDID != "" &&
+		ev.DestinationNumber != ev.LegDID &&
+		ev.Raw.Variable(VarPlacedBy) != PlacedByDialAI
+}
+
 // CallDirection is the switch's view of which side started the channel.
 type CallDirection string
 
@@ -246,6 +259,14 @@ type SwitchEvent struct {
 	// "outbound" to the switch, whether it reaches an extension down the hall
 	// or a carrier. Empty leaves the classification to the channel.
 	CallTypeHint string
+	// LegDID is the aicc_did stamped on this channel, whatever kind of leg it
+	// is. On a trunk leg a person dialled (click-to-dial or the keypad) it is
+	// the number the far end sees as the caller id, stamped by
+	// aicc_outbound.lua and inherited through export_vars; the per-DID outbound
+	// line count observes outbound legs through it. It says nothing about the
+	// call's type or direction, and on such a leg it is deliberately kept out
+	// of Bot.DID (see isObservedTrunkLeg). Empty when the channel carries none.
+	LegDID string
 
 	// Hangup detail.
 	HangupCause     string
@@ -407,6 +428,7 @@ func normalizeChannel(ev *esl.Event, out SwitchEvent) (SwitchEvent, bool) {
 	out.Context = ev.Get("Caller-Context")
 	out.OtherChannelID = ev.Get("Other-Leg-Unique-ID")
 	out.CallTypeHint = ev.Get("variable_aicc_call_type")
+	out.LegDID = ev.Variable("aicc_did")
 
 	// mod_callcenter dials the agent on a waiting caller's behalf and stamps
 	// that caller's channel onto the leg it creates, which is the only thing
@@ -469,6 +491,9 @@ func normalizeChannel(ev *esl.Event, out SwitchEvent) (SwitchEvent, bool) {
 			out.HangupCauseQ850 = int(q850)
 		}
 		out.Bot = botShare(ev)
+		if isObservedTrunkLeg(out) {
+			out.Bot.DID = ""
+		}
 		if sec, ok := ev.GetInt("variable_billsec"); ok {
 			out.BilledSec = int(sec)
 		}

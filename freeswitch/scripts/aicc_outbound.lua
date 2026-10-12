@@ -19,6 +19,9 @@
 -- into trunk_clid. A leg that carries no number of its own falls back to
 -- $${pstn_gateway_caller_id}, which is a DID row like any other.
 --
+-- It also stamps that DID as aicc_did and exports it, so the trunk leg carries
+-- it (see below, #160).
+--
 -- Nothing here may fail the call. This runs between the agent answering and
 -- the trunk leg being placed, on a call that is already up: an unreachable
 -- database or a DID with no row costs a recording, never a conversation. That
@@ -36,18 +39,48 @@ local function log(level, message)
   freeswitch.consoleLog(level, "aicc_outbound: " .. message .. "\n")
 end
 
--- A transfer into this path from a call already being recorded keeps that file
--- going: recording_follow_transfer rides the leg, and a second record_session
--- on the same channel would fight it for the same key.
-if session:getVariable("aicc_recording_started") == "true" then
-  return
-end
-
 -- The DID the far end sees. trunk_clid is set by the trunk dialplan before it
 -- calls this script; effective_caller_id_number is what it was derived from.
 local did = session:getVariable("trunk_clid")
 if did == nil or did == "" then
   did = session:getVariable("effective_caller_id_number")
+end
+
+-- Stamp that DID on the channel and export it, so the trunk leg the dialplan's
+-- bridge raises next inherits it (#160): the registry counts the outbound lines
+-- a DID has in use from aicc_did on the trunk leg, and a call an agent dialled
+-- by hand reaches the trunk through this script and no other path. It runs
+-- before the early return below so that a call transferred in while already
+-- being recorded is stamped too.
+--
+-- export_vars is appended to, never replaced: inbound exports four names and
+-- the click-to-dial originate exports aicc_call_id, and dropping any of them
+-- would orphan the trunk leg from its call. A name already listed is not
+-- repeated.
+local function with_exported(current, name)
+  if current == nil or current == "" then
+    return name
+  end
+  for item in string.gmatch(current, "[^,]+") do
+    if item == name then
+      return current
+    end
+  end
+  return current .. "," .. name
+end
+
+if did == nil or did == "" then
+  log("debug", "no DID on this call; the trunk leg is not stamped")
+else
+  session:setVariable("aicc_did", did)
+  session:setVariable("export_vars", with_exported(session:getVariable("export_vars"), "aicc_did"))
+end
+
+-- A transfer into this path from a call already being recorded keeps that file
+-- going: recording_follow_transfer rides the leg, and a second record_session
+-- on the same channel would fight it for the same key.
+if session:getVariable("aicc_recording_started") == "true" then
+  return
 end
 
 local enabled = false

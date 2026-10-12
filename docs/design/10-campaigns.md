@@ -913,6 +913,9 @@ Nothing the contract does not offer.
   where a call answered while the bots are full is silence.
 - **P5, #159. `isDialable` accepts a leading `+` (§9.1).**
 - **P6, #160. `aicc_outbound.lua` sets and exports `aicc_did` on the outbound leg (§6.6).**
+  Built: the script stamps and appends to `export_vars` before its early return; `telephony.Normalize`
+  exposes the leg's value as `SwitchEvent.LegDID` and keeps it out of `Bot.DID` on an observed trunk
+  leg (outbound, not the bot leg, not `DIAL_AI`), so a human call's CDR from/to/DID is unchanged.
   Needed only if the per-DID line limit is in phase 1; cuttable.
 - **P4, #155. Single-call ring timeout below `AnswerWindow` (§2).**
 
