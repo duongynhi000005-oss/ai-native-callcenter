@@ -109,7 +109,7 @@ The domain model is Genesys-lineage: a Call aggregates Parties; leg events are `
 
 FreeSWITCH gets its directory and `callcenter.conf` from PostgreSQL through mod_lua's XML handler; the Lua actions of its static dialplan (`freeswitch/scripts/*.lua`) query PostgreSQL through mod_pgsql on each call. The Go↔Lua contract is the `luacc.*` views (jsonb flattened; mod_lua has no JSON parser), read by a confined role (`deploy/sql/lua_role.sql`). mod_callcenter uses a dedicated `aicc_fs` database, because its tables are unqualified in `public` and would collide.
 
-### Flow DSL (`internal/flow`; fields in `spec.go`, design in `docs/design/02-ai-voice.md` §3 and §6)
+### Flow DSL (`internal/flow`; fields in `spec.go`, design in `docs/design/02-ai-voice.md` §6 and §7)
 
 - The model owns the conversation; the flow owns the phase. Phases carry instructions and tool allowlists. The tools of one response are judged in the phase it was made in (the last move wins), and a move's `announce` waits for that response to end. Everything checkable is validated at load, not mid-call.
 - The flow owns the bot's voice (`global.voice`, versioned with the persona, A7), never an env var; empty falls back to the profile's voice.

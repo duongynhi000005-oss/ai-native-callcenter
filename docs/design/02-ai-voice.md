@@ -122,7 +122,7 @@ Turn-detection config mapping: `VAD` → `server_vad` with `SilenceMs` (**the de
 
 ## 6. Flow engine (DSL v1) over realtime sessions
 
-Spec = **DSL v2**: ui-test's v1 re-keyed to lowerCamelCase per 07 §7 (`specVersion:"v2"`): `global{persona, rules, voice, fallback, closingTarget, maxTurns, maxTurnsWithoutTool, maxDurationSec, tools, transitions}`, `nodes{instruction, announce, tools, transitions, isTerminal}`, `tools{description, params(JSON-schema), http{path, body template, success predicate, result slots}}` — all user-facing strings bilingual `{en,zh}`; the session uses the entry point's language. The five v1 reference flows are converted by a one-shot script; v1 files stay reference-only.
+Spec = **DSL v2**: ui-test's v1 re-keyed to lowerCamelCase per 07 §7 (`specVersion:"v2"`): top-level `id, specVersion, entry, initialNode, global, nodes, tools`; `global{persona, rules, voice, temperature, fallbackTarget, closingTarget, maxTurns, maxTurnsWithoutTool, maxDurationSec, alwaysAllowedTools, apiBaseEnv (parsed, no effect), transitions}`, `nodes{instruction, announce, tools, transitions, isTerminal}`, `tools{description, parameters(JSON-schema), http{path, method, body template, successWhen, errorFrom, result slots}}` — all user-facing strings bilingual `{en,zh}`; the session uses the entry point's language. The five v1 reference flows are converted by a one-shot script; v1 files stay reference-only.
 
 `announce` (added 2026-09-18) is optional and is the one field of a node that is not a brief: a line the bot says **as written** on entering the phase, rendered with `{slots.x}` exactly as `instruction` is. It exists for the two ends of the range an instruction cannot reach — a closing line a business has signed off, which should not be paraphrased, and an engine that takes no text cue at all, for which a phase whose only job is one sentence has no way to say it. A deployment whose provider is of the second kind sets `Profile.RequiresTerminalAnnounce`, and `flow.RequireTerminalAnnounce` then refuses to **publish** a flow whose terminal phases carry none (422 `TERMINAL_ANNOUNCE_REQUIRED`, `params.nodes` naming them). Publish and not load: the same document is perfectly good where the provider can be cued, and a spec that loads on one installation and not on another would make the dialect a property of the host.
 
@@ -144,9 +144,9 @@ Authoring rule for a flow's closing phases: after "anything else?", a decline ("
 **Built-in tools** (present in every flow's allowed set; not HTTP):
 
 ```jsonc
-transfer_to_agent: { "queue": "enum(flow's queues)", "reason": "enum(flow-defined categories)",
+transfer_to_agent: { "queue": "enum(deployment's queues)", "reason": "string (flow-defined category)",
                      "summary": "string (≤600 chars, caller language)",
-                     "slots": "object (flow-collected fields)" }        // → F2 in design 01; all args → userData
+                     "slots": "object (filled in by the model; the engine's slots are not attached automatically)" }        // → F2 in design 01; all args → userData
 take_message:      { "message": "string", "callbackNumber": "string?" }  // → callbacks table + CDR flag
 hangup:            { "isFarewellSpoken": "boolean" }                     // ends call gracefully
 ```
