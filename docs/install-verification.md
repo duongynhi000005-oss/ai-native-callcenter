@@ -6,6 +6,20 @@ criterion; a step passes only when its criterion is met exactly. This document
 holds the steps and the criteria only. Record the results (versions, outputs,
 pass or fail, elapsed times) in the run log of the release, not here.
 
+What CI already covers, so that this checklist does not repeat it:
+
+- Every pull request that touches `deploy/**`, `scripts/release-bundle.sh`,
+  `scripts/installer-smoke.sh` or `freeswitch/docker-entrypoint.sh` runs
+  `make installer-check` (`.github/workflows/installer.yml`): shellcheck, the
+  installer's unit tests, every compose combination, a dry release bundle.
+- Every tagged release runs `scripts/installer-smoke.sh` (the `smoke` job of
+  `.github/workflows/release.yml`) on amd64 and arm64 Ubuntu 24.04 runners
+  before the GitHub release is published: the stamped installer, from a bundle
+  built in that run, against the just-pushed images, `--provider none`,
+  `aicc doctor` all PASS. It proves the release installs and the stack comes
+  up on a clean Linux host. It does not cover macOS, Docker Desktop, Colima, a
+  second machine on the LAN, audio or a live call; those are this checklist.
+
 Targets:
 
 - **A.** A fresh Ubuntu Server 24.04 VM, x86_64, Docker Engine installed with

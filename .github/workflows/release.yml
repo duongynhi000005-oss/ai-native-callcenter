@@ -25,6 +25,11 @@
 # pre-releases, so a pre-release is installed with its own URL
 # (`releases/download/<tag>/install.sh`) or with `--version <tag>`.
 #
+# The `smoke` job gates the GitHub release: it runs scripts/installer-smoke.sh,
+# the stamped installer against these images (--provider none) on amd64 and
+# arm64, and requires `aicc doctor` to pass. The static checks run on pull
+# requests in installer.yml.
+#
 # Before tagging, name the tag everywhere the deploy-tags job checks: the
 # AICC_FS_IMAGE default in deploy/docker-compose.yml, both image tags in
 # deploy/README.md and deploy/.env.example, and the `git clone --branch <tag>`
@@ -321,9 +326,36 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The release as a user gets it, before it is announced: the stamped
+  # install.sh from a bundle built here, run with --provider none against the
+  # images just pushed, on each architecture the images are built for. aicc
+  # doctor inside the installer must pass; publish waits for both. The images
+  # are already on Docker Hub by now (tags are immutable by convention, never
+  # `latest`), so a failure here blocks the GitHub release, not the images.
+  # Native runners, no QEMU.
+  smoke:
+    name: smoke (${{ matrix.arch }})
+    needs: [image, switch-manifest]
+    if: github.ref_type == 'tag'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the release and run aicc doctor
+        run: scripts/installer-smoke.sh "${GITHUB_REF_NAME}"
+
   publish:
     name: publish
-    needs: [image, switch-manifest]
+    needs: [image, switch-manifest, smoke]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:

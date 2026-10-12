@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Static checks for the one-line installer and the stack files it ships:
+# `make installer-check` (shellcheck, the installer's unit tests, every compose
+# combination, a dry release bundle with its checksums). No image is built or
+# pulled. The release smoke install, which needs the released images, is a job
+# of release.yml.
+name: installer
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'scripts/release-bundle.sh'
+      - 'scripts/installer-smoke.sh'
+      - 'freeswitch/docker-entrypoint.sh'
+      - 'Makefile'
+      - '.github/workflows/installer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'scripts/release-bundle.sh'
+      - 'scripts/installer-smoke.sh'
+      - 'freeswitch/docker-entrypoint.sh'
+      - 'Makefile'
+      - '.github/workflows/installer.yml'
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer-check:
+    name: installer-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # shellcheck and docker compose are on the hosted runner image.
+      - name: make installer-check
+        run: make installer-check
