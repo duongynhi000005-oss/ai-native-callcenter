@@ -102,7 +102,7 @@ func TestARefusedInviteDoesNotLeakItsSlot(t *testing.T) {
 	_, _, p := startUAS(t, func(c *Config) { c.Slots = slots })
 	p.request("INVITE", "v=0\r\ns=broken\r\n") // 488, after the slot was taken
 	p.awaitStatus(488, 2*time.Second)
-	if slots.InUse() != 0 {
-		t.Fatalf("a refused INVITE kept %d slot(s)", slots.InUse())
-	}
+	// The refusal is sent before the deferred release runs, so the slot comes
+	// back a moment after the 488 is on the wire, not before it.
+	waitFor(t, "a refused INVITE to give its slot back", func() bool { return slots.InUse() == 0 })
 }
