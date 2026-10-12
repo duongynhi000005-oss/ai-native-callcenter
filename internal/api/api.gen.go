@@ -1315,7 +1315,7 @@ type CreateCallRequest struct {
 	// Language AI_OUTBOUND only: overrides the DID's language when set.
 	Language *string `json:"language,omitempty"`
 
-	// To The number to dial.
+	// To The number to dial: 3 to 20 digits, optionally with one leading "+" (canonical E.164, for example +8613800138000). A national number is accepted too. The number is dialled and recorded in the call ledger exactly as sent. Spaces, dashes, brackets and a second "+" are refused.
 	To string `json:"to"`
 
 	// UserData Business data attached to the call: the order, ticket or case this conversation is about. Flat key/value only, values strings, because this is read as a list of labelled facts and nothing renders a nested object. At most 32 keys, each value at most 1024 bytes of UTF-8; over either limit the request is refused with 400 USER_DATA_TOO_LARGE rather than truncated — a screen showing half a customer's details, with no sign the other half was sent, is worse than a gap. Omitted and {} mean the same thing: no business data. It never reaches the switch.

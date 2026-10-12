@@ -1929,7 +1929,7 @@ export interface components {
              * @enum {string}
              */
             kind: "AI_OUTBOUND" | "AGENT_OUTBOUND";
-            /** @description The number to dial. */
+            /** @description The number to dial: 3 to 20 digits, optionally with one leading "+" (canonical E.164, for example +8613800138000). A national number is accepted too. The number is dialled and recorded in the call ledger exactly as sent. Spaces, dashes, brackets and a second "+" are refused. */
             to: string;
             /** @description AI_OUTBOUND only: the DID whose flow and caller id the call uses. */
             did?: string;
