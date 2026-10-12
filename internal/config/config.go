@@ -159,6 +159,23 @@ type Config struct {
 	// means unset here, so it cannot blank a profile's own default.
 	ProviderTranscribeModel string
 
+	// Post-call transcription of recordings (issue #27, design 08 section 18).
+	// Off by default; the key is ALIYUN_API_KEY, like every other DashScope
+	// credential. The endpoint is the HTTPS generation URL on the workspace
+	// host, not the WebSocket one AICC_TRANSCRIBE_ENDPOINT holds.
+	IsPostCallTranscribeEnabled bool
+	PostCallTranscribeEndpoint  string
+	PostCallTranscribeModel     string
+	// Recordings shorter or longer than these (seconds) are not transcribed
+	// automatically.
+	PostCallTranscribeMinSec int
+	PostCallTranscribeMaxSec int
+	// PostCallTranscribeDailyMaxMin caps the audio sent per rolling 24 hours,
+	// in minutes; 0 is no cap.
+	PostCallTranscribeDailyMaxMin int
+	PostCallTranscribeConcurrency int
+	PostCallTranscribeMaxAttempts int
+
 	// Recordings. Backend FS keeps files where the switch wrote them;
 	// S3 uploads them to any S3-compatible store and clears the local spool.
 	RecordingBackend string
@@ -335,30 +352,39 @@ func Load() (Config, error) {
 		TranscribeEndpoint:      env("AICC_TRANSCRIBE_ENDPOINT", ""),
 		TranscribeModel:         env("AICC_TRANSCRIBE_MODEL", ""),
 		ProviderTranscribeModel: env("AICC_PROVIDER_TRANSCRIBE_MODEL", ""),
-		Provider:                env("AICC_PROVIDER", "openai"),
-		ProviderEndpoint:        env("AICC_PROVIDER_ENDPOINT", ""),
-		ProviderModel:           env("AICC_PROVIDER_MODEL", ""),
-		OutboundEndpoint:        env("AICC_OUTBOUND_ENDPOINT", ""),
-		OutboundSIPHeaders:      outboundHeaders,
-		outboundSIPHeadersErr:   outboundHeadersErr,
-		OutboundCallerID:        env("AICC_OUTBOUND_CLID", ""),
-		RecordingBackend:        env("AICC_RECORDING_BACKEND", "FS"),
-		RecordingDir:            env("AICC_RECORDING_DIR", ""),
-		S3Endpoint:              env("AICC_S3_ENDPOINT", ""),
-		S3AccessKey:             env("AICC_S3_ACCESS_KEY", ""),
-		S3SecretKey:             env("AICC_S3_SECRET_KEY", ""),
-		S3Bucket:                env("AICC_S3_BUCKET", "aicc-recordings"),
-		S3IsSSL:                 envBool("AICC_S3_SSL", false),
-		SessionTTL:              envDuration("AICC_SESSION_TTL", 12*time.Hour),
-		SessionCookie:           env("AICC_SESSION_COOKIE", "aicc_session"),
-		SecureCookies:           envBool("AICC_SECURE_COOKIES", false),
-		LogLevel:                env("AICC_LOG_LEVEL", "info"),
-		LogDir:                  env("AICC_LOG_DIR", "logs"),
-		OTLPEndpoint:            env("AICC_OTLP_ENDPOINT", ""),
-		ServiceName:             env("AICC_SERVICE_NAME", "aicc"),
-		ExtensionRange:          env("AICC_EXTENSION_RANGE", "1000-1999"),
-		QueueRange:              env("AICC_QUEUE_RANGE", "7000-7999"),
-		RecordingRetentionDays:  envInt("AICC_RECORDING_RETENTION_DAYS", 0),
+
+		IsPostCallTranscribeEnabled:   envBool("AICC_POSTCALL_TRANSCRIBE_ENABLED", false),
+		PostCallTranscribeEndpoint:    env("AICC_POSTCALL_TRANSCRIBE_ENDPOINT", ""),
+		PostCallTranscribeModel:       env("AICC_POSTCALL_TRANSCRIBE_MODEL", "qwen-audio-3.1-asr-flash"),
+		PostCallTranscribeMinSec:      envInt("AICC_POSTCALL_TRANSCRIBE_MIN_SEC", 10),
+		PostCallTranscribeMaxSec:      envInt("AICC_POSTCALL_TRANSCRIBE_MAX_SEC", 3600),
+		PostCallTranscribeDailyMaxMin: envInt("AICC_POSTCALL_TRANSCRIBE_DAILY_MAX_MIN", 600),
+		PostCallTranscribeConcurrency: envInt("AICC_POSTCALL_TRANSCRIBE_CONCURRENCY", 2),
+		PostCallTranscribeMaxAttempts: envInt("AICC_POSTCALL_TRANSCRIBE_MAX_ATTEMPTS", 3),
+		Provider:                      env("AICC_PROVIDER", "openai"),
+		ProviderEndpoint:              env("AICC_PROVIDER_ENDPOINT", ""),
+		ProviderModel:                 env("AICC_PROVIDER_MODEL", ""),
+		OutboundEndpoint:              env("AICC_OUTBOUND_ENDPOINT", ""),
+		OutboundSIPHeaders:            outboundHeaders,
+		outboundSIPHeadersErr:         outboundHeadersErr,
+		OutboundCallerID:              env("AICC_OUTBOUND_CLID", ""),
+		RecordingBackend:              env("AICC_RECORDING_BACKEND", "FS"),
+		RecordingDir:                  env("AICC_RECORDING_DIR", ""),
+		S3Endpoint:                    env("AICC_S3_ENDPOINT", ""),
+		S3AccessKey:                   env("AICC_S3_ACCESS_KEY", ""),
+		S3SecretKey:                   env("AICC_S3_SECRET_KEY", ""),
+		S3Bucket:                      env("AICC_S3_BUCKET", "aicc-recordings"),
+		S3IsSSL:                       envBool("AICC_S3_SSL", false),
+		SessionTTL:                    envDuration("AICC_SESSION_TTL", 12*time.Hour),
+		SessionCookie:                 env("AICC_SESSION_COOKIE", "aicc_session"),
+		SecureCookies:                 envBool("AICC_SECURE_COOKIES", false),
+		LogLevel:                      env("AICC_LOG_LEVEL", "info"),
+		LogDir:                        env("AICC_LOG_DIR", "logs"),
+		OTLPEndpoint:                  env("AICC_OTLP_ENDPOINT", ""),
+		ServiceName:                   env("AICC_SERVICE_NAME", "aicc"),
+		ExtensionRange:                env("AICC_EXTENSION_RANGE", "1000-1999"),
+		QueueRange:                    env("AICC_QUEUE_RANGE", "7000-7999"),
+		RecordingRetentionDays:        envInt("AICC_RECORDING_RETENTION_DAYS", 0),
 
 		WebhookDeliveredRetentionDays: envInt("AICC_WEBHOOK_RETENTION_DELIVERED_DAYS", 7),
 		WebhookFailedRetentionDays:    envInt("AICC_WEBHOOK_RETENTION_FAILED_DAYS", 30),
@@ -414,6 +440,24 @@ func (c Config) validate() error {
 			errs = append(errs, fmt.Errorf("AICC_SIP_WSS_URL must be ws:// or wss://, got %q", c.SIPWSSURL))
 		case u.Host == "":
 			errs = append(errs, fmt.Errorf("AICC_SIP_WSS_URL must name a host, got %q", c.SIPWSSURL))
+		}
+	}
+	if c.IsPostCallTranscribeEnabled {
+		if !strings.HasPrefix(c.PostCallTranscribeEndpoint, "https://") {
+			errs = append(errs, errors.New(
+				"AICC_POSTCALL_TRANSCRIBE_ENDPOINT must be an https:// URL when post-call "+
+					"transcription is enabled: the workspace id is part of the hostname, so "+
+					"there is no default that could work"))
+		}
+		if c.PostCallTranscribeConcurrency < 1 || c.PostCallTranscribeMaxAttempts < 1 ||
+			c.PostCallTranscribeMinSec < 0 || c.PostCallTranscribeDailyMaxMin < 0 {
+			errs = append(errs, errors.New(
+				"AICC_POSTCALL_TRANSCRIBE_CONCURRENCY and _MAX_ATTEMPTS must be at least 1, "+
+					"_MIN_SEC and _DAILY_MAX_MIN at least 0"))
+		}
+		if c.PostCallTranscribeMaxSec != 0 && c.PostCallTranscribeMaxSec < c.PostCallTranscribeMinSec {
+			errs = append(errs, errors.New(
+				"AICC_POSTCALL_TRANSCRIBE_MAX_SEC must not be below _MIN_SEC (0 is no maximum)"))
 		}
 	}
 	if c.IsTranscriptionEnabled {

@@ -259,6 +259,7 @@ const (
 	ErrorCodeSTORAGEDOWN                    ErrorCode = "STORAGE_DOWN"
 	ErrorCodeSWITCHDOWN                     ErrorCode = "SWITCH_DOWN"
 	ErrorCodeTERMINALANNOUNCEREQUIRED       ErrorCode = "TERMINAL_ANNOUNCE_REQUIRED"
+	ErrorCodeTRANSCRIPTIONDISABLED          ErrorCode = "TRANSCRIPTION_DISABLED"
 	ErrorCodeUSERDATATOOLARGE               ErrorCode = "USER_DATA_TOO_LARGE"
 	ErrorCodeUSERSUSPENDED                  ErrorCode = "USER_SUSPENDED"
 	ErrorCodeVALIDATIONFAILED               ErrorCode = "VALIDATION_FAILED"
@@ -316,6 +317,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeSWITCHDOWN:
 		return true
 	case ErrorCodeTERMINALANNOUNCEREQUIRED:
+		return true
+	case ErrorCodeTRANSCRIPTIONDISABLED:
 		return true
 	case ErrorCodeUSERDATATOOLARGE:
 		return true
@@ -505,6 +508,30 @@ func (e PartyState) Valid() bool {
 	}
 }
 
+// Defines values for PostCallTranscriptionStatus.
+const (
+	PostCallTranscriptionStatusDONE    PostCallTranscriptionStatus = "DONE"
+	PostCallTranscriptionStatusFAILED  PostCallTranscriptionStatus = "FAILED"
+	PostCallTranscriptionStatusPENDING PostCallTranscriptionStatus = "PENDING"
+	PostCallTranscriptionStatusRUNNING PostCallTranscriptionStatus = "RUNNING"
+)
+
+// Valid indicates whether the value is a known member of the PostCallTranscriptionStatus enum.
+func (e PostCallTranscriptionStatus) Valid() bool {
+	switch e {
+	case PostCallTranscriptionStatusDONE:
+		return true
+	case PostCallTranscriptionStatusFAILED:
+		return true
+	case PostCallTranscriptionStatusPENDING:
+		return true
+	case PostCallTranscriptionStatusRUNNING:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QueueEventName.
 const (
 	QueueEventNameABANDONED QueueEventName = "ABANDONED"
@@ -526,6 +553,24 @@ func (e QueueEventName) Valid() bool {
 	case QueueEventNameLEFT:
 		return true
 	case QueueEventNameOFFERED:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RecordedChannel.
+const (
+	RecordedChannelCUSTOMER RecordedChannel = "CUSTOMER"
+	RecordedChannelFAREND   RecordedChannel = "FAR_END"
+)
+
+// Valid indicates whether the value is a known member of the RecordedChannel enum.
+func (e RecordedChannel) Valid() bool {
+	switch e {
+	case RecordedChannelCUSTOMER:
+		return true
+	case RecordedChannelFAREND:
 		return true
 	default:
 		return false
@@ -1655,6 +1700,55 @@ type PatchUserDataRequest struct {
 	UserData UserDataPatch `json:"userData"`
 }
 
+// PostCallTranscription A call's post-call transcription: the run, and the segments it produced.
+type PostCallTranscription struct {
+	// Attempts Attempts made by the current run.
+	Attempts int `json:"attempts"`
+
+	// AudioSec Length of the recording sent, which is what the daily cap counts.
+	AudioSec int                `json:"audioSec"`
+	CallID   openapi_types.UUID `json:"callId"`
+
+	// Error Why the latest attempt failed. Present on FAILED, and on PENDING while a retry waits.
+	Error      *string    `json:"error,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+
+	// Model The recogniser model of the latest attempt; empty until a worker has taken the run.
+	Model       string    `json:"model"`
+	RequestedAt time.Time `json:"requestedAt"`
+
+	// Segments Empty until DONE.
+	Segments []PostCallTranscriptionSegment `json:"segments"`
+
+	// StartedAt When a worker last took the run.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+
+	// Status Where a post-call transcription run is. PENDING waits for a worker (or for a retry's backoff), RUNNING is with the recogniser, DONE has its segments, FAILED has given up and carries error.
+	Status PostCallTranscriptionStatus `json:"status"`
+}
+
+// PostCallTranscriptionSegment One recognised stretch of speech.
+type PostCallTranscriptionSegment struct {
+	// Channel Which side of the stereo recording a segment came from. CUSTOMER is the left channel, the caller. FAR_END is the right channel: the bot, then the agent, following the call through transfers; which of them spoke at a given moment is read from the CDR's legs.
+	Channel RecordedChannel `json:"channel"`
+
+	// EndMs Where it ends.
+	EndMs int64 `json:"endMs"`
+
+	// Language As the recogniser reported it; absent when it did not say.
+	Language *string `json:"language,omitempty"`
+
+	// OffsetMs Where the segment starts in the recording.
+	OffsetMs int64 `json:"offsetMs"`
+
+	// Seq Position in the run, from 1, in time order.
+	Seq  int    `json:"seq"`
+	Text string `json:"text"`
+}
+
+// PostCallTranscriptionStatus Where a post-call transcription run is. PENDING waits for a worker (or for a retry's backoff), RUNNING is with the recogniser, DONE has its segments, FAILED has given up and carries error.
+type PostCallTranscriptionStatus string
+
 // Presence One agent's presence. enteredAt is when this state began, which for WRAP_UP is when the call ended — after-call work has no deadline, it ends when the agent files it.
 type Presence struct {
 	// AgentID Whose presence this is. The cockpit needs it to tell its own party from the other side on a call where both parties are agents — an internal extension-to-extension call reaches both of them through /calls/mine, and picking the first party that happens to carry an agentId shows one agent the other one's state.
@@ -1834,6 +1928,9 @@ type QueueWrite struct {
 	// TierRules How a queue widens its agent search over time.
 	TierRules *TierRules `json:"tierRules,omitempty"`
 }
+
+// RecordedChannel Which side of the stereo recording a segment came from. CUSTOMER is the left channel, the caller. FAR_END is the right channel: the bot, then the agent, following the call through transfers; which of them spoke at a given moment is read from the CDR's legs.
+type RecordedChannel string
 
 // Recording One stored audio artifact of a call.
 type Recording struct {
@@ -2622,6 +2719,12 @@ type ServerInterface interface {
 	// GetCallTranscript A call's transcript, from a cursor
 	// (GET /calls/{callId}/transcript)
 	GetCallTranscript(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID, params GetCallTranscriptParams)
+	// GetPostCallTranscription A call's post-call transcription
+	// (GET /calls/{callId}/transcription)
+	GetPostCallTranscription(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID)
+	// RequestPostCallTranscription Transcribe a call's recording
+	// (POST /calls/{callId}/transcription)
+	RequestPostCallTranscription(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID)
 	// TransferCall Transfer the other party away
 	// (POST /calls/{callId}/transfer)
 	TransferCall(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID)
@@ -3030,6 +3133,18 @@ func (_ Unimplemented) ListCallReviews(w http.ResponseWriter, r *http.Request, c
 // GetCallTranscript A call's transcript, from a cursor
 // (GET /calls/{callId}/transcript)
 func (_ Unimplemented) GetCallTranscript(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID, params GetCallTranscriptParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetPostCallTranscription A call's post-call transcription
+// (GET /calls/{callId}/transcription)
+func (_ Unimplemented) GetPostCallTranscription(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// RequestPostCallTranscription Transcribe a call's recording
+// (POST /calls/{callId}/transcription)
+func (_ Unimplemented) RequestPostCallTranscription(w http.ResponseWriter, r *http.Request, callID openapi_types.UUID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -4325,6 +4440,58 @@ func (siw *ServerInterfaceWrapper) GetCallTranscript(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCallTranscript(w, r, callID, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetPostCallTranscription operation middleware
+func (siw *ServerInterfaceWrapper) GetPostCallTranscription(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "callId" -------------
+	var callID openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "callId", chi.URLParam(r, "callId"), &callID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "callId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetPostCallTranscription(w, r, callID)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RequestPostCallTranscription operation middleware
+func (siw *ServerInterfaceWrapper) RequestPostCallTranscription(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "callId" -------------
+	var callID openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "callId", chi.URLParam(r, "callId"), &callID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "callId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RequestPostCallTranscription(w, r, callID)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6094,6 +6261,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/calls/{callId}/transcript", wrapper.GetCallTranscript)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/calls/{callId}/transcription", wrapper.GetPostCallTranscription)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/calls/{callId}/transcription", wrapper.RequestPostCallTranscription)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/calls/{callId}/transfer", wrapper.TransferCall)

@@ -66,6 +66,31 @@ type AuditLog struct {
 	AgentID     *uuid.UUID         `json:"agentId"`
 }
 
+type CallTranscription struct {
+	CallID        uuid.UUID          `json:"callId"`
+	RecordingID   uuid.UUID          `json:"recordingId"`
+	Run           int32              `json:"run"`
+	Status        string             `json:"status"`
+	Model         string             `json:"model"`
+	Attempts      int32              `json:"attempts"`
+	Error         string             `json:"error"`
+	AudioSec      int32              `json:"audioSec"`
+	RequestedAt   pgtype.Timestamptz `json:"requestedAt"`
+	NextAttemptAt pgtype.Timestamptz `json:"nextAttemptAt"`
+	StartedAt     pgtype.Timestamptz `json:"startedAt"`
+	FinishedAt    pgtype.Timestamptz `json:"finishedAt"`
+}
+
+type CallTranscriptionSegment struct {
+	CallID   uuid.UUID `json:"callId"`
+	Seq      int32     `json:"seq"`
+	Channel  string    `json:"channel"`
+	OffsetMs int32     `json:"offsetMs"`
+	EndMs    int32     `json:"endMs"`
+	Text     string    `json:"text"`
+	Language string    `json:"language"`
+}
+
 type Callback struct {
 	ID                uuid.UUID          `json:"id"`
 	CallID            *uuid.UUID         `json:"callId"`

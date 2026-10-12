@@ -90,6 +90,7 @@ type Server struct {
 	catalog     CatalogService
 	contacts    ContactService
 	ledger      *store.LedgerStore
+	postCall    PostCallTranscriber
 	flows       FlowService
 	accounts    AccountService
 	trunks      TrunkReader
@@ -104,6 +105,8 @@ type Server struct {
 
 // Deps are the services the API exposes.
 type Deps struct {
+	// PostCall queues post-call transcription. Nil when the feature is off.
+	PostCall PostCallTranscriber
 	Auth     *auth.Service
 	Hub      *events.Hub
 	Agents   AgentService
@@ -160,6 +163,7 @@ func New(cfg config.Config, deps Deps) *Server {
 		catalog:     deps.Catalog,
 		contacts:    deps.Contacts,
 		ledger:      deps.Ledger,
+		postCall:    deps.PostCall,
 		flows:       deps.Flows,
 		accounts:    deps.Accounts,
 		trunks:      deps.Trunks,
@@ -332,6 +336,12 @@ func (s *Server) router() chi.Router {
 					// handlers draw that line against the call's agent list.
 					private.Get("/calls/{callId}/recordings", op.ListCallRecordings)
 					private.Get("/recordings/{recordingId}/audio", op.GetRecordingAudio)
+
+					// The batch transcript of a recording. Read with the same
+					// rule as the audio; the POST is routed even when the
+					// feature is off, so that it can say so (409).
+					private.Get("/calls/{callId}/transcription", op.GetPostCallTranscription)
+					private.Post("/calls/{callId}/transcription", op.RequestPostCallTranscription)
 
 					private.Get("/cdrs", op.ListCDRs)
 					private.Get("/cdrs/{callId}", op.GetCDR)

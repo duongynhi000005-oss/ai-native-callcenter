@@ -9,6 +9,20 @@ carries the one-line installer's files.
 
 ### Added
 
+- Post-call transcription of recordings with `qwen-audio-3.1-asr-flash`, off by
+  default (`AICC_POSTCALL_TRANSCRIBE_ENABLED`, plus an HTTPS endpoint and
+  `ALIYUN_API_KEY`). A finished call's stereo recording is split into its two
+  channels, cut into clips of at most 4.5 minutes and sent to the model; the
+  segments are stored apart from the live transcript and read with
+  `GET /calls/{callId}/transcription`. Calls whose live transcript already
+  covers both channels are skipped, and recordings outside a minimum and
+  maximum length are too. A daily audio cap, retries with backoff and a
+  concurrency limit bound the cost. `POST /calls/{callId}/transcription`
+  (scope `quality:review`) asks for a call to be transcribed or transcribed
+  again; it answers `409 TRANSCRIPTION_DISABLED` when the feature is off and
+  `429 RATE_LIMITED` at the cap. `aicc transcribe-recordings` plans and runs
+  the same work over existing recordings, with a dry run that prints the audio
+  minutes (#27).
 - `AICC_OUTBOUND_SIP_HEADERS`: `Name=value` pairs, separated by `;`, added as SIP
   headers to the AI outbound customer leg only (not click-to-dial, not the
   bridge to the bot). A deployment behind FreeSBC sets `X-FSBC-Out=1` so the AI

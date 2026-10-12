@@ -72,8 +72,12 @@ const (
 	// registration for the agent's extension: an agent with no phone
 	// cannot be offered a call.
 	CodeDeviceNotRegistered ErrorCode = "DEVICE_NOT_REGISTERED"
-	CodeCallNotFound        ErrorCode = "CALL_NOT_FOUND"
-	CodeNotCallParty        ErrorCode = "NOT_CALL_PARTY"
+	// CodeTranscriptionDisabled refuses a request for post-call transcription
+	// on a deployment that has it off. Not FORBIDDEN: nothing the caller holds
+	// would change the answer; an operator has to enable it.
+	CodeTranscriptionDisabled ErrorCode = "TRANSCRIPTION_DISABLED"
+	CodeCallNotFound          ErrorCode = "CALL_NOT_FOUND"
+	CodeNotCallParty          ErrorCode = "NOT_CALL_PARTY"
 	// CodeOperationNotAllowedForCallType refuses a control this kind of
 	// call does not offer, rather than a control this caller may not use.
 	CodeOperationNotAllowedForCallType ErrorCode = "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE"
