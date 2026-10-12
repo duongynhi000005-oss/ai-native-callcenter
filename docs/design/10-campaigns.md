@@ -693,10 +693,24 @@ Every number the dialer or DNC compares is canonical E.164 (`+` and 8–15 digit
 With country code 86, `+8613800138000` and `138 0013 8000` are one contact, and a DNC entry typed
 either way matches both.
 
-**Dial string (decided):** FreeSBC expects E.164 and also accepts national form. Campaigns always
-dial canonical E.164 with `+`. `isDialable` (F10) is widened to allow **one leading `+`**, nothing
-else. A single `createCall` may still pass a national `to`; FreeSBC accepts it and behaviour does
-not change.
+**Dial string (decided):** `isDialable` (F10) is widened to allow **one leading `+`**, nothing
+else. A single `createCall` may still pass a national `to`, and is dialled as sent.
+
+**What the trunk is sent (decided by the owner, 2026-10-12, after a live finding).** The draft
+assumed FreeSBC expects E.164 and also accepts national form. On the development trunk it does
+not: `+8618688886666` and `8618688886666` are both answered `480 Temporarily Unavailable`, and
+`18688886666` connects. Storage and comparison stay canonical E.164 whatever the trunk wants; only
+the string handed to the switch changes, by the deployment setting `AICC_OUTBOUND_DIAL_FORM`:
+
+- `E164` (default): `+<cc><number>`;
+- `E164_NO_PLUS`: `<cc><number>`;
+- `NATIONAL`: the number without `+<cc>`, using the campaign's `defaultCountryCode`, else
+  `AICC_DEFAULT_COUNTRY_CODE`. A number from another country is dialled as E.164, with one WARN
+  per campaign.
+
+The attempt and the contact keep `number_e164`; the CDR's `to` is the dialled string. A trunk
+prefix such as a landline area code's leading `0` is not restored (known limit). A single
+`createCall` is not converted.
 
 ### 9.2 Import
 
