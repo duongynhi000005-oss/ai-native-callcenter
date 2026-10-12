@@ -108,6 +108,11 @@ type LiveChannel struct {
 	// attempt (VarCampaignID, VarAttemptID); empty otherwise.
 	CampaignID string
 	AttemptID  string
+	// OutboundLineDID is the DID of a leg that takes a carrier line on it
+	// (OutboundLineLeg); empty for any other leg. DialedNumber is the number the
+	// leg was dialled at.
+	OutboundLineDID string
+	DialedNumber    string
 }
 
 // ErrChannelGone reports that the switch no longer has the channel asked about.
@@ -537,6 +542,8 @@ func liveChannelOf(d dumped, callID uuid.UUID, byID map[string]dumped) LiveChann
 	}
 	if ev, ok := Normalize(d.event("CHANNEL_CREATE", time.Time{}, nil)); ok {
 		ch.IsBotLeg = isBotLeg(ev)
+		ch.OutboundLineDID, _ = OutboundLineLeg(ev)
+		ch.DialedNumber = ev.DestinationNumber
 	}
 	if ch.PeerChannelID == "" {
 		return ch

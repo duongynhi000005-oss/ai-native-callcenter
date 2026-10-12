@@ -239,6 +239,7 @@ func (s *Service) jobExpired(job *trackedJob) {
 	if s.isLive != nil && s.isLive(job.callID) {
 		return
 	}
+	s.lines.Release(job.callID)
 	s.log.Warn("originate job never reported and the call has no cdr",
 		"callId", job.callID, "jobId", job.jobID, "placedAt", job.placedAt)
 }
@@ -248,6 +249,8 @@ func (s *Service) jobExpired(job *trackedJob) {
 // cause. The caller has already removed the job from the map, which is what
 // makes this run once.
 func (s *Service) failPlacement(job *trackedJob, cause string) {
+	// No channel was ever made, so no call will end to give the line back.
+	s.lines.Release(job.callID)
 	s.mu.Lock()
 	delete(s.pending, job.legID)
 	s.mu.Unlock()

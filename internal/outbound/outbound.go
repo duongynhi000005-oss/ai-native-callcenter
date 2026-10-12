@@ -147,6 +147,8 @@ type Service struct {
 	// callData holds what a placed call was asked to carry until the call
 	// itself exists to hold it.
 	callData *CallData
+	// lines is the DIDs' outbound line account (lines.go).
+	lines *Lines
 
 	mu      sync.Mutex
 	pending map[string]*pendingLeg // by channel id
@@ -237,6 +239,7 @@ func New(cfg Config, sw Switch, dids DIDSource, numbers NumberPlan,
 		isLive:   isLive,
 		limiter:  NewLimiter(cfg.RatePerSec),
 		callData: NewCallData(),
+		lines:    NewLines(),
 		log:      log,
 		pending:  map[string]*pendingLeg{},
 		holds:    map[string]*slotHold{},
@@ -304,6 +307,10 @@ var (
 	// ErrBadRingTimeout means a ring timeout that would let the leg ring past
 	// the answer window.
 	ErrBadRingTimeout = fmt.Errorf("outbound: ring timeout must be positive and strictly below the answer window")
+	// ErrDIDChannelsExhausted means the DID the call goes out from is at its
+	// outbound line limit (dids.max_outbound_channels). Nothing was sent and
+	// nothing is recorded: the CDR is the ledger of calls placed.
+	ErrDIDChannelsExhausted = fmt.Errorf("outbound: the DID is at its outbound line limit")
 )
 
 // pinCodecs adds the G.711 pin on legs that leave through sofia. Loopback
@@ -566,6 +573,16 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		return uuid.Nil, err
 	}
 	vars["effective_caller_id_number"] = clid
+	// The line the call will take on the number it goes out from. Reserved from
+	// now, when the agent's leg is about to ring, a few seconds before the
+	// carrier line is taken: conservative, and the agent's phone answers by
+	// itself. The trunk leg inherits aicc_call_id, so it is not counted again.
+	if !s.takeLine(callID, clid, s.limitOf(ctx, clid)) {
+		if s.callData != nil {
+			s.callData.Drop(callID)
+		}
+		return uuid.Nil, ErrDIDChannelsExhausted
+	}
 	// Registered before the originate: the leg's CHANNEL_CREATE can be
 	// dispatched before the bgapi reply is (jobs.go).
 	job := &trackedJob{
@@ -577,6 +594,7 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	jobID, err := s.sw.Originate(agentLeg, s.sw.Endpoint(agentExtension), vars)
 	if err != nil {
 		s.abandonLeg(job)
+		s.lines.Release(callID)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
@@ -592,6 +610,61 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	s.log.Info("click-to-dial placed", "callId", callID,
 		"agentExtension", agentExtension, "destination", destination)
 	return callID, nil
+}
+
+// takeLine reserves a line on did for the call and sweeps, now and then,
+// reservations whose release was never signalled.
+func (s *Service) takeLine(callID uuid.UUID, did string, limit *int) bool {
+	s.lines.Sweep(s.cfg.AnswerWindow+2*jobMargin, s.isLiveCall)
+	return s.lines.Reserve(callID, did, limit)
+}
+
+func (s *Service) isLiveCall(callID uuid.UUID) bool { return s.isLive != nil && s.isLive(callID) }
+
+// limitOf is the outbound line limit of the number, nil when it has none or is
+// not a DID of the catalog (a caller id set by configuration may not be). A
+// failing lookup counts as no limit: the call is not refused for want of a
+// figure it could not read.
+func (s *Service) limitOf(ctx context.Context, number string) *int {
+	dids, err := s.dids.DIDs(ctx)
+	if err != nil {
+		s.log.Warn("outbound line limit unreadable; not applied", "did", number, "error", err)
+		return nil
+	}
+	for _, d := range dids {
+		if d.Number == number {
+			return d.MaxOutboundChannels
+		}
+	}
+	return nil
+}
+
+// CallEnded gives back the line a call placed here held: its last leg hung up.
+// Wire it to the registry's call-finished and call-retired hooks; it is safe to
+// call more than once and for calls that held none.
+func (s *Service) CallEnded(callID uuid.UUID) { s.lines.Release(callID) }
+
+// SetLinesFreedObserver installs a function told whenever outbound lines are
+// given back (a call ended, an originate failed). It must not block. Set before
+// the service is used.
+func (s *Service) SetLinesFreedObserver(f func()) { s.lines.SetOnFree(f) }
+
+// LinesInUse is the outbound lines held on a DID now.
+func (s *Service) LinesInUse(did string) int { return s.lines.InUse(did) }
+
+// DIDLimits lists the DIDs that have an outbound line limit, with the limit.
+func (s *Service) DIDLimits(ctx context.Context) (map[string]int, error) {
+	dids, err := s.dids.DIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]int{}
+	for _, d := range dids {
+		if d.MaxOutboundChannels != nil {
+			out[d.Number] = *d.MaxOutboundChannels
+		}
+	}
+	return out, nil
 }
 
 // Data exposes what placed calls were asked to carry, for the parts that build
@@ -697,6 +770,13 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		return Placement{}, err
 	}
 
+	// A line on the DID, taken before anything is sent so that originates fired
+	// in the same instant cannot all pass the limit. Given back on every way
+	// out below that sends nothing, and when the call ends (CallEnded).
+	if !s.takeLine(callID, did.Number, did.MaxOutboundChannels) {
+		return Placement{}, ErrDIDChannelsExhausted
+	}
+
 	// Before the originate, because the call can exist before this returns:
 	// the switch raises the channel and the registry mints the call from it
 	// while we are still here. Dropped again on any failure below, so a call
@@ -757,6 +837,7 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 	jobID, err := s.sw.Originate(customerLeg, endpoint, vars)
 	if err != nil {
 		s.abandonLeg(job)
+		s.lines.Release(callID)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
@@ -980,6 +1061,7 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 	switch ev.Kind {
 	case telephony.KindChannelCreate:
 		s.noteChannel(ev.ChannelID)
+		s.observeLine(ev)
 	case telephony.KindChannelAnswer:
 		s.mu.Lock()
 		leg := s.pending[ev.ChannelID]
@@ -1011,6 +1093,7 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 		// wait on that.
 		go leg.onAnswer()
 	case telephony.KindChannelHangup:
+		s.lines.Unobserve(ev.ChannelID)
 		s.mu.Lock()
 		delete(s.pending, ev.ChannelID)
 		h := s.holds[ev.ChannelID]

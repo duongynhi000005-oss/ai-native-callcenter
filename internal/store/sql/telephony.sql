@@ -84,8 +84,9 @@ ORDER BY q.name;
 
 -- name: CreateDID :one
 INSERT INTO dids (id, number, language, flow_id, fallback_queue_id,
-                  is_recording_enabled, description, is_enabled, allow_inbound, allow_outbound, is_default_outbound)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                  is_recording_enabled, description, is_enabled, allow_inbound, allow_outbound, is_default_outbound,
+                  max_outbound_channels)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING *;
 
 -- Move the default-outbound flag off whoever holds it. Run in the same
@@ -106,7 +107,8 @@ SELECT * FROM dids ORDER BY number;
 UPDATE dids
 SET language = $2, flow_id = $3, fallback_queue_id = $4,
     is_recording_enabled = $5, description = $6, is_enabled = $7,
-    allow_inbound = $8, allow_outbound = $9, is_default_outbound = $10
+    allow_inbound = $8, allow_outbound = $9, is_default_outbound = $10,
+    max_outbound_channels = $11
 WHERE id = $1
 RETURNING *;
 

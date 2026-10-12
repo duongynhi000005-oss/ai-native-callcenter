@@ -401,6 +401,29 @@ func isBotLeg(ev SwitchEvent) bool {
 	return ev.Direction == DirectionOutbound && did != "" && ev.DestinationNumber == did
 }
 
+// OutboundLineLeg recognizes a created channel that takes a carrier line on a
+// DID without this application having placed it: an agent dialling by hand
+// through the dialplan (design 10 section 6.6). It is an outbound-direction leg
+// that carries the DID it goes out from (SwitchEvent.LegDID, stamped by aicc_outbound.lua)
+// and is none of the other things that carry the same variable: the leg towards
+// the bot, a queue delivery to an agent, a leg the dialplan raised between two
+// extensions, a call typed INBOUND or INTERNAL by whoever placed it. It returns
+// the DID.
+func OutboundLineLeg(ev SwitchEvent) (did string, ok bool) {
+	if ev.Raw == nil || ev.Direction != DirectionOutbound {
+		return "", false
+	}
+	did = ev.LegDID
+	if did == "" || isBotLeg(ev) || ev.Raw.Variable(VarPlacedBy) == PlacedByDialAI || ev.MemberChannelID != "" || ev.ParentChannelID != "" {
+		return "", false
+	}
+	switch events.CallType(ev.CallTypeHint) {
+	case events.CallTypeInbound, events.CallTypeInternal:
+		return "", false
+	}
+	return did, true
+}
+
 // reidentify moves a channel from a provisional call to its minted identity
 // once an event reveals it. The caller's CHANNEL_CREATE fires before the
 // dialplan runs, so the caller is always adopted provisionally first; the

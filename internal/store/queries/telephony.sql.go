@@ -28,23 +28,25 @@ func (q *Queries) ClearDefaultOutbound(ctx context.Context, id uuid.UUID) error 
 
 const createDID = `-- name: CreateDID :one
 INSERT INTO dids (id, number, language, flow_id, fallback_queue_id,
-                  is_recording_enabled, description, is_enabled, allow_inbound, allow_outbound, is_default_outbound)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound
+                  is_recording_enabled, description, is_enabled, allow_inbound, allow_outbound, is_default_outbound,
+                  max_outbound_channels)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+RETURNING id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels
 `
 
 type CreateDIDParams struct {
-	ID                 uuid.UUID  `json:"id"`
-	Number             string     `json:"number"`
-	Language           string     `json:"language"`
-	FlowID             *uuid.UUID `json:"flowId"`
-	FallbackQueueID    *uuid.UUID `json:"fallbackQueueId"`
-	IsRecordingEnabled bool       `json:"isRecordingEnabled"`
-	Description        string     `json:"description"`
-	IsEnabled          bool       `json:"isEnabled"`
-	AllowInbound       bool       `json:"allowInbound"`
-	AllowOutbound      bool       `json:"allowOutbound"`
-	IsDefaultOutbound  bool       `json:"isDefaultOutbound"`
+	ID                  uuid.UUID  `json:"id"`
+	Number              string     `json:"number"`
+	Language            string     `json:"language"`
+	FlowID              *uuid.UUID `json:"flowId"`
+	FallbackQueueID     *uuid.UUID `json:"fallbackQueueId"`
+	IsRecordingEnabled  bool       `json:"isRecordingEnabled"`
+	Description         string     `json:"description"`
+	IsEnabled           bool       `json:"isEnabled"`
+	AllowInbound        bool       `json:"allowInbound"`
+	AllowOutbound       bool       `json:"allowOutbound"`
+	IsDefaultOutbound   bool       `json:"isDefaultOutbound"`
+	MaxOutboundChannels *int32     `json:"maxOutboundChannels"`
 }
 
 func (q *Queries) CreateDID(ctx context.Context, arg CreateDIDParams) (Did, error) {
@@ -60,6 +62,7 @@ func (q *Queries) CreateDID(ctx context.Context, arg CreateDIDParams) (Did, erro
 		arg.AllowInbound,
 		arg.AllowOutbound,
 		arg.IsDefaultOutbound,
+		arg.MaxOutboundChannels,
 	)
 	var i Did
 	err := row.Scan(
@@ -75,6 +78,7 @@ func (q *Queries) CreateDID(ctx context.Context, arg CreateDIDParams) (Did, erro
 		&i.AllowInbound,
 		&i.AllowOutbound,
 		&i.IsDefaultOutbound,
+		&i.MaxOutboundChannels,
 	)
 	return i, err
 }
@@ -198,7 +202,7 @@ func (q *Queries) CreateQueue(ctx context.Context, arg CreateQueueParams) (Queue
 
 const defaultOutboundDID = `-- name: DefaultOutboundDID :one
 
-SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound FROM dids WHERE is_default_outbound AND is_enabled
+SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels FROM dids WHERE is_default_outbound AND is_enabled
 `
 
 // The number a call this platform places comes from when nothing names one.
@@ -220,6 +224,7 @@ func (q *Queries) DefaultOutboundDID(ctx context.Context) (Did, error) {
 		&i.AllowInbound,
 		&i.AllowOutbound,
 		&i.IsDefaultOutbound,
+		&i.MaxOutboundChannels,
 	)
 	return i, err
 }
@@ -261,7 +266,7 @@ func (q *Queries) DeleteQueue(ctx context.Context, id uuid.UUID) (int64, error) 
 }
 
 const getDIDByNumber = `-- name: GetDIDByNumber :one
-SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound FROM dids WHERE number = $1
+SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels FROM dids WHERE number = $1
 `
 
 func (q *Queries) GetDIDByNumber(ctx context.Context, number string) (Did, error) {
@@ -280,6 +285,7 @@ func (q *Queries) GetDIDByNumber(ctx context.Context, number string) (Did, error
 		&i.AllowInbound,
 		&i.AllowOutbound,
 		&i.IsDefaultOutbound,
+		&i.MaxOutboundChannels,
 	)
 	return i, err
 }
@@ -336,7 +342,7 @@ func (q *Queries) GetQueue(ctx context.Context, id uuid.UUID) (Queue, error) {
 }
 
 const listDIDs = `-- name: ListDIDs :many
-SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound FROM dids ORDER BY number
+SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels FROM dids ORDER BY number
 `
 
 func (q *Queries) ListDIDs(ctx context.Context) ([]Did, error) {
@@ -361,6 +367,7 @@ func (q *Queries) ListDIDs(ctx context.Context) ([]Did, error) {
 			&i.AllowInbound,
 			&i.AllowOutbound,
 			&i.IsDefaultOutbound,
+			&i.MaxOutboundChannels,
 		); err != nil {
 			return nil, err
 		}
@@ -675,22 +682,24 @@ const updateDID = `-- name: UpdateDID :one
 UPDATE dids
 SET language = $2, flow_id = $3, fallback_queue_id = $4,
     is_recording_enabled = $5, description = $6, is_enabled = $7,
-    allow_inbound = $8, allow_outbound = $9, is_default_outbound = $10
+    allow_inbound = $8, allow_outbound = $9, is_default_outbound = $10,
+    max_outbound_channels = $11
 WHERE id = $1
-RETURNING id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound
+RETURNING id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels
 `
 
 type UpdateDIDParams struct {
-	ID                 uuid.UUID  `json:"id"`
-	Language           string     `json:"language"`
-	FlowID             *uuid.UUID `json:"flowId"`
-	FallbackQueueID    *uuid.UUID `json:"fallbackQueueId"`
-	IsRecordingEnabled bool       `json:"isRecordingEnabled"`
-	Description        string     `json:"description"`
-	IsEnabled          bool       `json:"isEnabled"`
-	AllowInbound       bool       `json:"allowInbound"`
-	AllowOutbound      bool       `json:"allowOutbound"`
-	IsDefaultOutbound  bool       `json:"isDefaultOutbound"`
+	ID                  uuid.UUID  `json:"id"`
+	Language            string     `json:"language"`
+	FlowID              *uuid.UUID `json:"flowId"`
+	FallbackQueueID     *uuid.UUID `json:"fallbackQueueId"`
+	IsRecordingEnabled  bool       `json:"isRecordingEnabled"`
+	Description         string     `json:"description"`
+	IsEnabled           bool       `json:"isEnabled"`
+	AllowInbound        bool       `json:"allowInbound"`
+	AllowOutbound       bool       `json:"allowOutbound"`
+	IsDefaultOutbound   bool       `json:"isDefaultOutbound"`
+	MaxOutboundChannels *int32     `json:"maxOutboundChannels"`
 }
 
 func (q *Queries) UpdateDID(ctx context.Context, arg UpdateDIDParams) (Did, error) {
@@ -705,6 +714,7 @@ func (q *Queries) UpdateDID(ctx context.Context, arg UpdateDIDParams) (Did, erro
 		arg.AllowInbound,
 		arg.AllowOutbound,
 		arg.IsDefaultOutbound,
+		arg.MaxOutboundChannels,
 	)
 	var i Did
 	err := row.Scan(
@@ -720,6 +730,7 @@ func (q *Queries) UpdateDID(ctx context.Context, arg UpdateDIDParams) (Did, erro
 		&i.AllowInbound,
 		&i.AllowOutbound,
 		&i.IsDefaultOutbound,
+		&i.MaxOutboundChannels,
 	)
 	return i, err
 }

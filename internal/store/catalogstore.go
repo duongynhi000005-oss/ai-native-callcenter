@@ -431,17 +431,18 @@ func (c *CatalogStore) ListDIDs(ctx context.Context) ([]catalog.DID, error) {
 func (c *CatalogStore) CreateDID(ctx context.Context, d catalog.DID) (catalog.DID, error) {
 	return c.writeDIDTx(ctx, d, func(qtx *queries.Queries) (queries.Did, error) {
 		return qtx.CreateDID(ctx, queries.CreateDIDParams{
-			ID:                 d.ID,
-			Number:             d.Number,
-			Language:           d.Language,
-			FlowID:             d.FlowID,
-			FallbackQueueID:    d.FallbackQueueID,
-			IsRecordingEnabled: d.IsRecordingEnabled,
-			Description:        d.Description,
-			IsEnabled:          d.IsEnabled,
-			AllowInbound:       d.AllowInbound,
-			AllowOutbound:      d.AllowOutbound,
-			IsDefaultOutbound:  d.IsDefaultOutbound,
+			ID:                  d.ID,
+			Number:              d.Number,
+			Language:            d.Language,
+			FlowID:              d.FlowID,
+			FallbackQueueID:     d.FallbackQueueID,
+			IsRecordingEnabled:  d.IsRecordingEnabled,
+			Description:         d.Description,
+			IsEnabled:           d.IsEnabled,
+			AllowInbound:        d.AllowInbound,
+			AllowOutbound:       d.AllowOutbound,
+			IsDefaultOutbound:   d.IsDefaultOutbound,
+			MaxOutboundChannels: int32Ptr(d.MaxOutboundChannels),
 		})
 	})
 }
@@ -476,16 +477,17 @@ func (c *CatalogStore) UpdateDID(ctx context.Context, d catalog.DID) (catalog.DI
 	}
 	return c.writeDIDTx(ctx, d, func(qtx *queries.Queries) (queries.Did, error) {
 		return qtx.UpdateDID(ctx, queries.UpdateDIDParams{
-			ID:                 d.ID,
-			Language:           d.Language,
-			FlowID:             d.FlowID,
-			FallbackQueueID:    d.FallbackQueueID,
-			IsRecordingEnabled: d.IsRecordingEnabled,
-			Description:        d.Description,
-			IsEnabled:          d.IsEnabled,
-			AllowInbound:       d.AllowInbound,
-			AllowOutbound:      d.AllowOutbound,
-			IsDefaultOutbound:  d.IsDefaultOutbound,
+			ID:                  d.ID,
+			Language:            d.Language,
+			FlowID:              d.FlowID,
+			FallbackQueueID:     d.FallbackQueueID,
+			IsRecordingEnabled:  d.IsRecordingEnabled,
+			Description:         d.Description,
+			IsEnabled:           d.IsEnabled,
+			AllowInbound:        d.AllowInbound,
+			AllowOutbound:       d.AllowOutbound,
+			IsDefaultOutbound:   d.IsDefaultOutbound,
+			MaxOutboundChannels: int32Ptr(d.MaxOutboundChannels),
 		})
 	})
 }
@@ -530,17 +532,18 @@ func (c *CatalogStore) DeleteDID(ctx context.Context, id uuid.UUID) error {
 
 func didOf(r queries.Did) catalog.DID {
 	return catalog.DID{
-		ID:                 r.ID,
-		Number:             r.Number,
-		Language:           r.Language,
-		FlowID:             r.FlowID,
-		FallbackQueueID:    r.FallbackQueueID,
-		IsRecordingEnabled: r.IsRecordingEnabled,
-		Description:        r.Description,
-		IsEnabled:          r.IsEnabled,
-		AllowInbound:       r.AllowInbound,
-		AllowOutbound:      r.AllowOutbound,
-		IsDefaultOutbound:  r.IsDefaultOutbound,
+		ID:                  r.ID,
+		Number:              r.Number,
+		Language:            r.Language,
+		FlowID:              r.FlowID,
+		FallbackQueueID:     r.FallbackQueueID,
+		IsRecordingEnabled:  r.IsRecordingEnabled,
+		Description:         r.Description,
+		IsEnabled:           r.IsEnabled,
+		AllowInbound:        r.AllowInbound,
+		AllowOutbound:       r.AllowOutbound,
+		IsDefaultOutbound:   r.IsDefaultOutbound,
+		MaxOutboundChannels: intPtr(r.MaxOutboundChannels),
 	}
 }
 
@@ -565,4 +568,20 @@ func (c *CatalogStore) publishedSpec(ctx context.Context, flowID uuid.UUID) (*fl
 		return nil, fmt.Errorf("published flow %s: %w", flowID, err)
 	}
 	return spec, nil
+}
+
+func int32Ptr(v *int) *int32 {
+	if v == nil {
+		return nil
+	}
+	n := int32(*v)
+	return &n
+}
+
+func intPtr(v *int32) *int {
+	if v == nil {
+		return nil
+	}
+	n := int(*v)
+	return &n
 }

@@ -393,6 +393,9 @@ func TestValidate(t *testing.T) {
 			if tt.cfg.OutboundMaxRinging == 0 {
 				tt.cfg.OutboundMaxRinging = DefaultOutboundMaxRinging
 			}
+			if tt.cfg.OverflowStopRate == 0 {
+				tt.cfg.OverflowTightenRate, tt.cfg.OverflowStopRate = DefaultOverflowTightenRate, DefaultOverflowStopRate
+			}
 			err := tt.cfg.validate()
 			if tt.wantErr == "" {
 				if err != nil {

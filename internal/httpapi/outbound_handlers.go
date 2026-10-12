@@ -318,6 +318,9 @@ func writeOutboundError(w http.ResponseWriter, err error) {
 	case errors.Is(err, outbound.ErrNumberOnDNC):
 		writeError(w, http.StatusUnprocessableEntity, CodeNumberOnDNC,
 			"that number is on the do-not-call list", nil)
+	case errors.Is(err, outbound.ErrDIDChannelsExhausted):
+		writeError(w, http.StatusConflict, CodeDIDChannelsExhausted,
+			"the number is at its outbound line limit; retry when a call on it ends", nil)
 	case errors.Is(err, outbound.ErrBadNumber):
 		writeError(w, http.StatusBadRequest, CodeValidationFailed, "not a dialable number", nil)
 	case errors.Is(err, outbound.ErrNoDefaultOutbound):

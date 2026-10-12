@@ -175,6 +175,7 @@ func (s *Service) Recover(ctx context.Context, live []telephony.LiveChannel,
 	hasBotSession func(uuid.UUID) bool, isColdStart bool) RecoveryReport {
 
 	hasBot := func(id uuid.UUID) bool { return hasBotSession != nil && hasBotSession(id) }
+	s.rebuildLines(live)
 
 	var rep RecoveryReport
 	for _, ch := range live {

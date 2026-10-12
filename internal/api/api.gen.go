@@ -557,6 +557,7 @@ const (
 	ErrorCodeCAMPAIGNWINDOWOUTSIDELIMIT     ErrorCode = "CAMPAIGN_WINDOW_OUTSIDE_LIMIT"
 	ErrorCodeCONFLICT                       ErrorCode = "CONFLICT"
 	ErrorCodeDEVICENOTREGISTERED            ErrorCode = "DEVICE_NOT_REGISTERED"
+	ErrorCodeDIDCHANNELSEXHAUSTED           ErrorCode = "DID_CHANNELS_EXHAUSTED"
 	ErrorCodeEXTENSIONASSIGNEDTOAGENT       ErrorCode = "EXTENSION_ASSIGNED_TO_AGENT"
 	ErrorCodeEXTENSIONINUSE                 ErrorCode = "EXTENSION_IN_USE"
 	ErrorCodeEXTENSIONPOOLEXHAUSTED         ErrorCode = "EXTENSION_POOL_EXHAUSTED"
@@ -611,6 +612,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeCONFLICT:
 		return true
 	case ErrorCodeDEVICENOTREGISTERED:
+		return true
+	case ErrorCodeDIDCHANNELSEXHAUSTED:
 		return true
 	case ErrorCodeEXTENSIONASSIGNEDTOAGENT:
 		return true
@@ -2094,7 +2097,10 @@ type DID struct {
 
 	// Language Lowercase BCP 47 subtag, at most 8 characters. Sets the greeting and the prompt language, nothing else. It selects neither the provider, which is fixed per deployment, nor the voice, which comes from the flow (global.voice) or, when the flow names none, the provider's default.
 	Language string `json:"language"`
-	Number   string `json:"number"`
+
+	// MaxOutboundChannels How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit.
+	MaxOutboundChannels *int   `json:"maxOutboundChannels,omitempty"`
+	Number              string `json:"number"`
 }
 
 // DIDList defines model for DIDList.
@@ -2120,7 +2126,10 @@ type DIDWrite struct {
 	IsEnabled          *bool   `json:"isEnabled,omitempty"`
 	IsRecordingEnabled *bool   `json:"isRecordingEnabled,omitempty"`
 	Language           *string `json:"language,omitempty"`
-	Number             string  `json:"number"`
+
+	// MaxOutboundChannels How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit.
+	MaxOutboundChannels *int   `json:"maxOutboundChannels,omitempty"`
+	Number              string `json:"number"`
 }
 
 // DTMFRequest defines model for DTMFRequest.

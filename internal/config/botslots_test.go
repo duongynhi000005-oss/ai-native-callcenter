@@ -4,6 +4,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,62 @@ func TestBotCapacityAndOverflowSettings(t *testing.T) {
 			if c.BotInboundReserve != tt.wantReserve || c.OverflowHold != tt.wantHold {
 				t.Errorf("reserve %d hold %s, want %d and %s",
 					c.BotInboundReserve, c.OverflowHold, tt.wantReserve, tt.wantHold)
+			}
+		})
+	}
+}
+
+func TestCampaignInboundReserve(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxCalls int
+		reserve  string
+		want     int
+	}{
+		{"220 slots, unset: ten percent", 220, "", 22},
+		{"100 slots, unset", 100, "", 10},
+		{"20 slots, unset: the floor of two", 20, "", 2},
+		{"3 slots, unset: leaves one for outbound", 3, "", 2},
+		{"2 slots, unset: leaves one for outbound", 2, "", 1},
+		{"1 slot, unset: nothing to keep", 1, "", 0},
+		{"set to zero is zero, not the default", 220, "0", 0},
+		{"set explicitly", 220, "40", 40},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AICC_BOT_MAX_CALLS", strconv.Itoa(tt.maxCalls))
+			t.Setenv("AICC_BOT_INBOUND_RESERVE", tt.reserve)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.CampaignInboundReserve(); got != tt.want {
+				t.Errorf("CampaignInboundReserve() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOverflowRateSettings(t *testing.T) {
+	for _, tt := range []struct {
+		name, tighten, stop string
+		wantErr             bool
+	}{
+		{"defaults", "", "", false},
+		{"custom", "0.02", "0.1", false},
+		{"tighten at or above stop", "0.05", "0.05", true},
+		{"zero tighten", "0", "0.03", true},
+		{"stop above one", "0.01", "1.5", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AICC_OVERFLOW_TIGHTEN_RATE", tt.tighten)
+			t.Setenv("AICC_OVERFLOW_STOP_RATE", tt.stop)
+			c, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Load() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && tt.name == "defaults" && (c.OverflowTightenRate != 0.01 || c.OverflowStopRate != 0.03) {
+				t.Errorf("defaults = %g / %g", c.OverflowTightenRate, c.OverflowStopRate)
 			}
 		})
 	}
