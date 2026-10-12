@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
@@ -90,6 +91,15 @@ type CallDataSource interface {
 	CallData(callID uuid.UUID) map[string]any
 }
 
+// LeadSink stores the lead a campaign call has concluded so far on its attempt.
+// The last write wins and its side effects (a DNC row, a callback) run once, in
+// the attempt's finish transaction, so this is only a write of the current
+// value. It reports false when the attempt is no longer in flight.
+// store.AttemptStore is the implementation.
+type LeadSink interface {
+	SetLead(ctx context.Context, callID uuid.UUID, intent campaign.LeadIntent, notes string) (bool, error)
+}
+
 // ignoredTemperatureOnce keeps the "temperature is ignored" notice to one line
 // per process rather than one per call.
 var ignoredTemperatureOnce sync.Once
@@ -110,6 +120,9 @@ type OrchestratorConfig struct {
 	// Nil leaves the bot's ledger row without it, which is what happened
 	// before there was anywhere to ask.
 	CallData CallDataSource
+	// Leads receives what record_lead concludes on a campaign call. Nil makes
+	// record_lead fail with a refusal the model can read.
+	Leads LeadSink
 	// Transcripts hands out the per-call actor that owns transcript order for
 	// both phases of a call; nil disables transcripts entirely.
 	Transcripts *transcript.Registry
@@ -359,6 +372,7 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		o.queueNames(ctx, did.FallbackQueueID), log)
 	if actions.isCampaign() {
 		runtime.Deny(campaignDeniedTools...)
+		runtime.OfferRecordLead()
 	}
 
 	profile := o.cfg.Profile

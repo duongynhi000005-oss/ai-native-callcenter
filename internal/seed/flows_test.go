@@ -83,9 +83,9 @@ func TestEveryShippedFlowIsSeeded(t *testing.T) {
 			numbers[n.number] = f.file
 		}
 	}
-	if len(numbers) != numbersPerFlow*len(demoFlows) {
+	if len(numbers) != len(demoNumbers()) {
 		t.Errorf("%d distinct numbers for %d flows, want %d",
-			len(numbers), len(demoFlows), numbersPerFlow*len(demoFlows))
+			len(numbers), len(demoFlows), len(demoNumbers()))
 	}
 }
 
@@ -99,6 +99,9 @@ func TestOneTollFreeNumberIsTheMainLine(t *testing.T) {
 	t.Parallel()
 	var mainLines, defaults []string
 	for _, f := range demoFlows {
+		if f.isOutboundOnly() {
+			continue
+		}
 		if len(f.toll) != 10 || f.toll[:7] != "8005550" || f.toll[7] != '1' {
 			t.Errorf("%s answers toll-free on %s, which is outside the "+
 				"fictional 800-555-01XX block", f.file, f.toll)

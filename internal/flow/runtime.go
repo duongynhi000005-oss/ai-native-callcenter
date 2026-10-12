@@ -34,6 +34,8 @@ type Runtime struct {
 	// denied is the set of tools this call may never use, whatever the flow's
 	// allowlists say (Deny). Nil on an ordinary call.
 	denied map[string]bool
+	// isLeadOffered says this is a campaign call, which has record_lead.
+	isLeadOffered bool
 	// wrapUpDeadline is set once the call has used most of its time budget:
 	// when the limit falls due. Instructions renders the time left from the
 	// current clock, so a later phase change never repeats a stale figure.
@@ -80,6 +82,22 @@ func (r *Runtime) Deny(names ...string) {
 	for _, name := range names {
 		r.denied[name] = true
 	}
+}
+
+// OfferRecordLead adds record_lead to this call's tools. Only a campaign call
+// does it: the tool is bound to no phase, so Tools offers it and Dispatch runs
+// it whatever the phase's allowlist says, and a call that never asked for it
+// has no such tool (it is refused like a tool outside its phase and Tools
+// omits it).
+func (r *Runtime) OfferRecordLead() { r.isLeadOffered = true }
+
+// IsToolAllowed reports whether the model may call name now: the phase's
+// allowlist, less what Deny withdrew, plus record_lead on a call that offers it.
+func (r *Runtime) IsToolAllowed(name string) bool {
+	if name == ToolRecordLead {
+		return r.isLeadOffered && !r.denied[name]
+	}
+	return !r.denied[name] && r.engine.IsToolAllowed(name)
 }
 
 // Engine exposes the phase machine.
@@ -139,6 +157,12 @@ func (r *Runtime) referencedTools() map[string]bool {
 		for name := range r.builtins {
 			referenced[name] = true
 		}
+	}
+	// record_lead belongs to the call, not to a phase: offered on a campaign
+	// call whatever the allowlists say, and on no other call whatever they say.
+	delete(referenced, ToolRecordLead)
+	if r.isLeadOffered {
+		referenced[ToolRecordLead] = true
 	}
 	return referenced
 }
@@ -241,13 +265,17 @@ func (r *Runtime) Dispatch(ctx context.Context, name, arguments string) (output 
 	// ok=0 and the current phase's instruction, which reads as being told it
 	// is getting ahead of itself — and it carries on talking to the caller
 	// instead of falling silent.
-	if r.denied[name] || !r.engine.IsToolAllowed(name) {
+	if !r.IsToolAllowed(name) {
 		r.log.Info("tool refused by the current phase",
 			"tool", name, "node", r.engine.NodeID())
 		return Failed(
 			fmt.Sprintf("the tool %s is not available in the current phase", name),
 			r.phasePreamble()+r.engine.Instruction(),
 		).asToolOutput(), ""
+	}
+
+	if name == ToolRecordLead {
+		return r.recordLead(ctx, args), ""
 	}
 
 	result, err := r.run(ctx, name, args)
@@ -339,6 +367,37 @@ func (r *Runtime) run(ctx context.Context, name string, args map[string]any) (Re
 		return Result{}, fmt.Errorf("no backend is configured for %s", name)
 	}
 	return r.backend.Call(ctx, tool, args, r.engine.Slots())
+}
+
+// recordLead runs record_lead. It is bookkeeping about the call, not a step of
+// the conversation, so it stays out of the phase machine: no transition reads
+// it, it does not count towards maxTurns, and it does not restart the runs of
+// silence or of replies without a tool that closingTarget watches (a model
+// that logged a lead on every turn would otherwise never be closed).
+//
+// A refusal is a result the model reads and corrects, and nothing is stored.
+// Notes over MaxLeadNotesRunes are cut rather than refused: a HIGH lead must
+// not be lost because the model was wordy.
+func (r *Runtime) recordLead(ctx context.Context, args map[string]any) string {
+	intent := strings.ToUpper(strings.TrimSpace(stringArg(args, "intent")))
+	if !slices.Contains(LeadIntents, intent) {
+		r.log.Info("lead not recorded", "reason", "unknown intent", "intent", stringArg(args, "intent"))
+		return Failed(fmt.Sprintf("%q is not a lead intent; use one of %s",
+			stringArg(args, "intent"), strings.Join(LeadIntents, ", ")), "").asToolOutput()
+	}
+	notes := strings.TrimSpace(stringArg(args, "notes"))
+	if utf8.RuneCountInString(notes) > MaxLeadNotesRunes {
+		notes = string([]rune(notes)[:MaxLeadNotesRunes])
+		r.log.Info("lead notes cut", "maxRunes", MaxLeadNotesRunes)
+	}
+	result, err := r.actions.RecordLead(ctx, LeadRequest{Intent: intent, Notes: notes})
+	if err != nil {
+		r.log.Error("tool failed", "tool", ToolRecordLead, "error", err)
+		result = Failed(err.Error(), "")
+	}
+	r.log.Info("tool ran", "tool", ToolRecordLead, "node", r.engine.NodeID(),
+		"isOk", result.IsOK, "intent", intent)
+	return result.asToolOutput()
 }
 
 // recordSlot runs a slot tool. A value that is empty, too long or outside the

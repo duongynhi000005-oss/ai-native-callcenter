@@ -110,6 +110,7 @@ func TestCanTransfer(t *testing.T) {
 func TestCanTransferOnTheSeedFlows(t *testing.T) {
 	t.Parallel()
 	want := map[string]bool{
+		"campaign_lead_followup.json":    false,
 		"early_collections.json":         true,
 		"field_service_appointment.json": true,
 		"lead_qualification.json":        true,

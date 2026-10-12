@@ -336,8 +336,8 @@ func TestEveryShippedFlowAnswersOnItsNumbers(t *testing.T) {
 				// Every demo number answers calls; the main line also places
 				// them. A number seeded without its flags is a number the
 				// dids CHECKs would have taken a different shape for.
-				if !inbound {
-					t.Errorf("%s takes no inbound calls, so nothing reaches its flow", n.number)
+				if inbound != n.allowInbound() {
+					t.Errorf("%s is seeded allow_inbound=%v, want %v", n.number, inbound, n.allowInbound())
 				}
 				if outbound != n.allowOutbound || defaultOut != n.isDefaultOutbound {
 					t.Errorf("%s is seeded allow_outbound=%v is_default_outbound=%v, want %v and %v",
@@ -373,9 +373,9 @@ func TestFreshRemovesEverySeededFlowAndNumber(t *testing.T) {
 	seedDemo(t, st)
 
 	seeded := countRows(t, st)
-	if seeded["dids"] != numbersPerFlow*len(demoFlows) || seeded["flows"] != len(demoFlows) {
+	if seeded["dids"] != len(demoNumbers()) || seeded["flows"] != len(demoFlows) {
 		t.Fatalf("seeded %d dids and %d flows, want %d and %d",
-			seeded["dids"], seeded["flows"], numbersPerFlow*len(demoFlows), len(demoFlows))
+			seeded["dids"], seeded["flows"], len(demoNumbers()), len(demoFlows))
 	}
 
 	if err := Fresh(context.Background(), st, quietLog()); err != nil {

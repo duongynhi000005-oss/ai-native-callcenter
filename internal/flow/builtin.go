@@ -17,10 +17,35 @@ const (
 	ToolTakeMessage = "take_message"
 	// ToolHangup ends the call.
 	ToolHangup = "hangup"
+	// ToolRecordLead records what a campaign call concluded about the
+	// customer. It exists only on campaign calls (Runtime.OfferRecordLead).
+	ToolRecordLead = "record_lead"
 )
 
+// Lead intents, the values record_lead's intent argument accepts. They are the
+// campaign contract enum (campaign.LeadIntent), spelled out here because the
+// flow package does not import the campaign domain.
+const (
+	LeadHigh      = "HIGH"
+	LeadMedium    = "MEDIUM"
+	LeadLow       = "LOW"
+	LeadNone      = "NONE"
+	LeadDoNotCall = "DO_NOT_CALL"
+)
+
+// LeadIntents is the closed set of record_lead intents.
+var LeadIntents = []string{LeadHigh, LeadMedium, LeadLow, LeadNone, LeadDoNotCall}
+
+// MaxLeadNotesRunes caps record_lead's notes. A lead note is a sentence or two
+// an agent reads before the follow-up call, and it becomes the message of the
+// callback a HIGH lead files; a thousand characters holds a full summary in
+// Chinese or English while keeping a model's rambling (or a prompt-injected
+// caller's) out of the callbacks table. Counted in runes, not bytes, so the
+// cap means the same in both languages and never cuts a character in half.
+const MaxLeadNotesRunes = 1000
+
 // BuiltinToolNames is the closed set, for validating what a phase allows.
-var BuiltinToolNames = []string{ToolTransferToAgent, ToolTakeMessage, ToolHangup}
+var BuiltinToolNames = []string{ToolTransferToAgent, ToolTakeMessage, ToolHangup, ToolRecordLead}
 
 // TransferRequest is the model asking for a person.
 //
@@ -50,6 +75,14 @@ type HangupRequest struct {
 	// IsFarewellSpoken says whether the model has already said goodbye. When it
 	// has not, the application gives it the chance before the line drops.
 	IsFarewellSpoken bool `json:"isFarewellSpoken"`
+}
+
+// LeadRequest is the model recording the stance of a campaign customer. Intent
+// is one of LeadIntents and Notes is within MaxLeadNotesRunes by the time the
+// application sees it; the runtime has judged both.
+type LeadRequest struct {
+	Intent string
+	Notes  string
 }
 
 // Result is what a tool reports back.
@@ -137,6 +170,9 @@ type Actions interface {
 	TransferToAgent(ctx context.Context, request TransferRequest) (Result, error)
 	TakeMessage(ctx context.Context, request MessageRequest) (Result, error)
 	Hangup(ctx context.Context, request HangupRequest) (Result, error)
+	// RecordLead stores the lead of a campaign call, overwriting an earlier
+	// one. It is only reached on a call that offers record_lead.
+	RecordLead(ctx context.Context, request LeadRequest) (Result, error)
 }
 
 // builtinSchemas describes the built-ins to the model, in the call's language.
@@ -156,7 +192,16 @@ func builtinSchemas(lang string, queues []string) map[string]Tool {
 	messageDescription := "Take a message for a callback, for when no agent can take the call."
 	hangupDescription := "End the call. Call this as soon as the caller wants to finish, " +
 		"without saying goodbye first; say goodbye afterwards, when the result tells you to."
+	leadDescription := "Record what this call concluded about the customer. Call it as soon as " +
+		"their stance is clear and again whenever it changes; the last call counts. Intent: HIGH = " +
+		"wants the offer or a follow-up from a person, MEDIUM = interested but undecided, LOW = " +
+		"barely interested, NONE = no interest, DO_NOT_CALL = asks not to be called again. Notes: " +
+		"what they said, in one or two sentences. Never tell the customer you are recording this."
 	if isZH {
+		leadDescription = "记录本次通话对客户的判断。客户态度明确后立即调用，态度变化时再次调用，以最后一次为准。" +
+			"intent：HIGH=想要优惠或希望人工跟进，MEDIUM=有兴趣但未决定，LOW=兴趣不大，" +
+			"NONE=没有意向，DO_NOT_CALL=要求不要再来电。notes：客户的原话要点，一两句话。" +
+			"不要告诉客户你在记录。"
 		transferDescription = "转接人工坐席。需要转人工时立即调用，不要先播报；" +
 			"工具返回后再按提示播报转接话术。"
 		messageDescription = "记录留言与回电号码，用于无人接听或非营业时间。"
@@ -180,6 +225,18 @@ func builtinSchemas(lang string, queues []string) map[string]Tool {
 					"callbackNumber": {"type": "string", "description": "Where to call back, if different from the caller's number"}
 				},
 				"required": ["message"]
+			}`),
+		},
+		ToolRecordLead: {
+			name:        ToolRecordLead,
+			Description: Text{EN: leadDescription, ZH: leadDescription},
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"intent": {"type": "string", "description": "The customer's stance", "enum": ["HIGH", "MEDIUM", "LOW", "NONE", "DO_NOT_CALL"]},
+					"notes": {"type": "string", "description": "What the customer said, one or two sentences", "maxLength": 1000}
+				},
+				"required": ["intent"]
 			}`),
 		},
 		ToolHangup: {

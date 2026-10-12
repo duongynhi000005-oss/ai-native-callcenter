@@ -15,6 +15,8 @@ import (
 type scriptedActions struct {
 	sc       Scenario
 	transfer *flow.TransferRequest
+	// lead is the last lead record_lead stored, nil if none was.
+	lead *flow.LeadRequest
 	// last is the name of the last built-in that succeeded.
 	last string
 }
@@ -58,4 +60,15 @@ func (a *scriptedActions) TakeMessage(context.Context, flow.MessageRequest) (flo
 
 func (a *scriptedActions) Hangup(context.Context, flow.HangupRequest) (flow.Result, error) {
 	return a.answer(flow.ToolHangup), nil
+}
+
+// RecordLead keeps the last lead, as the attempt row does. It never becomes the
+// call's ending: recording a lead does not end a call.
+func (a *scriptedActions) RecordLead(_ context.Context, req flow.LeadRequest) (flow.Result, error) {
+	script, ok := a.sc.Actions[flow.ToolRecordLead]
+	if ok && script.IsOK != nil && !*script.IsOK {
+		return flow.Result{Error: script.Error, Fields: script.Fields, Hint: script.Hint}, nil
+	}
+	a.lead = &req
+	return flow.Succeeded(nil, ""), nil
 }

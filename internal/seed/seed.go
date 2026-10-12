@@ -77,6 +77,11 @@ var demoFlows = []demoFlow{
 	{"flows/early_collections.json", "NovaNet early collections", "95031", "95032", "8005550193", false},
 	{"flows/field_service_appointment.json", "StarCom field-service appointment", "95041", "95042", "8005550194", false},
 	{"flows/lead_qualification.json", "StarCom lead qualification", "95051", "95052", "8005550195", false},
+	// The campaign flow is the one flow with no way to a person, so it answers
+	// no inbound call: its two numbers are outbound-only, one per language, and
+	// a campaign picks the one that speaks its contacts' language. 8005550196
+	// stays spare. No campaign is seeded; an operator creates one.
+	{"flows/campaign_lead_followup.json", "StarCom campaign lead follow-up", "95061", "95062", "", false},
 }
 
 // demoFlow is one bundled flow and the three numbers it answers on.
@@ -86,16 +91,25 @@ type demoFlow struct {
 	isMainLine   bool   // the toll-free number is the deployment's main line
 }
 
+// isOutboundOnly says the flow answers no inbound call: it has no toll-free
+// number, and its English and Chinese numbers only place calls.
+func (f demoFlow) isOutboundOnly() bool { return f.toll == "" }
+
 // demoNumber is one DID the demo owns. Every demo number takes inbound calls;
 // only the main line also places them, so the two outbound flags are the only
 // ones a number has to state.
 type demoNumber struct {
 	number, language, queue, description string
 	allowOutbound, isDefaultOutbound     bool
+	// isOutboundOnly drops allow_inbound: the number only places calls.
+	isOutboundOnly bool
 }
 
-// numbersPerFlow is how many DIDs a demo flow answers on: English, Chinese and
-// toll-free.
+// allowInbound is whether the number takes inbound calls.
+func (n demoNumber) allowInbound() bool { return !n.isOutboundOnly }
+
+// numbersPerFlow is how many DIDs an inbound demo flow answers on: English,
+// Chinese and toll-free. An outbound-only flow has two.
 const numbersPerFlow = 3
 
 // numbers are the three DIDs of a demo flow. The language decides the fallback
@@ -105,15 +119,21 @@ const numbersPerFlow = 3
 // same queue. On the main line it is also the number the platform stamps on
 // outbound calls, which is why that one row carries the two outbound flags.
 func (f demoFlow) numbers() []demoNumber {
-	toll := demoNumber{f.toll, "en", queueForLanguage("en"), f.name + ", toll-free", false, false}
+	if f.isOutboundOnly() {
+		return []demoNumber{
+			{f.en, "en", queueForLanguage("en"), f.name + " (English, outbound only)", true, false, true},
+			{f.zh, "zh", queueForLanguage("zh"), f.name + " (Chinese, outbound only)", true, false, true},
+		}
+	}
+	toll := demoNumber{f.toll, "en", queueForLanguage("en"), f.name + ", toll-free", false, false, false}
 	if f.isMainLine {
 		toll.description = f.name + ", main line"
 		toll.allowOutbound = true
 		toll.isDefaultOutbound = true
 	}
 	return []demoNumber{
-		{f.en, "en", queueForLanguage("en"), f.name + " (English)", false, false},
-		{f.zh, "zh", queueForLanguage("zh"), f.name + " (Chinese)", false, false},
+		{f.en, "en", queueForLanguage("en"), f.name + " (English)", false, false, false},
+		{f.zh, "zh", queueForLanguage("zh"), f.name + " (Chinese)", false, false, false},
 		toll,
 	}
 }
@@ -447,12 +467,12 @@ func ensureFlowAndNumbers(ctx context.Context, st *store.Store, log *slog.Logger
 			if _, err := st.Pool.Exec(ctx, `
 				INSERT INTO dids (id, number, language, flow_id, fallback_queue_id, description,
 				                  allow_inbound, allow_outbound, is_default_outbound)
-				SELECT $1, $2, $3, $4, q.id, $6, true, $7,
+				SELECT $1, $2, $3, $4, q.id, $6, $9, $7,
 				       $8 AND NOT EXISTS (SELECT 1 FROM dids WHERE is_default_outbound)
 				FROM queues q WHERE q.name = $5
 				ON CONFLICT (number) DO NOTHING`,
 				uuid.New(), n.number, n.language, flowID, n.queue, n.description,
-				n.allowOutbound, n.isDefaultOutbound); err != nil {
+				n.allowOutbound, n.isDefaultOutbound, n.allowInbound()); err != nil {
 				return fmt.Errorf("seed number %s: %w", n.number, err)
 			}
 			numbers++

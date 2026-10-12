@@ -5,6 +5,7 @@ package flowsim
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,8 @@ type Report struct {
 	Path []string
 	// Ending is the last built-in action that succeeded, or "none".
 	Ending string
+	// Lead is the last lead record_lead stored, if any.
+	Lead *flow.LeadRequest
 	// Transfer is the last successful transfer, if any.
 	Transfer *flow.TransferRequest
 	// Moves are the phase changes that happened, as from -> to.
@@ -62,6 +65,7 @@ func RunScenario(ctx context.Context, spec *flow.Spec, source BackendSource, sc 
 	actions := newActions(sc)
 	engine := flow.NewEngine(spec, sc.Lang, flow.SeedSlots(sc.Caller, sc.Entry, sc.DID, sc.UserData), quiet)
 	runtime := flow.NewRuntime(engine, actions, backend, sc.Queues, quiet)
+	applyCampaign(runtime, sc)
 
 	r := &runner{ctx: ctx, spec: spec, sc: sc, engine: engine, runtime: runtime, actions: actions}
 	r.report = Report{Scenario: sc.Name, Path: []string{engine.NodeID()}}
@@ -85,6 +89,7 @@ func RunScenario(ctx context.Context, spec *flow.Spec, source BackendSource, sc 
 	}
 	r.report.Ending = actions.ending()
 	r.report.Transfer = actions.transfer
+	r.report.Lead = actions.lead
 	return r.report
 }
 
@@ -197,7 +202,7 @@ func (r *runner) call(name string, args map[string]any) error {
 		return fmt.Errorf("the flow has no tool %q (its tools: %s)", name, strings.Join(r.knownTools(), ", "))
 	}
 	node := r.engine.NodeID()
-	if !r.engine.IsToolAllowed(name) {
+	if !r.runtime.IsToolAllowed(name) {
 		r.lastRefused = true
 		if !r.expectsRefusal() {
 			return fmt.Errorf("the tool %q is not allowed in phase %q (allowed there: %s); "+
@@ -326,7 +331,40 @@ func (r *runner) final() error {
 	if diff := subsetDiff(want.Slots, r.engine.Slots()); diff != "" {
 		return fmt.Errorf("slots: %s", diff)
 	}
+	if problem := leadProblem(want.Lead, r.actions.lead); problem != "" {
+		return errors.New(problem)
+	}
 	return nil
+}
+
+// leadProblem says how the lead a call ended with differs from what a scenario
+// expects, or returns an empty string.
+func leadProblem(want *LeadExpect, got *flow.LeadRequest) string {
+	switch {
+	case want == nil:
+		return ""
+	case want.IsUnrecorded && got != nil:
+		return fmt.Sprintf("a lead %q was recorded, want none", got.Intent)
+	case want.IsUnrecorded:
+		return ""
+	case got == nil:
+		return fmt.Sprintf("no lead was recorded, want intent %q", want.Intent)
+	case want.Intent != "" && want.Intent != got.Intent:
+		return fmt.Sprintf("the lead is %q, want %q", got.Intent, want.Intent)
+	case want.Notes != "" && want.Notes != got.Notes:
+		return fmt.Sprintf("the lead notes are %q, want %q", got.Notes, want.Notes)
+	}
+	return ""
+}
+
+// applyCampaign gives the runtime a campaign call's tools: no way to a person
+// and no message-taking, and record_lead (see aicall's campaign wiring).
+func applyCampaign(runtime *flow.Runtime, sc Scenario) {
+	if !sc.IsCampaign {
+		return
+	}
+	runtime.Deny(flow.ToolTransferToAgent, flow.ToolTakeMessage)
+	runtime.OfferRecordLead()
 }
 
 // subsetDiff reports the first key of want that is missing from, or differs
