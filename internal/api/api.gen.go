@@ -1705,8 +1705,10 @@ type CampaignAttempt struct {
 	StartedAt time.Time        `json:"startedAt"`
 
 	// State DIALING until the call ended and its outcome was written, once; a fuller CDR may later revise the outcome of a FINISHED attempt, never its state.
-	State   CampaignAttemptState `json:"state"`
-	TalkSec *int                 `json:"talkSec,omitempty"`
+	State CampaignAttemptState `json:"state"`
+
+	// TalkSec Seconds the customer spent in conversation with the bot. A campaign call never reaches an agent, so this is the CDR's botSec plus talkSec, not talkSec alone.
+	TalkSec *int `json:"talkSec,omitempty"`
 }
 
 // CampaignAttemptList defines model for CampaignAttemptList.

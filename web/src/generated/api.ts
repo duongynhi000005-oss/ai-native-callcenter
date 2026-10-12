@@ -3562,6 +3562,7 @@ export interface components {
             state: components["schemas"]["CampaignAttemptState"];
             outcome?: components["schemas"]["CampaignOutcome"];
             hangupCause?: string;
+            /** @description Seconds the customer spent in conversation with the bot. A campaign call never reaches an agent, so this is the CDR's botSec plus talkSec, not talkSec alone. */
             talkSec?: number;
             /** @description True when the outcome reached the customer, so it counts against maxAttempts and holds the number from other campaigns for the deployment's frequency window. */
             isTouched: boolean;

@@ -11656,7 +11656,8 @@
           },
           "talkSec": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Seconds the customer spent in conversation with the bot. A campaign call never reaches an agent, so this is the CDR's botSec plus talkSec, not talkSec alone."
           },
           "isTouched": {
             "type": "boolean",
