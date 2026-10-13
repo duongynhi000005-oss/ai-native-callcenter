@@ -139,6 +139,11 @@ type dashscope struct {
 	// written by the assumption you are testing.
 	wire   *os.File
 	audioN int
+
+	// extraInput is merged into the run-task input. Harness-only: the language
+	// drift test (langdrift_live_test.go) uses it to try a message-family
+	// "context" that the product does not send.
+	extraInput map[string]any
 }
 
 func newDashscope(p Profile, apiKey string, log Logger) *dashscope {
@@ -207,16 +212,21 @@ func (d *dashscope) Start(ctx context.Context, cfg Config) error {
 	}
 	if isMessageModel(d.profile.Model) {
 		// The message family sends no live partials unless asked (only one
-		// empty partial per sentence). It documents language_hints and
-		// semantic_punctuation_enabled as unsupported, so neither is sent.
-		// disfluency_removal_enabled is deliberately left at the service
-		// default (false): a call transcript stays verbatim.
+		// empty partial per sentence). disfluency_removal_enabled is
+		// deliberately left at the service default (false): a call transcript
+		// stays verbatim. semantic_punctuation_enabled is not sent: it is
+		// documented as unsupported on this family.
 		params["intermediate_result_enabled"] = true
 	} else {
 		params["semantic_punctuation_enabled"] = true
-		if cfg.Language != "" {
-			params["language_hints"] = []string{cfg.Language}
-		}
+	}
+	// language_hints is listed in the message family's run-task parameters too
+	// (it applies to finals only; partials are unaffected):
+	// https://www.alibabacloud.com/help/en/model-studio/qwen-asr-message-client-events
+	// Design 08 recorded it as unsupported after #26, and without it the
+	// recognised language drifted within a call (#127).
+	if cfg.Language != "" {
+		params["language_hints"] = []string{cfg.Language}
 	}
 	if len(cfg.Hints) > 0 {
 		vocabulary := make(map[string]int, len(cfg.Hints))
@@ -226,12 +236,17 @@ func (d *dashscope) Start(ctx context.Context, cfg Config) error {
 		params["vocabulary"] = vocabulary
 	}
 
+	input := map[string]any{}
+	for k, v := range d.extraInput {
+		input[k] = v
+	}
+
 	var run dsRunTask
 	run.Header = dsHeader{Action: "run-task", TaskID: d.taskID, Streaming: "duplex"}
 	run.Payload.TaskGroup, run.Payload.Task, run.Payload.Function = "audio", "asr", "recognition"
 	run.Payload.Model = d.profile.Model
 	run.Payload.Parameters = params
-	run.Payload.Input = map[string]any{}
+	run.Payload.Input = input
 
 	if err := d.writeJSON(&run); err != nil {
 		conn.Close()
