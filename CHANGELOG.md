@@ -109,6 +109,14 @@ carries the one-line installer's files.
   `closingTarget` instead of being asked "are you still there?". `early_collections`
   now has an owner-refuses branch in `greet`, no model-spoken goodbye in its
   `hangup` rule, and `maxTurnsWithoutTool: 10` (#147).
+- A call the bot answered and finished alone had its CDR start at the bot
+  session's start: `startedAt` equalled `answeredAt` and `ringSec` was 0, so an
+  AI outbound call's ringing was missing from the ledger. The row now takes
+  `startedAt` from the call's creation (the originate, on an outbound call) and
+  `answeredAt` from the carrier-facing leg's answer, so `ringSec` and `totalSec`
+  include the ringing and `billSec` runs from the carrier answer. `botSec` and
+  the flow's time budget still run from the bot leg. Historical rows are not
+  rewritten (#181).
 - Installer: on Linux, `.env` is root-owned and mode 0600, so the closing
   message's "the password is `AICC_SEED_PASSWORD` in `/opt/aicc/.env`" led to
   a `Permission denied`. The installer now also prints the command that reads

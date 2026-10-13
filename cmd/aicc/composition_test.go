@@ -576,6 +576,7 @@ func TestEveryBotDependencyIsPlumbed(t *testing.T) {
 		func(store.Callback) {},
 		func(uuid.UUID, uuid.UUID) {},
 		outbound.NewCallData(),
+		&telephony.Registry{},
 		&store.AttemptStore{},
 		true,
 		3*time.Second,
@@ -644,7 +645,7 @@ func TestBotConfigCarriesTheGreetingMediaWait(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, "", provider.Profile{},
-				nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
+				nil, nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
 			if got.IsGreetingGated != tc.wantGated || got.GreetingMediaWait != tc.wantWait {
 				t.Errorf("orchestrator gate = %v, %s, want %v, %s",
 					got.IsGreetingGated, got.GreetingMediaWait, tc.wantGated, tc.wantWait)
@@ -677,7 +678,7 @@ func TestBotConfigCarriesTheNoInputTimeout(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, "", provider.Profile{},
-				nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
+				nil, nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
 			if got.NoInput != tc.want {
 				t.Errorf("orchestrator NoInput = %s, want %s", got.NoInput, tc.want)
 			}

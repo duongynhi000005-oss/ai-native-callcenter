@@ -196,6 +196,23 @@ func (r *Registry) Snapshot(callID uuid.UUID) (Snapshot, error) {
 	return snap, nil
 }
 
+// CallTimeline is when a call began and when its carrier-facing leg was
+// answered, read through the call's mailbox. The carrier-facing leg is the one
+// the ledger bills from (billedLeg): the originator, on every call a bot can
+// write a row for. A zero answeredAt means that leg is not answered. It
+// reports false for a call this registry does not hold.
+func (r *Registry) CallTimeline(callID uuid.UUID) (createdAt, answeredAt time.Time, ok bool) {
+	snap, err := r.Snapshot(callID)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
+	originator, _ := split(snap)
+	if originator != nil && originator.AnsweredAt != nil {
+		answeredAt = *originator.AnsweredAt
+	}
+	return snap.CreatedAt, answeredAt, true
+}
+
 // SnapshotAll returns every live call.
 func (r *Registry) SnapshotAll() []Snapshot {
 	r.mu.RLock()
