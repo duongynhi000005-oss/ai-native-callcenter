@@ -85,10 +85,12 @@ function Divider() {
  * trust for what the other knows: see `phoneChipFor`.
  */
 function usePhoneChip(presence: Presence | null | undefined) {
-  const { detected, state, isLost } = usePhoneBridge()
+  const { presence: extensionPresence, state, isLost } = usePhoneBridge()
   return phoneChipFor(
     Boolean(presence?.isDeviceRegistered),
-    detected ? state : undefined,
+    // Before the first answer or silence the page knows nothing yet, which
+    // is "connecting", not "set up your phone".
+    extensionPresence === 'PRESENT' ? state : extensionPresence === 'UNKNOWN' ? null : undefined,
     presence?.extensionNumber,
     // Not detected is two different things, and the chip may not confuse
     // them: an extension that was never installed, and one this page has
@@ -240,7 +242,13 @@ function PresenceControl({
           <StatusDot availability={availability} />
           {label}
           {!hasCall && (
-            <span className="tabular text-xs text-muted-foreground">
+            // A bare mm:ss beside "Phone lost" reads as a clock time or as how
+            // long the phone has been gone; it is the time since this state was
+            // entered, whatever the state is.
+            <span
+              className="tabular text-xs text-muted-foreground"
+              title={t('phone.timeInState')}
+            >
               {formatDuration(elapsedSec, { padMinutes: true })}
             </span>
           )}

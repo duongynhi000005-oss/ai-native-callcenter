@@ -182,10 +182,23 @@ export const HELLO_TIMEOUT_MS = 2000
  * A single miss is not proof of absence. A tab that has just woken from a
  * machine asleep runs its timers late and its listeners later, and latching
  * "no extension" on the first miss told an agent whose phone was registered
- * the whole time to go and install it. Removing the marker is still immediate:
- * that is the extension saying it has gone, not this page guessing.
+ * the whole time to go and install it. Removing the marker is no shortcut
+ * either: an update that replaces the extension removes the old marker and
+ * writes a new one a task later, and a page that dropped to "not installed"
+ * in between put the whole setup wizard in front of an agent whose phone was
+ * fine (issue #187). A removed marker starts a fresh run of hellos instead.
  */
 export const HELLO_ATTEMPTS = 3
+
+/**
+ * How often an extension that is not answering is asked again. Nothing else
+ * would: a content script that comes back by itself (an allowed site, a
+ * worker that woke, a reinjection that wrote no marker this page could see)
+ * says nothing unprompted until it is asked, and the setup card promises not
+ * to need a refresh. It is slow on purpose, and longer than a whole run of
+ * hellos so two never overlap; it stops the moment the extension answers.
+ */
+export const HELLO_RECHECK_MS = 10000
 
 /** Whether a content script has left its marker on this document right now. */
 function hasPresenceMarker(): boolean {
@@ -234,23 +247,34 @@ export interface ExtensionState {
   provisionStatus?: ProvisionStatus
 }
 
+/**
+ * What this page knows about the extension, in four honest readings.
+ *
+ * `UNKNOWN` is no answer yet and no run of hellos exhausted: the first
+ * question is still in the air, or the agent has only just signed in. It
+ * proves nothing either way, so nothing may be told to the agent on it.
+ *
+ * `PRESENT` is an answer: a hello reply carrying one of our own nonces, or a
+ * state the extension reported. It stays until a whole run of hellos has gone
+ * unanswered — a marker removed, or a tab coming back, only starts a new run.
+ *
+ * `LOST` and `ABSENT` are both a run exhausted, told apart by the marker. With
+ * the marker on the document a content script is there and not answering: it
+ * is still installed, still holding the registration in its own worker, and
+ * out of reach of this page (its context was invalidated or its worker is
+ * asleep). Telling the agent to install it would be a lie; the honest
+ * instruction is to reload. Without the marker there is nothing to reload
+ * into, however it got that way: the answer is to install or to allow the
+ * site.
+ */
+export type ExtensionPresence = 'UNKNOWN' | 'PRESENT' | 'LOST' | 'ABSENT'
+
 export interface PhoneBridge {
-  /**
-   * The extension is answering: a hello reply carrying one of our own nonces,
-   * or a state it reported, has arrived — and neither has the marker been
-   * removed since nor has a later run of hellos gone unanswered to its last
-   * attempt.
-   */
+  /** See `ExtensionPresence`; `detected` and `isLost` are readings of it. */
+  presence: ExtensionPresence
+  /** The extension is answering: `presence` is `PRESENT`. */
   detected: boolean
-  /**
-   * A content script has marked this page and is not answering. It is still
-   * installed, still holding the registration in its own worker, and out of
-   * reach of this page: its context was invalidated or its worker is asleep,
-   * and only a navigation puts it back. Telling the agent to install it would
-   * be a lie; the honest instruction is to reload. Without the marker there
-   * is nothing to reload into, however it got that way: the answer is to
-   * install.
-   */
+  /** A content script has marked this page and is not answering: `presence` is `LOST`. */
   isLost: boolean
   extensionVersion: string | null
   /** The id the extension announced for itself, if it announced one. */
@@ -280,6 +304,7 @@ export interface PhoneBridge {
  * and signing out must not depend on a phone being there.
  */
 const INERT: PhoneBridge = {
+  presence: 'UNKNOWN',
   detected: false,
   isLost: false,
   extensionVersion: null,
@@ -350,11 +375,14 @@ export function usePhoneBridgeValue(
   myExtension?: string,
   mySipDomain?: string,
 ): PhoneBridge {
-  const [detected, setDetected] = useState(false)
+  /**
+   * What the hellos have established. `SILENT` is a run gone unanswered to its
+   * last attempt; whether that reads as lost or absent is the marker's to
+   * say, at any moment, not a verdict frozen when the run ended.
+   */
+  const [answer, setAnswer] = useState<'UNKNOWN' | 'PRESENT' | 'SILENT'>('UNKNOWN')
   /** The marker is on the document; read at mount, then kept by the observer. */
   const [isMarked, setMarked] = useState(hasPresenceMarker)
-  /** A run of hellos has gone unanswered to its last attempt since the last answer. */
-  const [isSilent, setSilent] = useState(false)
   const [extensionVersion, setExtensionVersion] = useState<string | null>(null)
   const [extensionId, setExtensionId] = useState<string | null>(null)
   const [state, setState] = useState<ExtensionState | null>(null)
@@ -375,8 +403,7 @@ export function usePhoneBridgeValue(
    */
   const noteAnswered = useCallback(() => {
     clearHelloTimer()
-    setDetected(true)
-    setSilent(false)
+    setAnswer('PRESENT')
   }, [clearHelloTimer])
 
   const post = useCallback((message: Record<string, unknown>) => {
@@ -395,7 +422,8 @@ export function usePhoneBridgeValue(
     // An extension that was answering and has stopped — disabled, removed,
     // or invalidated by an update that left its old marker behind — says
     // nothing at all, so silence past the last attempt is the answer. Each
-    // call restarts the run: it is the latest question that is waiting.
+    // call restarts the run: it is the latest question that is waiting. What
+    // the page believed before the run stays believed until the run ends.
     clearHelloTimer()
     let attemptsLeft = HELLO_ATTEMPTS - 1
     helloTimer.current = setInterval(() => {
@@ -405,10 +433,9 @@ export function usePhoneBridgeValue(
         return
       }
       clearHelloTimer()
-      setDetected(false)
       // Whether silence means "lost" or "absent" is the marker's to say, not
-      // this timer's: see `isLost`.
-      setSilent(true)
+      // this timer's: see `ExtensionPresence`.
+      setAnswer('SILENT')
     }, HELLO_TIMEOUT_MS)
     ask()
   }, [post, clearHelloTimer])
@@ -470,7 +497,13 @@ export function usePhoneBridgeValue(
   }, [clearHelloTimer, noteAnswered])
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled) {
+      // Signing out forgets what was learned: the next sign-in starts from
+      // not knowing, not from the last agent's answer.
+      clearHelloTimer()
+      setAnswer('UNKNOWN')
+      return
+    }
     // Read afresh: the marker may have landed between the first render and
     // this effect, before the observer below existed to hear it.
     setMarked(hasPresenceMarker())
@@ -479,21 +512,21 @@ export function usePhoneBridgeValue(
     // The content script may be injected after this page mounted — a fresh
     // install, a site allowed while the tab was open, or an update that
     // re-injects into open tabs. The marker landing on the document is the
-    // only warning of that, so it is watched rather than polled, and its
-    // removal is the extension saying it has gone: an invalidated instance
-    // takes its marker with it (protocol R8).
+    // only warning of that, so it is watched rather than polled. Its removal
+    // is not a verdict: an invalidated instance takes its marker with it
+    // (protocol R8), but so does an update that re-injects a task later, and
+    // the page cannot tell the two apart by looking. So a removal records the
+    // fact and asks again; what the page believed stands until that run is
+    // answered or exhausted.
     const observer = new MutationObserver(() => {
       if (hasPresenceMarker()) {
         setMarked(true)
         // Silence heard before the marker landed was silence from nothing.
-        setSilent(false)
-        sendHello()
+        setAnswer((previous) => (previous === 'SILENT' ? 'UNKNOWN' : previous))
       } else {
-        clearHelloTimer()
         setMarked(false)
-        setSilent(false)
-        setDetected(false)
       }
+      sendHello()
     })
     observer.observe(document.documentElement, {
       attributes: true,
@@ -502,29 +535,47 @@ export function usePhoneBridgeValue(
 
     // Coming back to the tab is the other moment an extension may have
     // changed underneath us: installed, disabled, or updated in place.
+    // A window can regain focus without the tab having been hidden (another
+    // window in front, a devtools panel), and the extension's allow-list is
+    // edited in exactly such a window.
     const onVisible = () => {
       if (document.visibilityState === 'visible') sendHello()
     }
     document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', sendHello)
 
     return () => {
       observer.disconnect()
       document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', sendHello)
     }
   }, [enabled, sendHello, clearHelloTimer])
+
+  // The slow recheck. An extension that is not answering is asked again now
+  // and then, so a card that came up on silence leaves by itself when the
+  // content script returns. Answered, signed out or unmounted, it stops.
+  useEffect(() => {
+    if (!enabled || answer !== 'SILENT') return
+    const recheck = setInterval(sendHello, HELLO_RECHECK_MS)
+    return () => clearInterval(recheck)
+  }, [enabled, answer, sendHello])
+
+  const presence: ExtensionPresence =
+    answer === 'SILENT' ? (isMarked ? 'LOST' : 'ABSENT') : answer
 
   const openOnboarding = useCallback(() => setOnboardingForced(true), [])
   const closeOnboarding = useCallback(() => setOnboardingForced(false), [])
   const provisioning = usePhoneProvisioning(enabled, state, myExtension, mySipDomain, provision)
 
   return {
-    detected,
+    presence,
+    detected: presence === 'PRESENT',
     // The one reading the setup card must not treat as "nothing installed".
     // It needs the marker (something to reload into) and a run of hellos that
     // went unanswered, so a content script that is merely about to answer, or
     // no content script at all, never reads as lost. No marker, however the
     // extension went, is the install wizard.
-    isLost: enabled && isMarked && isSilent && !detected,
+    isLost: enabled && presence === 'LOST',
     extensionVersion,
     extensionId,
     state,

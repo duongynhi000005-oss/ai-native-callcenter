@@ -3,11 +3,11 @@ import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  HELLO_ATTEMPTS, HELLO_TIMEOUT_MS, WEB_SIP_PHONE_EXTENSION_ID, probeExtensionInstalled,
+  HELLO_ATTEMPTS, HELLO_RECHECK_MS, HELLO_TIMEOUT_MS, WEB_SIP_PHONE_EXTENSION_ID, probeExtensionInstalled,
   usePhoneBridgeValue,
   type PhoneBridge,
 } from '@/lib/phone-bridge'
-import { installBackend, installFakeExtension, sipSessionFixture } from '@/test/harness'
+import { extensionStateFixture, installBackend, installFakeExtension, sipSessionFixture } from '@/test/harness'
 
 /**
  * The page's half of the extension protocol.
@@ -680,17 +680,24 @@ describe('an extension this page has lost', () => {
     expect(bridge.isLost).toBe(false)
   })
 
-  it('is absent, not lost, the moment the marker goes', async () => {
+  // The marker going is not a verdict (issue #187): it starts a fresh run of
+  // hellos, and the page keeps believing what it knew until that run ends.
+  // Silence with no marker on the page is then absent, not lost.
+  it('is absent, not lost, once the marker has gone and the fresh run is unanswered', async () => {
     installBackend()
     const extension = installFakeExtension()
     extension.mark()
     renderBridge()
     await waitFor(() => expect(bridge.detected).toBe(true))
 
+    vi.useFakeTimers()
     await act(async () => {
       extension.uninstall()
     })
-    await waitFor(() => expect(bridge.detected).toBe(false))
+    expect(bridge.presence).toBe('PRESENT')
+    letEveryHelloGoUnanswered()
+    expect(bridge.presence).toBe('ABSENT')
+    expect(bridge.detected).toBe(false)
     expect(bridge.isLost).toBe(false)
   })
 
@@ -808,5 +815,216 @@ describe('the install probe', () => {
   it('is false without a fetch to ask', async () => {
     vi.stubGlobal('fetch', undefined)
     expect(await probeExtensionInstalled()).toBe(false)
+  })
+})
+
+/**
+ * The four readings, and how a page gets from one to another.
+ *
+ * Until something answers, or a whole run goes unanswered, the page does not
+ * know; and a marker removed is a reason to ask again, not to conclude
+ * (issue #187: a wizard that told an agent to allow a site already allowed).
+ */
+describe('what the page knows about the extension', () => {
+  const marker = {
+    set: () => {
+      document.documentElement.dataset.webSipPhone = '1'
+    },
+    clear: () => {
+      delete document.documentElement.dataset.webSipPhone
+    },
+  }
+
+  it('does not know until something answers or a whole run is silent', async () => {
+    installBackend()
+    vi.useFakeTimers()
+    renderBridge()
+    expect(bridge.presence).toBe('UNKNOWN')
+    act(() => {
+      vi.advanceTimersByTime(HELLO_TIMEOUT_MS * (HELLO_ATTEMPTS - 1))
+    })
+    expect(bridge.presence).toBe('UNKNOWN')
+  })
+
+  it('is present on a hello reply', async () => {
+    installBackend()
+    renderBridge()
+    await waitFor(() => expect(postMessage).toHaveBeenCalled())
+    act(() => fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' }))
+    expect(bridge.presence).toBe('PRESENT')
+    expect(bridge.detected).toBe(true)
+  })
+
+  it('is present on a state alone', async () => {
+    installBackend()
+    renderBridge()
+    await waitFor(() => expect(postMessage).toHaveBeenCalled())
+    act(() => fromExtension({ type: 'state', ...extensionStateFixture() }))
+    expect(bridge.presence).toBe('PRESENT')
+  })
+
+  it('is absent after a silent run with no marker, and lost with one', async () => {
+    installBackend()
+    vi.useFakeTimers()
+    renderBridge()
+    letEveryHelloGoUnanswered()
+    expect(bridge.presence).toBe('ABSENT')
+    expect(bridge.isLost).toBe(false)
+  })
+
+  it('is lost after a silent run with the marker on the page', async () => {
+    installBackend()
+    marker.set()
+    vi.useFakeTimers()
+    renderBridge()
+    letEveryHelloGoUnanswered()
+    expect(bridge.presence).toBe('LOST')
+    expect(bridge.isLost).toBe(true)
+  })
+
+  it('moves between lost and absent as the marker comes and goes after the run', async () => {
+    installBackend()
+    marker.set()
+    vi.useFakeTimers()
+    renderBridge()
+    letEveryHelloGoUnanswered()
+    expect(bridge.presence).toBe('LOST')
+    await act(async () => {
+      marker.clear()
+    })
+    expect(bridge.presence).toBe('ABSENT')
+  })
+
+  // An update replaces the extension in one task: marker out, marker in.
+  it('stays present when the marker is removed and re-added in the same task', async () => {
+    installBackend()
+    const extension = installFakeExtension()
+    marker.set()
+    renderBridge()
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    await act(async () => {
+      marker.clear()
+      marker.set()
+    })
+    expect(bridge.presence).toBe('PRESENT')
+    await act(async () => {})
+    expect(bridge.presence).toBe('PRESENT')
+    await act(async () => extension.uninstall())
+  })
+
+  it('stays present, and never reads absent, when the marker returns a task later', async () => {
+    installBackend()
+    const extension = installFakeExtension()
+    marker.set()
+    renderBridge()
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    const seen: string[] = []
+    await act(async () => {
+      marker.clear()
+    })
+    seen.push(bridge.presence)
+    await act(async () => {
+      marker.set()
+    })
+    seen.push(bridge.presence)
+    await waitFor(() => expect(extension.messagesOfType('hello').length).toBeGreaterThan(2))
+    seen.push(bridge.presence)
+    expect(seen).toEqual(['PRESENT', 'PRESENT', 'PRESENT'])
+    await act(async () => extension.uninstall())
+  })
+
+  it('asks again when the marker goes, without dropping what it knew', async () => {
+    installBackend()
+    const extension = installFakeExtension()
+    marker.set()
+    renderBridge()
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    const before = extension.messagesOfType('hello').length
+    await act(async () => {
+      marker.clear()
+    })
+    await waitFor(() => expect(extension.messagesOfType('hello').length).toBeGreaterThan(before))
+    expect(bridge.presence).toBe('PRESENT')
+    await act(async () => extension.uninstall())
+  })
+
+  it('forgets everything when the account stops being an agent, and starts from unknown', async () => {
+    installBackend()
+    const extension = installFakeExtension()
+    const view = renderBridge(true)
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    const tree = (enabled: boolean) => (
+      <QueryClientProvider client={view.queryClient}>
+        <Host enabled={enabled} myExtension={MY_EXTENSION} />
+      </QueryClientProvider>
+    )
+    view.rerender(tree(false))
+    expect(bridge.presence).toBe('UNKNOWN')
+    extension.silence()
+    view.rerender(tree(true))
+    expect(bridge.presence).toBe('UNKNOWN')
+    extension.uninstall()
+    const second = installFakeExtension()
+    act(() => bridge.sendHello())
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    second.uninstall()
+  })
+
+  it('asks again when the window regains focus', async () => {
+    installBackend()
+    const extension = installFakeExtension()
+    renderBridge()
+    await waitFor(() => expect(bridge.presence).toBe('PRESENT'))
+    const before = extension.messagesOfType('hello').length
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() => expect(extension.messagesOfType('hello').length).toBe(before + 1))
+    await act(async () => extension.uninstall())
+  })
+
+  describe('the slow recheck', () => {
+    it('asks again every so often while nothing answers, and recovers when it does', async () => {
+      installBackend()
+      vi.useFakeTimers()
+      renderBridge()
+      letEveryHelloGoUnanswered()
+      expect(bridge.presence).toBe('ABSENT')
+      const before = postMessage.mock.calls.length
+      act(() => {
+        vi.advanceTimersByTime(HELLO_RECHECK_MS)
+      })
+      expect(postMessage.mock.calls.length).toBeGreaterThan(before)
+      // The run is a question like any other: still absent while it is open.
+      expect(bridge.presence).toBe('ABSENT')
+      act(() => fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' }))
+      expect(bridge.presence).toBe('PRESENT')
+    })
+
+    it('stops asking once the extension answers', async () => {
+      installBackend()
+      vi.useFakeTimers()
+      renderBridge()
+      letEveryHelloGoUnanswered()
+      act(() => {
+        vi.advanceTimersByTime(HELLO_RECHECK_MS)
+      })
+      act(() => fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' }))
+      const after = postMessage.mock.calls.length
+      act(() => {
+        vi.advanceTimersByTime(HELLO_RECHECK_MS * 5)
+      })
+      expect(postMessage.mock.calls.length).toBe(after)
+    })
+
+    it('does not ask while unknown or when the page is not an agent', async () => {
+      installBackend()
+      vi.useFakeTimers()
+      renderBridge(false)
+      act(() => {
+        vi.advanceTimersByTime(HELLO_RECHECK_MS * 3)
+      })
+      expect(postMessage).not.toHaveBeenCalled()
+    })
   })
 })
