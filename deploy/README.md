@@ -96,6 +96,9 @@ files and mounted configuration, `VERSION`, `.env` and, after an upgrade,
 `backups/`. Linux uses `compose.linux.yml` (host networking), macOS
 `compose.macos.yml` (one shared network namespace); `COMPOSE_FILE` in `.env`
 names them, so plain `docker compose …` in that directory addresses the stack.
+Compose reads `.env` first, and on Linux that file is root-only, so there the
+command is `sudo docker compose …`, even for a user in the `docker` group; on
+macOS it runs without `sudo`.
 
 **Running it again.**
 
@@ -121,7 +124,8 @@ The installer ends by running `aicc doctor` inside the application container.
 Run it again at any time:
 
 ```sh
-cd /opt/aicc && docker compose exec aicc aicc doctor --host-addrs <ip>   # ~/.aicc on macOS
+cd /opt/aicc && sudo docker compose exec aicc aicc doctor --host-addrs <ip>   # Linux
+cd ~/.aicc && docker compose exec aicc aicc doctor --host-addrs <ip>           # macOS
 ```
 
 `--host-addrs` is the host's address (comma-separated if several); on macOS

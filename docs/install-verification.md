@@ -34,7 +34,9 @@ extension (steps 4 to 6), and a way to change the target's LAN address
 
 Throughout, `<ip>` is the target's LAN address, `<dir>` is `/opt/aicc` (A) or
 `~/.aicc` (B, C), `<tag>` is the release under test and `<prev>` the release
-before it. On A, run the installer with `sudo`; on B and C, without.
+before it. On A, run the installer with `sudo`; on B and C, without. The same
+holds for A's compose commands: `<dir>/.env` and the backups are root-only
+there, and compose reads `.env` before anything else.
 
 ## Runtimes for macOS 12 on Intel
 
@@ -112,14 +114,14 @@ Sources:
 The switch's console, from `<dir>`:
 
 ```sh
-fs() { docker compose exec -T freeswitch sh -c "fs_cli -H 127.0.0.1 -P 18021 -p \"\$FS_ESL_PASSWORD\" -x \"$1\""; }
+fs() { sudo docker compose exec -T freeswitch sh -c "fs_cli -H 127.0.0.1 -P 18021 -p \"\$FS_ESL_PASSWORD\" -x \"$1\""; }   # A; B and C without sudo
 fs 'sofia status profile internal reg'
 ```
 
 `aicc doctor`, from `<dir>`:
 
 ```sh
-docker compose exec aicc aicc doctor --host-addrs <ip>
+sudo docker compose exec aicc aicc doctor --host-addrs <ip>   # A; B and C without sudo
 ```
 
 The installer, from the release under test (the URL of a pre-release, since
@@ -163,7 +165,7 @@ Record in the run log: the elapsed time from the command's start to the
 ### 2. `aicc doctor`
 
 ```sh
-docker compose exec aicc aicc doctor --host-addrs <ip>; echo "exit $?"
+sudo docker compose exec aicc aicc doctor --host-addrs <ip>; echo "exit $?"   # A; B and C without sudo
 ```
 
 Pass: no `FAIL` line, exit status 0. `SKIP` is allowed only for
@@ -221,8 +223,8 @@ Pass:
 
 - The English greeting is audible in wei's browser.
 - A spoken question gets a spoken answer from the bot.
-- `docker compose logs aicc | grep 'ai conversation started'` shows the call
-  with `"language":"en"`.
+- `docker compose logs aicc | grep 'ai conversation started'` (with `sudo` on
+  A) shows the call with `"language":"en"`.
 - After hanging up, the call is listed under CDRs with its transcript.
 
 ### 6. Transfer to a human; the LAN agent answers
@@ -263,8 +265,8 @@ Pass:
 Before and after the rerun, from `<dir>`:
 
 ```sh
-sha256sum .env        # macOS: shasum -a 256 .env
-docker compose ps -a --format '{{.Service}} {{.ID}}' | grep -v '^lua-role ' | sort
+sudo sha256sum .env   # A; B and C: shasum -a 256 .env
+sudo docker compose ps -a --format '{{.Service}} {{.ID}}' | grep -v '^lua-role ' | sort   # A; B and C without sudo
 ```
 
 Then run the step 1 command again, unchanged.
@@ -279,7 +281,7 @@ Change the target's LAN address (a new DHCP reservation, or a new static
 address). Then, before any rerun:
 
 ```sh
-docker compose exec aicc aicc doctor --host-addrs <new-ip>
+sudo docker compose exec aicc aicc doctor --host-addrs <new-ip>   # A; B and C without sudo
 ```
 
 Pass, before: a `FAIL  external_ip  EXTERNAL_IP_NOT_ON_HOST` line and exit
@@ -312,9 +314,12 @@ Pass:
 
 - The upgrade prints `Backing up the database to <dir>/backups/aicc-<prev>-….dump`
   and exits 0; `cat <dir>/VERSION` prints `<tag>`.
-- The dump is readable:
+- The dump is readable: from `<dir>`,
+  `sudo sh -c 'docker compose exec -T postgres pg_restore -l < backups/<file>.dump' | head`
+  on A (the dump is root-only, and a `<` in the operator's own shell opens it
+  before `sudo` runs), and
   `docker compose exec -T postgres pg_restore -l < backups/<file>.dump | head`
-  lists the archive's table of contents.
+  on B and C, lists the archive's table of contents.
 - `aicc doctor` shows `PASS  migrations  schema N, this binary's latest N`
   (the two numbers equal) and no `FAIL`.
 - Steps 5 and 6 pass.

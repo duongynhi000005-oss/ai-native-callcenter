@@ -91,6 +91,11 @@ carries the one-line installer's files.
   it, `sudo grep AICC_SEED_PASSWORD /opt/aicc/.env` on Linux and the same
   without `sudo` on macOS, and `deploy/README.md` says the same (#123, #130;
   thanks @javayou13131).
+- Docs: the compose commands for an installed stack (`aicc doctor` in
+  `deploy/README.md`, and those in `docs/install-verification.md`) now carry
+  `sudo` on Linux, where compose cannot read the root-only `.env` without it;
+  the dump check of an upgrade runs its redirect as root too. macOS keeps the
+  forms without `sudo` (#131).
 
 ## v0.4.0 - 2026-10-10
 
