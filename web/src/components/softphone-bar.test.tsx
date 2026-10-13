@@ -1,9 +1,11 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 
 import { SoftphoneBar } from '@/components/softphone-bar'
 import { usePresence } from '@/lib/agent'
-import { PhoneBridgeProvider, usePhoneBridgeValue } from '@/lib/phone-bridge'
+import {
+  HELLO_ATTEMPTS, HELLO_TIMEOUT_MS, PhoneBridgeProvider, usePhoneBridgeValue,
+} from '@/lib/phone-bridge'
 import { useLogout, useSession } from '@/lib/session'
 import type { ExtensionState } from '@/lib/phone-bridge'
 import {
@@ -37,6 +39,7 @@ let extension: FakeExtension | undefined
 afterEach(() => {
   extension?.uninstall()
   extension = undefined
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   delete document.documentElement.dataset.webSipPhone
@@ -63,15 +66,27 @@ async function renderBar(
     extension?: false | Partial<ExtensionState>
     /** The id the extension announces, when the test is about a link. */
     extensionId?: string
+    /**
+     * Let the run of hellos go unanswered to its last attempt before the
+     * bar is read. Until then the page does not know, and the chip says
+     * "connecting", not "set up" (issue #187).
+     */
+    isSettled?: boolean
   } = {},
 ) {
-  const { extension: phone, extensionId, ...rest } = backend
+  const { extension: phone, extensionId, isSettled, ...rest } = backend
   const api = installBackend(rest)
+  if (isSettled) vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   if (phone !== false) {
     extension = installFakeExtension({ state: phone ?? {}, extensionId })
   }
   const view = renderWithProviders(<Bar />)
   await screen.findByRole('button', { name: /ready|break|login|on call|sign in/i })
+  if (isSettled) {
+    act(() => {
+      vi.advanceTimersByTime(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+    })
+  }
   return { api, ...view }
 }
 
@@ -342,8 +357,16 @@ describe('the phone', () => {
     expect(api.commands.some((r) => r.path === '/agent/sip-session')).toBe(false)
   })
 
-  it('offers setup instead when no extension answers', async () => {
+  // Not knowing is not a diagnosis: before the first hello is answered or
+  // has run out, the chip waits instead of sending the agent to set up.
+  it('says connecting, not set up, while the first hellos are unanswered', async () => {
     await renderBar({ extension: false })
+    expect(await screen.findByText(/connecting/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /set up phone/i })).toBeNull()
+  })
+
+  it('offers setup instead when no extension answers', async () => {
+    await renderBar({ extension: false, isSettled: true })
     expect(await screen.findByRole('button', { name: /set up phone/i })).toBeInTheDocument()
   })
 
@@ -352,7 +375,7 @@ describe('the phone', () => {
   // never "lost contact" (issue #75).
   it('offers setup, never lost contact, when nothing has marked the page', async () => {
     window.localStorage.setItem('aicc.phone.extensionSeen', '1')
-    await renderBar({ extension: false })
+    await renderBar({ extension: false, isSettled: true })
     expect(await screen.findByRole('button', { name: /set up phone/i })).toBeInTheDocument()
     expect(screen.queryByText(/lost contact/i)).toBeNull()
     window.localStorage.removeItem('aicc.phone.extensionSeen')

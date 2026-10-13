@@ -120,6 +120,15 @@ carries the one-line installer's files.
   `sudo` on Linux, where compose cannot read the root-only `.env` without it;
   the dump check of an upgrade runs its redirect as root too. macOS keeps the
   forms without `sudo` (#131).
+- Cockpit: right after signing in, the phone setup card could ask an agent to
+  allow a site the extension was already allowed on. The card now opens only
+  after a full run of unanswered hellos, never before the extension's first
+  answer; the extension removing and re-adding its marker on the page no
+  longer reads as it having gone; the page asks again on window focus and
+  every 10 seconds while nothing answers, so the card leaves without a reload
+  when the extension comes back. Until the first answer the phone chip says
+  "Connecting…", and the header's state timer says in a tooltip that it is the
+  time spent in the current state (#187).
 
 ## v0.4.0 - 2026-10-10
 

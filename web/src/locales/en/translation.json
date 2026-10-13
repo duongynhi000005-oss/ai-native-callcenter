@@ -562,6 +562,7 @@
     "unreachable": "Phone unreachable"
   },
   "phone": {
+    "timeInState": "Time in this state",
     "retry": "Retry",
     "reprovision": "Re-provision",
     "openOptions": "Open extension options",
@@ -592,6 +593,7 @@
       "subtitle": "Calls ring in a Chrome extension. Three steps, once per browser.",
       "done": "Done",
       "pending": "Not done yet",
+      "checking": "Checking",
       "noExtensionId": "Open the extension's options page from chrome://extensions",
       "install": {
         "title": "Install the phone extension",

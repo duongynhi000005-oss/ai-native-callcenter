@@ -15,31 +15,45 @@ import { optionsUrl, useExtensionInstalled, usePhoneBridge, webStoreUrl } from '
  * remember — the rows read the extension's own state, so each one completes
  * itself as the agent does it and the card leaves when the last one does.
  *
+ * It opens only on a settled reading. Before the first hello has been
+ * answered, or has gone unanswered through a whole run (`UNKNOWN`), the page
+ * does not know whether anything is wrong, and a wizard shown on that guess
+ * told agents whose phone was fine to do two things they had already done
+ * (issue #187). So `UNKNOWN` renders nothing; the card opens when the
+ * extension is `ABSENT`, or `PRESENT` with the microphone not granted.
+ *
  * Step 2 is the extension answering hello: a content script only runs on a
  * site its owner allowed, so an answer is the proof that this one is allowed.
+ * It has three readings — done (`PRESENT`), checking (nothing settled yet,
+ * only seen when the agent opened the card themselves) and pending
+ * (`ABSENT`) — and offers its actions only once step 1 is done, because
+ * "allow this site" means nothing for an extension that is not there.
  * Step 1 cannot share that signal, or an extension that is installed but not
  * yet allowed here would read as not installed. It ticks on a probe of the
  * extension's web-accessible options page, which needs no content script, or
  * on an answer to hello (a differently keyed build misses the probe but
- * answers once allowed). Step 2 unticks when the extension stops answering;
- * step 1 stays while the probe still finds it.
+ * answers once allowed). A hello run in progress leaves `PRESENT` standing,
+ * so steps 1 and 2 do not flicker while the page re-verifies.
  *
  * Nothing here asks for a refresh to notice a change. An extension that
- * injects into open tabs sets its marker and the bridge says hello again; one
- * that is disabled or invalidated removes it or stops answering, and the card
- * comes back. The Reload buttons are for extension builds that only inject
- * into pages loaded after the fact.
+ * injects into open tabs sets its marker and the bridge says hello again;
+ * the bridge also asks on focus and, while nothing answers, every few
+ * seconds, so a card that came up on silence leaves by itself when the
+ * content script returns. The Reload buttons are for extension builds that
+ * only inject into pages loaded after the fact.
  */
 export function PhoneOnboarding() {
   const { t } = useTranslation()
-  const { detected, isLost, state, extensionId, isOnboardingForced, closeOnboarding } =
-    usePhoneBridge()
+  const { presence, state, extensionId, isOnboardingForced, closeOnboarding } = usePhoneBridge()
 
   // A state is only as current as the extension that sent it: once it has
   // stopped answering, its last word about the microphone is not evidence.
-  const isMicrophoneGranted = detected && state?.microphone === 'GRANTED'
-  const isRequired = !detected || !isMicrophoneGranted
-  const open = isRequired || isOnboardingForced
+  const isPresent = presence === 'PRESENT'
+  const isMicrophoneGranted = isPresent && state?.microphone === 'GRANTED'
+  // UNKNOWN and LOST do not require the wizard: the first is not knowing yet,
+  // the second has a card of its own (below), which blocks all the same.
+  const isRequired = presence === 'ABSENT' || (isPresent && !isMicrophoneGranted)
+  const open = isRequired || presence === 'LOST' || isOnboardingForced
   // Only the open card has a step 1 to tick; a closed one need not probe.
   const isInstalled = useExtensionInstalled(open)
 
@@ -51,7 +65,7 @@ export function PhoneOnboarding() {
   // the content script in this tab, and only a navigation brings it back.
   // Three undone steps here would be three lies. An agent who opened the card
   // themselves asked for the steps, and gets them.
-  if (isLost && !isOnboardingForced) return <LostContactCard />
+  if (presence === 'LOST' && !isOnboardingForced) return <LostContactCard />
 
   return (
     // Nothing dismisses it while a step is undone. An agent who opened it
@@ -75,7 +89,7 @@ export function PhoneOnboarding() {
           <ol className="mt-4 space-y-3">
             <Step
               number={1}
-              isDone={isInstalled || detected}
+              status={isInstalled || isPresent ? 'done' : 'pending'}
               title={t('phone.onboarding.install.title')}
               text={t('phone.onboarding.install.text')}
             >
@@ -86,18 +100,22 @@ export function PhoneOnboarding() {
             </Step>
             <Step
               number={2}
-              isDone={detected}
+              status={isPresent ? 'done' : presence === 'ABSENT' ? 'pending' : 'checking'}
               title={t('phone.onboarding.site.title')}
               text={t('phone.onboarding.site.text', { host: window.location.hostname })}
             >
-              <ExternalLink href={optionsUrl('site', extensionId)}>
-                {t('phone.onboarding.site.action')}
-              </ExternalLink>
-              <ReloadButton>{t('phone.onboarding.site.reload')}</ReloadButton>
+              {isInstalled && (
+                <>
+                  <ExternalLink href={optionsUrl('site', extensionId)}>
+                    {t('phone.onboarding.site.action')}
+                  </ExternalLink>
+                  <ReloadButton>{t('phone.onboarding.site.reload')}</ReloadButton>
+                </>
+              )}
             </Step>
             <Step
               number={3}
-              isDone={isMicrophoneGranted}
+              status={isMicrophoneGranted ? 'done' : 'pending'}
               title={t('phone.onboarding.microphone.title')}
               text={t('phone.onboarding.microphone.text')}
             >
@@ -149,18 +167,20 @@ function LostContactCard() {
 /** One step: where it stands, what it is, and the one place to go and do it. */
 function Step({
   number,
-  isDone,
+  status,
   title,
   text,
   children,
 }: {
   number: number
-  isDone: boolean
+  /** `checking` is not knowing yet: neither done nor something to go and do. */
+  status: 'done' | 'pending' | 'checking'
   title: string
   text: string
   children: ReactNode
 }) {
   const { t } = useTranslation()
+  const isDone = status === 'done'
   return (
     <li className="flex gap-3">
       <span className="tabular mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-xs text-muted-foreground">
@@ -173,11 +193,13 @@ function Step({
             {title}
           </span>
           <span className="sr-only">
-            {isDone ? t('phone.onboarding.done') : t('phone.onboarding.pending')}
+            {t(`phone.onboarding.${status}`)}
           </span>
         </div>
         <p className="text-xs text-muted-foreground">{text}</p>
-        {!isDone && <div className="flex items-center gap-2 pt-0.5">{children}</div>}
+        {status === 'pending' && children && (
+          <div className="flex items-center gap-2 pt-0.5">{children}</div>
+        )}
       </div>
     </li>
   )

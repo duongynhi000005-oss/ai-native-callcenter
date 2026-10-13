@@ -560,6 +560,7 @@
     "unreachable": "话机不可达"
   },
   "phone": {
+    "timeInState": "处于此状态的时长",
     "retry": "重试",
     "reprovision": "重新下发",
     "openOptions": "打开扩展设置",
@@ -590,6 +591,7 @@
       "subtitle": "呼叫在 Chrome 扩展中振铃。每个浏览器需完成三步。",
       "done": "已完成",
       "pending": "尚未完成",
+      "checking": "检查中",
       "noExtensionId": "从 chrome://extensions 打开扩展的选项页",
       "install": {
         "title": "安装话机扩展",
