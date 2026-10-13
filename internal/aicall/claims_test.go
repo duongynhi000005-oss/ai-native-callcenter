@@ -31,6 +31,14 @@ func TestDetectClaimsReadsWhatTheBotSaidItDid(t *testing.T) {
 		{"已为您记录留言。", store.UnbackedClaimMessage},
 		{"Goodbye.", store.UnbackedClaimFarewell},
 		{"祝您生活愉快，再见！", store.UnbackedClaimFarewell},
+		{"Thanks for your time, and have a great day!", store.UnbackedClaimFarewell},
+		{"Thank you for your time. If you need anything, you can reach out anytime.", store.UnbackedClaimFarewell},
+		{"Thank you for your cooperation.", store.UnbackedClaimFarewell},
+		{"Have a good day.", store.UnbackedClaimFarewell},
+		{"Alright, take care.", store.UnbackedClaimFarewell},
+		{"好的，那就等您本周五处理。感谢您的配合，祝您生活愉快！", store.UnbackedClaimFarewell},
+		{"感谢配合。", store.UnbackedClaimFarewell},
+		{"祝您周末愉快", store.UnbackedClaimFarewell},
 
 		{"I can connect you to a support agent who can provide detailed information about our TV services", ""},
 		{"For account-specific troubleshooting, I'll need to connect you to a support agent.", ""},
@@ -42,6 +50,11 @@ func TestDetectClaimsReadsWhatTheBotSaidItDid(t *testing.T) {
 		{"Are you still there? I", ""},
 		{"I'm not able to transfer you right now.", ""},
 		{"What is your repair order number?", ""},
+		{"Thank you, let me note that down.", ""},
+		{"Thanks for calling NovaNet, how can I help you today?", ""},
+		{"I will take care of that now.", ""},
+		{"好的，谢谢您，请问您的预算大概是多少？", ""},
+		{"感谢致电 NovaNet，请问有什么可以帮您？", ""},
 	}
 	for _, tc := range cases {
 		claims := detectClaims(tc.text)

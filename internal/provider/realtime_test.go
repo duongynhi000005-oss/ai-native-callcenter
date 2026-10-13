@@ -1343,6 +1343,48 @@ func TestSeveralToolResultsForOneResponseAskForOneTurn(t *testing.T) {
 	f.awaitMessages("response.create", 2)
 }
 
+// Results answered after the response that called them has ended (the floor
+// is free, nothing is open yet) are one batch: the first asks for the turn and
+// the rest ride on it. A second request would be refused ("Cannot create
+// response while another response is in progress", qwen-findings W-Q6).
+func TestSeveralToolResultsAfterTheResponseEndedAskForOneTurn(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	openATurnThatCallsATool(t, f, session)
+
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+
+	for _, id := range []string{"fc_1", "fc_2", "fc_3"} {
+		if err := session.SendToolResult(id, `{"ok":true}`, ""); err != nil {
+			t.Fatalf("send tool result %s: %v", id, err)
+		}
+	}
+	f.awaitMessages("response.create", 2) // the opening turn and the one for the batch
+	if got := len(functionCallOutputs(f)); got != 3 {
+		t.Fatalf("function_call_output items = %d, want 3", got)
+	}
+
+	// The turn plays out and nothing more is asked for.
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+
+	// The turn is discharged: a result from a later turn asks again.
+	if err := session.SendToolResult("fc_4", `{"ok":true}`, ""); err != nil {
+		t.Fatalf("send later tool result: %v", err)
+	}
+	f.awaitMessages("response.create", 3)
+}
+
 // The caller barges in on the response that called the tool. The provider
 // answers the caller with a response of its own, and that response reads the
 // result that is already in the conversation; a request of ours on top of it

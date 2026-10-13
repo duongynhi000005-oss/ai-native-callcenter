@@ -73,7 +73,7 @@ func TestTheLimitNeverTransfersACampaignCall(t *testing.T) {
 	if got := h.engine.NodeID(); got != "farewell" {
 		t.Fatalf("node = %q, want the closing phase", got)
 	}
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.recordedTransfers(); len(got) != 0 {
 		t.Errorf("transfers = %v, want none", got)
 	}
@@ -94,7 +94,7 @@ func TestTheLimitHangsUpACampaignCallWithNoClosingPhase(t *testing.T) {
 	turnBefore := h.session.currentTurn()
 
 	h.enforce(limitFloorFree)
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 
 	if got := h.sw.recordedTransfers(); len(got) != 0 {
 		t.Errorf("transfers = %v, want none", got)

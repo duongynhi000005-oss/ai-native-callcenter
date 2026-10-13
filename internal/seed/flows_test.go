@@ -163,7 +163,9 @@ func TestEveryShippedFlowSpeaksItsOpeningAndItsEndings(t *testing.T) {
 // is a terminal phase. The turns-without-a-tool wall is set only where a
 // closing phase ends in an "anything else?" loop the model can keep running
 // without a tool, at the value 02-ai-voice §6 justifies — a wall anywhere else
-// could only cut a legitimate call short.
+// could only cut a legitimate call short. early_collections is there too since
+// #147: a model that closes the conversation in words and never hangs up keeps
+// answering the caller without a tool, and the wall is what ends that call.
 func TestEveryShippedFlowCanCloseACallOnItsOwn(t *testing.T) {
 	t.Parallel()
 	const wall = 10
@@ -171,6 +173,7 @@ func TestEveryShippedFlowCanCloseACallOnItsOwn(t *testing.T) {
 		"mobile_support.json":            true,
 		"field_service_appointment.json": true,
 		"plan_change.json":               true,
+		"early_collections.json":         true,
 	}
 	flows := shippedFlows(t)
 	for file := range hasAnythingElseLoop {

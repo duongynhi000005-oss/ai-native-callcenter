@@ -213,7 +213,7 @@ func TestTheLimitTransfersToAnOpenQueueAfterTheHandoverLine(t *testing.T) {
 		t.Errorf("hangup after the limit = %+v, want a quiet success", result)
 	}
 
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.recordedTransfers(); len(got) != 1 || got[0] != "chan-9→7001" {
 		t.Fatalf("transfers = %v, want the caller put through to 7001", got)
 	}
@@ -244,7 +244,7 @@ func TestTheLimitClosesThroughTheClosingPhaseWhenNoQueueIsOpen(t *testing.T) {
 		t.Errorf("aicc_bot_reason = %q, want no transfer to a closed queue", got)
 	}
 
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.variable("aicc_bot_finished"); got != "FLOW_END" {
 		t.Errorf("aicc_bot_finished = %q, want FLOW_END", got)
 	}
@@ -271,7 +271,7 @@ func TestTheLimitSaysGoodbyeWhereTheFlowHasNoClosingPhase(t *testing.T) {
 	if cues := h.model.recordedUserText(); len(cues) != 1 || !strings.Contains(cues[0], "goodbye") {
 		t.Fatalf("cues = %v, want the goodbye cue", cues)
 	}
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.variable("aicc_bot_finished"); got != "SESSION_LIMIT" {
 		t.Errorf("aicc_bot_finished = %q, want SESSION_LIMIT", got)
 	}
@@ -343,7 +343,7 @@ func TestTheLimitNeverReplacesAnArmedEnding(t *testing.T) {
 	if h.recorder.hangupCause != "" {
 		t.Errorf("hangup cause = %q, want none: the limit did not end this call", h.recorder.hangupCause)
 	}
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.variable("aicc_bot_finished"); got != "HANGUP" {
 		t.Errorf("aicc_bot_finished = %q, want HANGUP", got)
 	}
@@ -494,7 +494,7 @@ func TestALockedTransferEndingSurvivesAModelHangupAndTransfer(t *testing.T) {
 		t.Fatalf("transfer after the limit = %+v, %v", result, err)
 	}
 
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.recordedTransfers(); len(got) != 1 || got[0] != "chan-9→7001" {
 		t.Fatalf("transfers = %v, want the limit's own transfer to 7001", got)
 	}
@@ -519,7 +519,7 @@ func TestALockedClosingEndingSurvivesAModelHangupAndTransfer(t *testing.T) {
 		t.Fatalf("transfer after the limit = %+v, %v", result, err)
 	}
 
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if got := h.sw.variable("aicc_bot_finished"); got != "FLOW_END" {
 		t.Errorf("aicc_bot_finished = %q, want the closing phase's FLOW_END", got)
 	}
@@ -549,7 +549,7 @@ func TestARefusedLimitTransferFallsThroughToTheClosingPath(t *testing.T) {
 	}
 	// With no channel to stamp, the closing action's proof is the session
 	// ending once the line has been heard.
-	h.actions.onPlaybackDone(turnBefore + 1)
+	h.actions.onPlaybackDone(turnBefore+1, true)
 	if !h.session.isClosed() {
 		t.Error("the closing ending did not run")
 	}

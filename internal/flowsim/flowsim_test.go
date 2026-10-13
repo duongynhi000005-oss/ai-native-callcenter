@@ -82,7 +82,7 @@ func TestBrokenFlowsAreCaught(t *testing.T) {
 				rules := nodeOf(doc, "greet")["transitions"].([]any)
 				rules[0].(map[string]any)["target"] = "promised"
 			},
-			wantScenario: "caller promises a date and hangs up",
+			wantScenario: "caller promises a date and the platform ends the call",
 			wantFailure:  `the call is in phase "promised", want "remind"`,
 		},
 		{
@@ -90,7 +90,7 @@ func TestBrokenFlowsAreCaught(t *testing.T) {
 			break_: func(doc map[string]any) {
 				nodeOf(doc, "remind")["tools"] = []any{"dispute_record"}
 			},
-			wantScenario: "caller promises a date and hangs up",
+			wantScenario: "caller promises a date and the platform ends the call",
 			wantFailure:  `the tool "promise_record" is not allowed in phase "remind"`,
 		},
 		{
@@ -99,22 +99,25 @@ func TestBrokenFlowsAreCaught(t *testing.T) {
 				rules := nodeOf(doc, "remind")["transitions"].([]any)
 				rules[0].(map[string]any)["condition"] = map[string]any{"slot": "result.recorded", "op": "EQ", "value": "yes"}
 			},
-			wantScenario: "caller promises a date and hangs up",
+			wantScenario: "caller promises a date and the platform ends the call",
 			wantFailure:  `the call is in phase "remind", want "promised"`,
 		},
 		{
-			name: "a slot the instruction no longer renders",
+			name: "a slot the announce no longer renders",
 			break_: func(doc map[string]any) {
 				node := nodeOf(doc, "promised")
-				node["instruction"] = map[string]any{"en": "Confirm the date and hang up.", "zh": "确认日期后挂断。"}
+				node["announce"] = map[string]any{"en": "Thank you, goodbye.", "zh": "谢谢,再见。"}
 			},
-			wantScenario: "caller promises a date and hangs up",
-			wantFailure:  `does not contain "this Friday"`,
+			wantScenario: "caller promises a date and the platform ends the call",
+			wantFailure:  `announce is "Thank you, goodbye."`,
 		},
 		{
 			name: "a closing target that is not reached on silence",
 			break_: func(doc map[string]any) {
-				delete(doc["global"].(map[string]any), "closingTarget")
+				global := doc["global"].(map[string]any)
+				delete(global, "closingTarget")
+				// A wall without a target is refused at load.
+				delete(global, "maxTurnsWithoutTool")
 			},
 			wantScenario: "three silences close the call",
 			wantFailure:  `the call is in phase "greet", want "finish"`,
@@ -241,7 +244,7 @@ func TestWriteReportsFailuresAndCoverage(t *testing.T) {
 	if failed := Write(&out, spec.ID, reports, coverage, false); failed == 0 {
 		t.Fatal("no failure reported")
 	}
-	for _, want := range []string{"FAIL  caller promises a date and hangs up", "failure: step 4", "coverage:", "unreached phases:"} {
+	for _, want := range []string{"FAIL  caller promises a date and the platform ends the call", "failure: step 4", "coverage:", "unreached phases:"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report lacks %q:\n%s", want, out.String())
 		}

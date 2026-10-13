@@ -2,7 +2,7 @@
   "scenarios": [
     {
       "name": "caller answers all three questions",
-      "description": "Slot tools write the facts; lead_submit sends them to the backend and the grade reaches the closing phase.",
+      "description": "Slot tools write the facts; lead_submit sends them to the backend and a grade A moves the call to the terminal phase with the advisor line, so the platform ends the call after it. The model never calls hangup.",
       "lang": "en",
       "caller": "13900001111",
       "steps": [
@@ -12,13 +12,12 @@
         {"call": "record_budget", "args": {"value": "around 4000 yuan"}, "expect": {"slots": {"budget": "around 4000 yuan"},
           "instructionContains": ["budget=around 4000 yuan"]}},
         {"call": "record_timeline", "args": {"value": "next month"}, "expect": {"slots": {"timeline": "next month"}}},
-        {"call": "lead_submit", "args": {"notes": "wants a trial"}, "expect": {"phase": "done", "result": {"lead_grade": "A", "recorded": "1"},
-          "instructionContains": ["lead grade A"]}},
-        {"call": "hangup", "expect": {"phase": "finish"}}
+        {"call": "lead_submit", "args": {"notes": "wants a trial"}, "expect": {"phase": "finish_advisor", "result": {"lead_grade": "A", "recorded": "1"},
+          "announce": "Thank you for your time. A product advisor will reach out shortly with an exclusive trial offer, so please expect a call. Goodbye."}}
       ],
       "expect": {
-        "path": ["greet", "done", "finish"],
-        "ending": "hangup",
+        "path": ["greet", "finish_advisor"],
+        "ending": "none",
         "slots": {"interest": "high", "budget": "around 4000 yuan", "timeline": "next month"}
       }
     },
@@ -29,10 +28,20 @@
       "steps": [
         {"say": "不好意思,不感兴趣。"},
         {"call": "record_interest", "args": {"value": "none"}, "expect": {"slots": {"interest": "none"}}},
-        {"call": "lead_submit", "args": {"notes": "declined"}, "expect": {"phase": "done", "result": {"lead_grade": "D"}}},
-        {"call": "hangup", "expect": {"phase": "finish"}}
+        {"call": "lead_submit", "args": {"notes": "declined"}, "expect": {"phase": "finish_thanks", "result": {"lead_grade": "D"},
+          "announce": "感谢您的时间,有需要可随时联系我们,祝您生活愉快,再见。"}}
       ],
-      "expect": {"path": ["greet", "done", "finish"], "ending": "hangup"}
+      "expect": {"path": ["greet", "finish_thanks"], "ending": "none"}
+    },
+    {
+      "name": "caller wants to end the call mid-survey",
+      "description": "hangup is tool-first: the global rule sends the call to the terminal finish phase, which says the goodbye.",
+      "lang": "en",
+      "caller": "13900008888",
+      "steps": [
+        {"call": "hangup", "expect": {"phase": "finish", "announce": "Thanks for your time, goodbye."}}
+      ],
+      "expect": {"path": ["greet", "finish"], "ending": "hangup"}
     },
     {
       "name": "an interest outside the allowed values is refused and nothing is stored",
@@ -89,7 +98,7 @@
         "persona": "You are keen to buy a new phone soon. Your budget is about 4000 yuan and you plan to buy next month.",
         "behaviour": "Friendly; answer each question when asked."
       },
-      "model": {"visits": ["done"], "avoids": ["need_transfer"]}
+      "model": {"visits": ["finish_advisor"], "avoids": ["need_transfer"]}
     }
   ]
 }

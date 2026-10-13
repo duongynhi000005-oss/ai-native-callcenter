@@ -1,8 +1,8 @@
 {
   "scenarios": [
     {
-      "name": "caller promises a date and hangs up",
-      "description": "The main branch: overdue bill found, a payment date recorded, the call closes.",
+      "name": "caller promises a date and the platform ends the call",
+      "description": "The main branch: overdue bill found, a payment date recorded; promised is a terminal phase, so the line is said as written and the call ends without a hangup from the model.",
       "lang": "en",
       "caller": "92223333",
       "steps": [
@@ -15,13 +15,12 @@
         {"call": "promise_record", "args": {"pay_date": "this Friday"}, "expect": {
           "phase": "promised",
           "result": {"recorded": "1"},
-          "instructionContains": ["this Friday"]}},
-        {"call": "hangup", "expect": {"phase": "finish"}}
+          "announce": "Great, we'll expect your payment by this Friday. You can pay in the mobile app or at any service center. Thank you for your cooperation, goodbye."}}
       ],
       "expect": {
-        "path": ["greet", "remind", "promised", "finish"],
-        "ending": "hangup",
-        "toolsRun": ["bill_lookup", "promise_record", "hangup"]
+        "path": ["greet", "remind", "promised"],
+        "ending": "none",
+        "toolsRun": ["bill_lookup", "promise_record"]
       }
     },
     {
@@ -47,10 +46,44 @@
       "lang": "en",
       "caller": "10000000",
       "steps": [
-        {"call": "bill_lookup", "expect": {"phase": "no_bill", "result": {"found": "0"}}},
-        {"call": "hangup", "expect": {"phase": "finish"}}
+        {"call": "bill_lookup", "expect": {"phase": "no_bill", "result": {"found": "0"}}}
       ],
-      "expect": {"path": ["greet", "no_bill", "finish"], "ending": "hangup"}
+      "expect": {"path": ["greet", "no_bill"], "ending": "none"}
+    },
+    {
+      "name": "the answerer is not the owner",
+      "description": "hangup is tool-first: the global rule sends the call to the terminal finish phase, whose line apologises and says goodbye.",
+      "lang": "en",
+      "caller": "92223333",
+      "steps": [
+        {"call": "hangup", "expect": {"phase": "finish", "announce": "Sorry to have bothered you. Thank you, goodbye."}}
+      ],
+      "expect": {"path": ["greet", "finish"], "ending": "hangup", "toolsRun": ["hangup"]}
+    },
+    {
+      "name": "the owner refuses to talk before any lookup",
+      "description": "The owner declines in greet, before bill_lookup (#147). The model must call hangup without saying goodbye itself; the global rule sends the call to finish, whose line mentions no payment because the identity is not established. Not finish_declined.",
+      "lang": "zh",
+      "caller": "92223333",
+      "steps": [
+        {"say": "我是机主,我不想聊这个。"},
+        {"call": "hangup", "expect": {"phase": "finish",
+          "announce": "不好意思打扰了,感谢配合,再见。"}}
+      ],
+      "expect": {"path": ["greet", "finish"], "ending": "hangup", "toolsRun": ["hangup"]}
+    },
+    {
+      "name": "caller refuses to talk about the bill",
+      "description": "hangup in remind is tool-first and goes to finish_declined, which names the payment channels.",
+      "lang": "zh",
+      "caller": "92223333",
+      "steps": [
+        {"call": "bill_lookup", "expect": {"phase": "remind"}},
+        {"say": "我不想谈这个。"},
+        {"call": "hangup", "expect": {"phase": "finish_declined",
+          "announce": "好的,不打扰您了。您也可以随时通过手机营业厅或线下网点缴费。感谢配合,再见。"}}
+      ],
+      "expect": {"path": ["greet", "remind", "finish_declined"], "ending": "hangup"}
     },
     {
       "name": "caller asks for a person at the reminder",
@@ -122,7 +155,7 @@
         "persona": "You are the owner of the account. You forgot to pay and are not upset.",
         "behaviour": "Cooperative and brief."
       },
-      "model": {"ending": "hangup", "visits": ["promised"], "avoids": ["need_transfer", "disputed"]}
+      "model": {"ending": "none", "visits": ["promised"], "avoids": ["need_transfer", "disputed"]}
     }
   ]
 }

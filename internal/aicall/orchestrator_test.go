@@ -157,20 +157,20 @@ func TestTransferWaitsForTheBridgeLineToPlay(t *testing.T) {
 
 	// The turn the tool call arrived in finishing its playback must NOT fire
 	// the transfer: the bridge line has not been spoken yet.
-	actions.onPlaybackDone(session.currentTurn())
+	actions.onPlaybackDone(session.currentTurn(), true)
 	if got := sw.recordedTransfers(); len(got) != 0 {
 		t.Fatalf("the transfer ran before the bridge line was spoken: %v", got)
 	}
 
 	// The next turn — created by the tool's own result — plays out, and the
 	// transfer follows it.
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 	if got := sw.recordedTransfers(); len(got) != 1 || got[0] != "caller-channel-1→7001" {
 		t.Fatalf("transfers = %v, want the caller moved to 7001", got)
 	}
 
 	// A second playback must not transfer twice.
-	actions.onPlaybackDone(session.currentTurn() + 2)
+	actions.onPlaybackDone(session.currentTurn()+2, true)
 	if got := sw.recordedTransfers(); len(got) != 1 {
 		t.Errorf("the armed action ran twice: %v", got)
 	}
@@ -210,8 +210,10 @@ func TestARepeatedEndingToolCallKeepsTheFirstArming(t *testing.T) {
 	}); err != nil || !result.IsOK {
 		t.Fatalf("the repeated transfer was not answered as done: %+v %v", result, err)
 	}
-	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
-		t.Fatalf("the hangup was not answered as done: %+v %v", result, err)
+	// The caller is being put through: a hangup is refused, not promised.
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil ||
+		result.IsOK || result.Error != "CALL_ENDING" || result.Hint == "" {
+		t.Fatalf("the hangup over an armed transfer was not refused: %+v %v", result, err)
 	}
 
 	actions.mu.Lock()
@@ -293,7 +295,7 @@ func TestAnUnknownQueueFallsBackToTheNumbersOwnQueue(t *testing.T) {
 		t.Fatalf("result = %+v, want the caller put through to the fallback queue", result)
 	}
 
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 	if got := sw.recordedTransfers(); len(got) != 1 ||
 		got[0] != "caller-channel-1→"+support.ExtNumber {
 		t.Errorf("transfers = %v, want the caller moved to %s", got, support.ExtNumber)
@@ -333,7 +335,7 @@ func TestHangupEndsTheCallAfterTheFarewell(t *testing.T) {
 	default:
 	}
 
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 
 	select {
 	case <-session.done:
@@ -355,7 +357,7 @@ func TestACallerAnsweringTheGoodbyeFiresTheArmedAction(t *testing.T) {
 
 	// Speech before the closing line exists must NOT fire: the tool call has
 	// only just happened and the line is still coming.
-	actions.onBargeIn()
+	actions.onBargeIn(0)
 	select {
 	case <-fired:
 		t.Fatal("the action ran before the closing line was even generated")
@@ -365,7 +367,7 @@ func TestACallerAnsweringTheGoodbyeFiresTheArmedAction(t *testing.T) {
 	// The closing line finishes generating in the next turn...
 	actions.onTurnDone(session.currentTurn()+1, false)
 	// ...and the caller talks over the tail of it.
-	actions.onBargeIn()
+	actions.onBargeIn(0)
 
 	select {
 	case <-fired:
@@ -569,11 +571,11 @@ func TestATerminalPhaseSaysItsLineAndStillWaitsForTheCallerToHearIt(t *testing.T
 	}
 
 	// The turn that carried the move does not count; the line's own does.
-	actions.onPlaybackDone(turnBefore)
+	actions.onPlaybackDone(turnBefore, true)
 	if !actions.isArmed() {
 		t.Fatal("the call ended on the playback of a turn that preceded the line")
 	}
-	actions.onPlaybackDone(turnBefore + 1)
+	actions.onPlaybackDone(turnBefore+1, true)
 	if actions.isArmed() {
 		t.Error("the caller heard the closing line and the call stayed open")
 	}
@@ -612,7 +614,7 @@ func TestATerminalPhaseThatFindsAnArmedTransferStillSaysItsLine(t *testing.T) {
 	if got := model.spokenLines(); len(got) != 1 || got[0] != "I am putting you through now." {
 		t.Fatalf("spoken lines = %v, want the hand-over line once", got)
 	}
-	actions.onPlaybackDone(turnBefore + 1)
+	actions.onPlaybackDone(turnBefore+1, true)
 	if got := sw.recordedTransfers(); len(got) != 1 || got[0] != "chan-9→7001" {
 		t.Errorf("transfers = %v, want the caller put through once the line was heard", got)
 	}
@@ -681,7 +683,7 @@ func TestSilenceThatMovesIntoALineAsksForOneTurnOnly(t *testing.T) {
 	o, session, model, engine, runtime, actions, log := deadAirHarness(t, announcingFlow)
 	model.answerLinesWithATurn(session)
 
-	o.handleDeadAir(session, runtime, actions, log)
+	o.handleDeadAir(session, runtime, actions, false, log)
 
 	if !engine.IsTerminal() {
 		t.Fatal("the test flow did not move on the silence")
@@ -711,7 +713,7 @@ func TestSilenceWithNoMoveStillPromptsTheModel(t *testing.T) {
 		"nodes": {"welcome": {"instruction": "Greet.", "tools": []}}
 	}`)
 
-	o.handleDeadAir(session, runtime, actions, log)
+	o.handleDeadAir(session, runtime, actions, false, log)
 
 	if got := model.spokenLines(); len(got) != 0 {
 		t.Errorf("spoken lines = %v, want none", got)
@@ -737,7 +739,7 @@ func TestSilenceThatMovesIntoAPhaseWithoutALineStillPromptsTheModel(t *testing.T
 		}
 	}`)
 
-	o.handleDeadAir(session, runtime, actions, log)
+	o.handleDeadAir(session, runtime, actions, false, log)
 
 	if !engine.IsTerminal() {
 		t.Fatal("the test flow did not move on the silence")
@@ -749,6 +751,135 @@ func TestSilenceThatMovesIntoAPhaseWithoutALineStillPromptsTheModel(t *testing.T
 		!strings.Contains(got[0], "goodbye") {
 		t.Errorf("cues sent = %v, want the goodbye cue once", got)
 	}
+}
+
+//
+// A goodbye in words that nothing hung up on (#147).
+//
+
+const farewellBackstopFlow = `{
+	"id": "farewell-backstop-test",
+	"specVersion": "v2",
+	"initialNode": "welcome",
+	"global": {"persona": "You answer the phone.", "closingTarget": "finish"},
+	"nodes": {
+		"welcome": {"instruction": "Greet.", "tools": ["hangup"]},
+		"finish": {"instruction": "Say goodbye.", "tools": [], "isTerminal": true,
+			"announce": {"en": "Sorry to have bothered you, goodbye.", "zh": "不好意思打扰了，再见。"}}
+	}
+}`
+
+func TestAGoodbyeWithoutHangupThenSilenceClosesTheCallWithoutAskingTheModel(t *testing.T) {
+	o, session, model, engine, runtime, actions, log := deadAirHarness(t, farewellBackstopFlow)
+	model.answerLinesWithATurn(session)
+
+	var claims claimWatch
+	claims.onBotSaid(1, "Alright, thanks for your time. Goodbye.")
+	if found := claims.onTurnDone(1, false, false); len(found) != 1 {
+		t.Fatalf("claims = %+v, want the unbacked farewell", found)
+	}
+
+	o.handleDeadAir(session, runtime, actions, claims.hasFarewellWithoutHangup(), log)
+
+	if !engine.IsTerminal() {
+		t.Fatal("the call did not move to the closing target")
+	}
+	if got := model.spokenLines(); len(got) != 1 || got[0] != "Sorry to have bothered you, goodbye." {
+		t.Errorf("spoken lines = %v, want the closing line once", got)
+	}
+	if got := model.recordedUserText(); len(got) != 0 {
+		t.Errorf("cues sent = %v, want none: the model is not asked anything", got)
+	}
+	if !actions.isArmed() {
+		t.Error("the closing target did not arm the ending")
+	}
+}
+
+func TestSilenceAfterAnOrdinaryTurnStillSendsTheCue(t *testing.T) {
+	o, session, model, engine, runtime, actions, log := deadAirHarness(t, farewellBackstopFlow)
+
+	var claims claimWatch
+	claims.onBotSaid(1, "What is your account number?")
+	claims.onTurnDone(1, false, false)
+
+	o.handleDeadAir(session, runtime, actions, claims.hasFarewellWithoutHangup(), log)
+
+	if engine.IsTerminal() || actions.isArmed() {
+		t.Fatal("an ordinary question ended the call")
+	}
+	if got := model.recordedUserText(); len(got) != 1 || !strings.Contains(got[0], "still there") {
+		t.Errorf("cues sent = %v, want the re-engagement cue once", got)
+	}
+}
+
+func TestAFarewellFollowedByAnotherTurnOrAToolCallIsNotActedOn(t *testing.T) {
+	var claims claimWatch
+	claims.onBotSaid(1, "Goodbye.")
+	claims.onTurnDone(1, false, false)
+	if !claims.hasFarewellWithoutHangup() {
+		t.Fatal("the unbacked farewell was not remembered")
+	}
+	claims.onBotSaid(2, "Actually, one more thing: what is your account number?")
+	claims.onTurnDone(2, false, false)
+	if claims.hasFarewellWithoutHangup() {
+		t.Error("a later ordinary turn did not take the farewell back")
+	}
+
+	claims.onBotSaid(3, "Goodbye.")
+	claims.onTurnDone(3, false, false)
+	claims.onToolCall()
+	if claims.hasFarewellWithoutHangup() {
+		t.Error("a tool call did not take the farewell back")
+	}
+
+	// A goodbye the platform asked for (an armed ending) or one the tool backs
+	// is not unbacked in the first place.
+	claims.onBotSaid(4, "Goodbye.")
+	claims.onTurnDone(4, false, true)
+	claims.onBotSaid(5, "Goodbye.")
+	claims.onTurnDone(5, true, false)
+	if claims.hasFarewellWithoutHangup() {
+		t.Error("a backed goodbye counted as unhung")
+	}
+}
+
+func TestTheFarewellBackstopLeavesAnArmedEndingACampaignAndAFlowWithoutATargetAlone(t *testing.T) {
+	t.Run("armed", func(t *testing.T) {
+		o, session, model, engine, runtime, actions, log := deadAirHarness(t, farewellBackstopFlow)
+		actions.arm(t.Context(), func() {})
+		o.handleDeadAir(session, runtime, actions, true, log)
+		if engine.IsTerminal() {
+			t.Error("the backstop moved a call whose ending is already armed")
+		}
+		if len(model.recordedUserText()) != 1 {
+			t.Error("the cue was not sent")
+		}
+	})
+	t.Run("campaign", func(t *testing.T) {
+		o, session, model, engine, runtime, actions, log := deadAirHarness(t, farewellBackstopFlow)
+		actions.campaignID = "c-1"
+		o.handleDeadAir(session, runtime, actions, true, log)
+		if engine.IsTerminal() {
+			t.Error("the backstop moved a campaign call")
+		}
+		if len(model.recordedUserText()) != 1 {
+			t.Error("the cue was not sent")
+		}
+	})
+	t.Run("no closing target", func(t *testing.T) {
+		o, session, model, engine, runtime, actions, log := deadAirHarness(t, `{
+			"id": "no-target", "specVersion": "v2", "initialNode": "welcome",
+			"global": {"persona": "You answer the phone."},
+			"nodes": {"welcome": {"instruction": "Greet.", "tools": []}}
+		}`)
+		o.handleDeadAir(session, runtime, actions, true, log)
+		if engine.IsTerminal() {
+			t.Error("the backstop moved a flow with nowhere to go")
+		}
+		if len(model.recordedUserText()) != 1 {
+			t.Error("the cue was not sent")
+		}
+	})
 }
 
 //
@@ -821,7 +952,7 @@ func TestTheTurnsWithoutToolWallClosesOnceTheCrossingReplyIsHeard(t *testing.T) 
 
 	replyInTurn(runtime, &wall, 1)
 	replyInTurn(runtime, &wall, 2)
-	o.handlePlaybackDone(2, &wall, session, runtime, actions, log)
+	o.handlePlaybackDone(2, true, &wall, session, runtime, actions, log)
 	if engine.IsTerminal() {
 		t.Fatal("two replies moved the call; the wall is crossed only when they exceed two")
 	}
@@ -832,7 +963,7 @@ func TestTheTurnsWithoutToolWallClosesOnceTheCrossingReplyIsHeard(t *testing.T) 
 	}
 
 	turnBefore := session.currentTurn()
-	o.handlePlaybackDone(3, &wall, session, runtime, actions, log)
+	o.handlePlaybackDone(3, true, &wall, session, runtime, actions, log)
 	if !engine.IsTerminal() {
 		t.Fatal("the caller heard the crossing reply and the call did not close")
 	}
@@ -850,7 +981,7 @@ func TestTheTurnsWithoutToolWallClosesOnceTheCrossingReplyIsHeard(t *testing.T) 
 			actions.isArmed(), actions.armedInTurn, turnBefore)
 	}
 
-	o.handlePlaybackDone(turnBefore+1, &wall, session, runtime, actions, log)
+	o.handlePlaybackDone(turnBefore+1, true, &wall, session, runtime, actions, log)
 	if actions.isArmed() {
 		t.Error("the caller heard the announce and the call stayed open")
 	}
@@ -869,7 +1000,7 @@ func TestTheTurnsWithoutToolWallAsksForAGoodbyeWhereTheClosingPhaseHasNoLine(t *
 	for n := 1; n <= 3; n++ {
 		replyInTurn(runtime, &wall, n)
 	}
-	o.handlePlaybackDone(3, &wall, session, runtime, actions, log)
+	o.handlePlaybackDone(3, true, &wall, session, runtime, actions, log)
 
 	if !engine.IsTerminal() || !actions.isArmed() {
 		t.Fatalf("terminal=%v armed=%v, want the call closing", engine.IsTerminal(), actions.isArmed())
@@ -898,8 +1029,8 @@ func TestALaterTurnSupersedesTheCrossingReply(t *testing.T) {
 		wall.toolCallTurn = 4
 		wall.onTurnDone(4, false, runtime)
 
-		o.handlePlaybackDone(3, &wall, session, runtime, actions, log)
-		o.handlePlaybackDone(4, &wall, session, runtime, actions, log)
+		o.handlePlaybackDone(3, true, &wall, session, runtime, actions, log)
+		o.handlePlaybackDone(4, true, &wall, session, runtime, actions, log)
 		if engine.IsTerminal() {
 			t.Fatal("the wall closed a call whose conversation moved on to a tool")
 		}
@@ -915,11 +1046,11 @@ func TestALaterTurnSupersedesTheCrossingReply(t *testing.T) {
 		// caller's words got turn 4.
 		replyInTurn(runtime, &wall, 4)
 
-		o.handlePlaybackDone(3, &wall, session, runtime, actions, log)
+		o.handlePlaybackDone(3, true, &wall, session, runtime, actions, log)
 		if engine.IsTerminal() {
 			t.Fatal("the superseded reply's playback moved the call")
 		}
-		o.handlePlaybackDone(4, &wall, session, runtime, actions, log)
+		o.handlePlaybackDone(4, true, &wall, session, runtime, actions, log)
 		if !engine.IsTerminal() || len(model.spokenLines()) != 1 {
 			t.Fatal("the reply the caller did hear did not close the call")
 		}
@@ -1219,7 +1350,7 @@ func TestTheBotSaysWhetherItMeantToEndTheCall(t *testing.T) {
 			t.Errorf("marked before the farewell played: %q", got)
 		}
 
-		actions.onPlaybackDone(session.currentTurn() + 1)
+		actions.onPlaybackDone(session.currentTurn()+1, true)
 		<-session.done
 
 		if got := sw.variable(marker); got != "HANGUP" {
@@ -1240,7 +1371,7 @@ func TestTheBotSaysWhetherItMeantToEndTheCall(t *testing.T) {
 		if err != nil || !result.IsOK {
 			t.Fatalf("transfer refused: %+v %v", result, err)
 		}
-		actions.onPlaybackDone(session.currentTurn() + 1)
+		actions.onPlaybackDone(session.currentTurn()+1, true)
 
 		if got := sw.variable(marker); got != "" {
 			t.Errorf("a transfer marked the call as finished (%q). If the transfer "+
@@ -1262,7 +1393,7 @@ func TestTheBotSaysWhetherItMeantToEndTheCall(t *testing.T) {
 		if _, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil {
 			t.Fatalf("hangup: %v", err)
 		}
-		actions.onPlaybackDone(session.currentTurn() + 1)
+		actions.onPlaybackDone(session.currentTurn()+1, true)
 		<-session.done
 
 		if got := sw.variable(marker); got != "" {
@@ -1306,7 +1437,7 @@ func TestAFlowThatConcludesAlsoSaysSo(t *testing.T) {
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(""), nil, log)
 
 	o.afterMove(engine.OnNoInput(), session, runtime, actions, log)
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 	<-session.done
 
 	if got := sw.variable("aicc_bot_finished"); got != "FLOW_END" {
@@ -1352,7 +1483,7 @@ func TestTheBotStampsItsDurationWhenTheCallerIsHandedOnNotWhenItDecides(t *testi
 			"spoken yet, so the caller's time with the bot is still growing", got)
 	}
 
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 	if got := sw.recordedTransfers(); len(got) != 1 {
 		t.Fatalf("transfers = %v, want the caller handed on", got)
 	}
@@ -1387,7 +1518,7 @@ func TestNothingArmedRunsOnceTheCallHasEnded(t *testing.T) {
 
 	actions.disarm() // the caller hung up while the bridge line was playing
 
-	actions.onPlaybackDone(session.currentTurn() + 1)
+	actions.onPlaybackDone(session.currentTurn()+1, true)
 	if got := sw.recordedTransfers(); len(got) != 0 {
 		t.Errorf("transferred a channel whose call had ended: %v", got)
 	}
@@ -1705,7 +1836,7 @@ func TestAClosingLineCutShortEndsTheCallOnlyAtTheCap(t *testing.T) {
 		Status: "cancelled", InterruptedBy: provider.InterruptReasonSpeech}
 	time.Sleep(100 * time.Millisecond)
 
-	h.actions.onBargeIn()
+	h.actions.onBargeIn(0)
 	if h.isCallEnded() || !h.actions.isArmed() {
 		t.Fatal("the call ended on speech over a closing line that was never said")
 	}
@@ -1803,8 +1934,10 @@ func TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore(t *testing.T)
 				t.Errorf("spoken lines = %v, want [%s]", got, line)
 			}
 			if got := h.model.recordedCalls(); strings.Join(got, ",") !=
-				"SendToolResult,UpdateInstructions,SpeakText" {
-				t.Errorf("calls = %v, want the answer, the phase, then the line", got)
+				"UpdateInstructions,SendToolResult,SpeakText" {
+				// The phase first: the answer is what asks the model for its
+				// turn, and that turn must run under the new phase (#147).
+				t.Errorf("calls = %v, want the phase, the answer, then the line", got)
 			}
 			if h.isCallEnded() {
 				t.Fatal("the call ended on the playback of the turn the tool call came in")
@@ -1845,8 +1978,10 @@ func TestAToolThatMovesIntoALineThatIsNotTheEndIsUnchanged(t *testing.T) {
 				t.Errorf("a non-terminal line was asked for as one that ends the call: %v", got)
 			}
 			if got := h.model.recordedCalls(); strings.Join(got, ",") !=
-				"SendToolResult,UpdateInstructions,SpeakText" {
-				t.Errorf("calls = %v, want the answer, the phase, then the line", got)
+				"UpdateInstructions,SendToolResult,SpeakText" {
+				// The phase first: the answer is what asks the model for its
+				// turn, and that turn must run under the new phase (#147).
+				t.Errorf("calls = %v, want the phase, the answer, then the line", got)
 			}
 			if h.actions.isArmed() {
 				t.Error("a phase the call does not stop at armed an ending")
@@ -1864,7 +1999,7 @@ func TestACutShortTurnIsNotTheClosingLine(t *testing.T) {
 	actions.arm(t.Context(), func() { close(fired) })
 
 	actions.onTurnDone(session.currentTurn()+1, true)
-	actions.onBargeIn()
+	actions.onBargeIn(0)
 	select {
 	case <-fired:
 		t.Fatal("a turn stopped before its words existed counted as the closing line")
@@ -1872,7 +2007,7 @@ func TestACutShortTurnIsNotTheClosingLine(t *testing.T) {
 	}
 
 	actions.onTurnDone(session.currentTurn()+2, false)
-	actions.onBargeIn()
+	actions.onBargeIn(0)
 	select {
 	case <-fired:
 	case <-time.After(time.Second):
@@ -1941,7 +2076,7 @@ func TestTheSecondToolOfOneResponseIsNotRefusedByTheFirstsMove(t *testing.T) {
 				t.Errorf("spoken lines = %v, want the phase's line once", got)
 			}
 			if got := h.model.recordedCalls(); strings.Join(got, ",") !=
-				"SendToolResult,UpdateInstructions,SendToolResult,SpeakText" {
+				"UpdateInstructions,SendToolResult,SendToolResult,SpeakText" {
 				t.Errorf("calls = %v, want both answers ahead of the line", got)
 			}
 		})
@@ -2073,7 +2208,8 @@ func TestSpeechAfterTheClosingLineStillRunsTheArmedAction(t *testing.T) {
 	h.actions.graceCap = 5 * time.Second
 
 	h.callTool(t, flow.ToolHangup, `{}`)
-	h.leg.holdFrames(100)
+	// 40 frames is 800 ms of the line still to play: inside closingTailAck.
+	h.leg.holdFrames(40)
 	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
@@ -2083,6 +2219,150 @@ func TestSpeechAfterTheClosingLineStillRunsTheArmedAction(t *testing.T) {
 
 	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
 	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// Speech over the last second of the closing line is the caller answering the
+// goodbye, and ends the call at once, as above, with the tail measured before
+// the barge-in flush empties the queue.
+func TestSpeechOverTheLastSecondOfTheClosingLineEndsTheCallAtOnce(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 5 * time.Second
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(50) // 1 s still to play
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// The call that failed live (#147): the caller asks a new question 2.3 s into
+// a nine-second goodbye. That is an interruption, not an acknowledgement. The
+// line is cut off as any barge-in does, the ending stays armed, the call stays
+// up, and the playback of the answer to the question is what ends it.
+func TestSpeechEarlyInTheClosingLineIsAnsweredBeforeTheCallEnds(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 5 * time.Second
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(350) // 7 s still to play
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(200 * time.Millisecond)
+	if h.isCallEnded() {
+		t.Fatal("the call ended on a question asked over the start of the closing line")
+	}
+	if !h.actions.isArmed() {
+		t.Fatal("the ending was dropped; it must stay armed until the answer is heard")
+	}
+	if got := h.model.recordedInterrupts(); len(got) != 1 {
+		t.Fatalf("interrupts = %+v, want the barge-in's flush and truncate to have happened", got)
+	}
+
+	// The model answers the question; the caller hears it; the call ends.
+	h.leg.holdFrames(0)
+	h.playTurn()
+	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// The answer to an early interruption is itself a closing line: a caller who
+// answers it with "ok, bye" over its last second ends the call, and one who
+// cuts in on its start is answered again.
+func TestTheSameRuleHoldsOverTheAnswerToAnInterruption(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 5 * time.Second
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(350)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+
+	// The answer, long; the caller cuts in again early.
+	h.leg.holdFrames(300)
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(200 * time.Millisecond)
+	if h.isCallEnded() || !h.actions.isArmed() {
+		t.Fatal("the second early interruption ended the call")
+	}
+
+	// The next answer is short, and the caller acknowledges its last second.
+	h.leg.holdFrames(40)
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// The cap is the floor under all of it: when the answer to the interruption
+// never reports that it was heard, the call still ends. The cap starts over at
+// the interruption (so the answer has time to be made), and the answer's
+// TURN_DONE moves it to cover the audio queued.
+func TestAnInterruptedClosingLineStillEndsAtTheCapWhenTheAnswerNeverFinishesPlaying(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 300 * time.Millisecond
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(350)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+	if h.isCallEnded() {
+		t.Fatal("the call ended on the interruption")
+	}
+
+	// The answer generates; its playback is stuck, so only the cap can end it.
+	h.leg.holdFrames(5)
+	h.playTurn()
+	time.Sleep(lineDrainMargin / 2)
+	if h.isCallEnded() {
+		t.Fatal("the call ended before the answer and its margin could play")
+	}
+	h.awaitCallEnded(t, lineDrainMargin+time.Second)
+}
+
+// The unit rule: only the tail still to play decides.
+func TestOnlyTheUnplayedTailDecidesWhetherSpeechIsAnAcknowledgement(t *testing.T) {
+	actions, session, _ := testActions(t, &fakeSwitch{})
+	fired := make(chan struct{})
+	actions.arm(t.Context(), func() { close(fired) })
+	actions.onTurnDone(session.currentTurn()+1, false)
+
+	actions.onBargeIn(closingTailAck + time.Millisecond)
+	select {
+	case <-fired:
+		t.Fatal("speech over a long tail ran the armed action")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if actions.isLineSpoken {
+		t.Fatal("the interrupted line still counts as said")
+	}
+	// Speech again before an answer exists changes nothing.
+	actions.onBargeIn(0)
+	select {
+	case <-fired:
+		t.Fatal("speech before any answer ran the armed action")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	actions.onTurnDone(session.currentTurn()+2, false)
+	actions.onBargeIn(closingTailAck)
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("speech over the last closingTailAck did not run the armed action")
+	}
 }
 
 // Before the ending is armed a keypress takes the floor and reaches the model,
@@ -2300,4 +2580,192 @@ func TestTheOrchestratorPassesTheDeadAirTimeoutToTheSession(t *testing.T) {
 	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
 	awaitBridgeEvent(t, session, EventTypePlaybackDone)
 	awaitBridgeEvent(t, session, EventTypeNoInput)
+}
+
+// The model answers an interruption in two turns, and the cap has to cover the
+// last of them (#147: the second answer was clipped by a cap that only the
+// first had moved).
+func TestTheCapCoversEveryAnswerToAnInterruptedClosingLine(t *testing.T) {
+	actions, session, _ := testActions(t, &fakeSwitch{})
+	leg := session.leg.(*fakeLeg)
+	actions.graceCap = 200 * time.Millisecond
+	fired := make(chan struct{})
+	actions.arm(t.Context(), func() { close(fired) })
+	armedTurn := session.currentTurn()
+
+	// The closing line finishes generating; the caller cuts in early on it.
+	leg.holdFrames(400)
+	actions.onTurnDone(armedTurn+1, false)
+	actions.onBargeIn(closingTailAck + time.Second)
+	leg.holdFrames(0)
+
+	// Answer one is short, answer two is long.
+	leg.holdFrames(5)
+	actions.onTurnDone(armedTurn+2, false)
+	leg.holdFrames(300) // 6 s queued
+	actions.onTurnDone(armedTurn+3, false)
+
+	actions.mu.Lock()
+	due := actions.capDue
+	actions.mu.Unlock()
+	if want := time.Now().Add(6*time.Second + lineDrainMargin - time.Second); due.Before(want) {
+		t.Fatalf("the cap is due in %v; it does not cover the second answer's playout",
+			time.Until(due))
+	}
+	select {
+	case <-fired:
+		t.Fatal("the action ran before the second answer was heard")
+	case <-time.After(400 * time.Millisecond):
+	}
+	actions.onPlaybackDone(armedTurn+3, true)
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("the second answer's PLAYBACK_DONE did not run the armed action")
+	}
+}
+
+// An ignored transfer or hangup is a conversation, not a success: the model
+// must not promise a transfer that will not happen.
+func TestAnIgnoredTransferOverAnArmedHangupIsRefused(t *testing.T) {
+	sw := &fakeSwitch{}
+	actions, _, _ := testActions(t, sw)
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("hangup = %+v, %v", result, err)
+	}
+	result, err := actions.TransferToAgent(t.Context(),
+		flow.TransferRequest{Queue: "support", Reason: "CALLER_REQUEST"})
+	if err != nil || result.IsOK || result.Error != "CALL_ENDING" || result.Hint == "" {
+		t.Fatalf("transfer over an armed hangup = %+v, %v; want a CALL_ENDING refusal", result, err)
+	}
+	// A repeated hangup is the model's own intent and stays a success.
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("repeated hangup = %+v, %v", result, err)
+	}
+	if got := sw.recordedTransfers(); len(got) != 0 {
+		t.Errorf("transfers = %v, want none", got)
+	}
+}
+
+// armInterruptedHangup arms a hangup, finishes the closing line's turn and has
+// the caller cut in early on it. It returns the closing line's turn and a
+// channel closed when the hangup's action runs.
+func armInterruptedHangup(t *testing.T, graceCap time.Duration) (
+	*callActions, *Session, int, chan struct{}) {
+	t.Helper()
+	actions, session, _ := testActions(t, &fakeSwitch{})
+	actions.graceCap = graceCap
+	fired := make(chan struct{})
+	actions.armAs(t.Context(), false, func() { close(fired) })
+	armedTurn := session.currentTurn()
+	actions.onTurnDone(armedTurn+1, false)
+	actions.onBargeIn(closingTailAck + time.Second)
+	return actions, session, armedTurn, fired
+}
+
+func neverFired(t *testing.T, fired chan struct{}, why string) {
+	t.Helper()
+	select {
+	case <-fired:
+		t.Fatal(why)
+	case <-time.After(60 * time.Millisecond):
+	}
+}
+
+// #147: the caller asked a question over the closing line and the model
+// answered with a bare hangup. The hangup is refused once, the audio-less turn
+// does not end the call, and a turn that plays audio does.
+func TestABareHangupAfterAnInterruptionIsRefusedOnceAndItsSilentTurnDoesNotEndTheCall(t *testing.T) {
+	actions, _, armedTurn, fired := armInterruptedHangup(t, 5*time.Second)
+
+	result, err := actions.Hangup(t.Context(), flow.HangupRequest{})
+	if err != nil || result.IsOK || result.Error != "CALL_ENDING" || result.Hint == "" {
+		t.Fatalf("hangup = %+v, %v; want a CALL_ENDING refusal", result, err)
+	}
+	// The audio-less turn that carried the hangup.
+	actions.onTurnDone(armedTurn+2, false)
+	actions.onPlaybackDone(armedTurn+2, false)
+	neverFired(t, fired, "an audio-less turn's playback ran the armed ending")
+
+	// The answer, with audio.
+	actions.onTurnDone(armedTurn+3, false)
+	actions.onPlaybackDone(armedTurn+3, true)
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("the answer's playback did not run the armed ending")
+	}
+}
+
+// The refusal is spent once: a model that calls hangup again gets success, and
+// the ending runs on the playback of a turn with audio.
+func TestTheSecondHangupAfterTheRefusalSucceeds(t *testing.T) {
+	actions, _, armedTurn, fired := armInterruptedHangup(t, 5*time.Second)
+	if result, _ := actions.Hangup(t.Context(), flow.HangupRequest{}); result.IsOK {
+		t.Fatal("the first bare hangup was not refused")
+	}
+	result, err := actions.Hangup(t.Context(), flow.HangupRequest{})
+	if err != nil || !result.IsOK {
+		t.Fatalf("second hangup = %+v, %v; want success", result, err)
+	}
+	actions.onPlaybackDone(armedTurn+2, false)
+	neverFired(t, fired, "an audio-less turn's playback ran the armed ending")
+	actions.onPlaybackDone(armedTurn+3, true)
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("a turn with audio did not run the armed ending")
+	}
+}
+
+// A hangup in a turn that has spoken an answer is not bare, so it is not
+// refused.
+func TestAHangupAfterASpokenAnswerIsNotRefused(t *testing.T) {
+	actions, session, armedTurn, _ := armInterruptedHangup(t, 5*time.Second)
+	session.mu.Lock()
+	session.audioTurns++ // the answer finished generating with audio
+	session.mu.Unlock()
+	actions.onTurnDone(armedTurn+2, false)
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("hangup after a spoken answer = %+v, %v; want success", result, err)
+	}
+}
+
+// Without an interruption nothing changes: a repeated hangup succeeds and the
+// audio-less playback of the line's own turn still runs the ending.
+func TestARepeatedHangupWithoutAnInterruptionKeepsToday(t *testing.T) {
+	actions, session, _ := testActions(t, &fakeSwitch{})
+	fired := make(chan struct{})
+	actions.armAs(t.Context(), false, func() { close(fired) })
+	armedTurn := session.currentTurn()
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("repeated hangup = %+v, %v; want success", result, err)
+	}
+	actions.onTurnDone(armedTurn+1, false)
+	actions.onPlaybackDone(armedTurn+1, false)
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("playback without an interruption did not run the armed ending")
+	}
+}
+
+// The cap is the floor: after the refusal the model never speaks, and the
+// refusal restarted the cap so the call ends on it.
+func TestAfterTheRefusalAModelThatNeverSpeaksEndsAtTheCap(t *testing.T) {
+	actions, _, armedTurn, fired := armInterruptedHangup(t, 300*time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	if result, _ := actions.Hangup(t.Context(), flow.HangupRequest{}); result.IsOK {
+		t.Fatal("the bare hangup was not refused")
+	}
+	actions.onPlaybackDone(armedTurn+2, false)
+	// 200 ms in, the interruption's own cap would fire at 300 ms; the refusal
+	// restarted it, so it is not due yet.
+	time.Sleep(150 * time.Millisecond)
+	neverFired(t, fired, "the cap was not restarted by the refusal")
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("the cap did not end the call")
+	}
 }

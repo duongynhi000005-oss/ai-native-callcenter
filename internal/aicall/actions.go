@@ -47,6 +47,8 @@ type callActions struct {
 
 	mu    sync.Mutex
 	armed func()
+	// isArmedTransfer says the armed ending is a transfer to an agent.
+	isArmedTransfer bool
 	// armedInTurn is the model turn in progress when the action was armed —
 	// the turn the arming tool call arrived in. A tool arms inside its own
 	// dispatch, and a terminal phase whose line the tool result carries arms
@@ -63,8 +65,21 @@ type callActions struct {
 	// that ran to completion counts: a turn cut short before its words existed
 	// (a tool-result turn stopped to make room for a line, or one the caller
 	// talked over) is not the line, and counting it let a barge-in fire the
-	// action while the real line was still being generated.
+	// action while the real line was still being generated. A caller cutting
+	// in early on the line resets it (onBargeIn).
 	isLineSpoken bool
+	// isInterrupted says the caller cut in on the armed closing line with more
+	// than closingTailAck of it unplayed (onBargeIn). From then on the ending
+	// waits for a turn that plays audio (onPlaybackDone), and the model's first
+	// bare hangup is refused (Hangup).
+	isInterrupted bool
+	// audioTurnsAtInterrupt is Session.audioProgress's finished-turn count when
+	// the interruption was seen; a larger count later means the model has
+	// answered aloud since.
+	audioTurnsAtInterrupt int
+	// isHangupRefused says the one refusal has been spent; a second hangup
+	// succeeds.
+	isHangupRefused bool
 	// armedGeneration lets a cap timer recognise the action it belongs to, and
 	// retires the timer when the cap is moved.
 	armedGeneration int
@@ -87,12 +102,19 @@ func (a *callActions) TransferToAgent(ctx context.Context, request flow.Transfer
 			"asked", request.Queue)
 		return flow.Succeeded(nil, ""), nil
 	}
-	if a.isArmed() {
-		// The model repeating itself: the ending is already on its way, and a
-		// second transfer would restamp the channel and restart the wait.
+	if isArmed, isTransfer := a.armedState(); isArmed {
 		a.log.Info("transfer ignored: the call's ending is already armed",
-			"asked", request.Queue)
-		return flow.Succeeded(nil, ""), nil
+			"asked", request.Queue, "isArmedTransfer", isTransfer)
+		if isTransfer {
+			// The model repeating itself: the transfer it wants is already on
+			// its way, and a second one would restamp the channel and restart
+			// the wait.
+			return flow.Succeeded(nil, ""), nil
+		}
+		// The armed ending is a hangup. Reporting success here had the model
+		// promise a transfer that never came (#147: "You'll be connected to an
+		// agent", then the line dropped). A refusal is a conversation.
+		return flow.Failed("CALL_ENDING", a.endingHint(false)), nil
 	}
 	queue, ok := a.queueForTransfer(ctx, request.Queue)
 	if !ok {
@@ -128,7 +150,7 @@ func (a *callActions) TransferToAgent(ctx context.Context, request flow.Transfer
 		}
 	}
 
-	a.arm(ctx, func() {
+	a.armAs(ctx, true, func() {
 		a.log.Info("transferring the caller", "queue", queue.Name, "ext", queue.ExtNumber)
 		// Last, because they are the only ones of the bot's stamps still
 		// changing.
@@ -252,9 +274,20 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 		a.log.Info("hangup ignored: the call's time limit has already decided how it ends")
 		return flow.Succeeded(nil, ""), nil
 	}
-	if a.isArmed() {
+	if isArmed, isTransfer := a.armedState(); isArmed {
 		// The ending already armed stands, and the ledger keeps its outcome.
-		a.log.Info("hangup ignored: the call's ending is already armed")
+		a.log.Info("hangup ignored: the call's ending is already armed",
+			"isArmedTransfer", isTransfer)
+		if isTransfer {
+			// The caller is being put through; saying the call is over would
+			// contradict that. Told so, the model says at most a short line.
+			return flow.Failed("CALL_ENDING", a.endingHint(true)), nil
+		}
+		if a.refuseBareHangup() {
+			return flow.Failed("CALL_ENDING", a.interruptedHangupHint()), nil
+		}
+		// A repeated hangup is the model's intent exactly; the ending runs on
+		// the playback of a turn that played audio (onPlaybackDone).
 		return flow.Succeeded(nil, ""), nil
 	}
 	if a.recorder != nil {
@@ -275,7 +308,13 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 // changes nothing. Replacing it moved armedInTurn and restarted the cap on
 // every repeat, so a model that called transfer_to_agent three times waited
 // for a turn after the last call and hit the cap ten seconds after it (#25).
-func (a *callActions) arm(_ context.Context, action func()) {
+func (a *callActions) arm(ctx context.Context, action func()) {
+	a.armAs(ctx, false, action)
+}
+
+// armAs is arm, recording whether the ending is a transfer to an agent, which
+// decides how a later hangup or transfer from the model is answered.
+func (a *callActions) armAs(_ context.Context, isTransfer bool, action func()) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.isEndingLocked {
@@ -283,13 +322,15 @@ func (a *callActions) arm(_ context.Context, action func()) {
 		return
 	}
 	if a.armed != nil {
-		a.mu.Unlock()
 		a.log.Info("not arming: the call's ending is already armed")
 		return
 	}
 	a.armed = action
+	a.isArmedTransfer = isTransfer
 	a.armedInTurn = a.session.currentTurn()
 	a.isLineSpoken = false
+	a.isInterrupted = false
+	a.isHangupRefused = false
 	graceCap := a.graceCap
 	if graceCap <= 0 {
 		graceCap = actionGraceCap
@@ -336,6 +377,67 @@ func (a *callActions) isArmed() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.armed != nil
+}
+
+// armedState reports whether an ending is armed and whether it is a transfer.
+func (a *callActions) armedState() (isArmed, isTransfer bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.armed != nil, a.isArmedTransfer
+}
+
+// endingHint steers the model after it asked for a transfer or a hangup the
+// armed ending already settles. The call is ending, the answer to the caller
+// is short, and no transfer is promised unless one is armed.
+func (a *callActions) endingHint(isHangupAsked bool) string {
+	zh := a.session != nil && a.session.cfg.Session.Language == "zh"
+	if isHangupAsked {
+		if zh {
+			return "来电者正在被转接给人工,通话不会挂断。不要道别,最多简短说明正在为他们转接。"
+		}
+		return "The caller is already being transferred to an agent, so the call will not " +
+			"be hung up. Do not say goodbye; at most say briefly that they are being connected."
+	}
+	if zh {
+		return "通话已经在结束,不会转接人工。不要承诺转接;简短回答对方,或直接道别。"
+	}
+	return "The call is already ending and will not be transferred. Do not promise a " +
+		"transfer; answer the caller briefly or just say goodbye."
+}
+
+// refuseBareHangup reports whether this hangup is the one to refuse: the caller
+// interrupted the armed closing line, the model has said nothing aloud since
+// (in an earlier turn or so far in this one), and the refusal is unspent.
+// Without it the model answered a caller's question with a bare hangup and the
+// call ended on the audio-less turn, the question unanswered (#147). It refuses
+// once, so a model that insists gets its hangup and there is no loop. The cap,
+// restarted here, bounds the wait for the answer: a model that never speaks
+// still ends the call.
+func (a *callActions) refuseBareHangup() bool {
+	finished, isSpeaking := a.session.audioProgress()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.armed == nil || !a.isInterrupted || a.isHangupRefused ||
+		isSpeaking || finished > a.audioTurnsAtInterrupt {
+		return false
+	}
+	a.isHangupRefused = true
+	graceCap := a.graceCap
+	if graceCap <= 0 {
+		graceCap = actionGraceCap
+	}
+	a.startCapLocked(graceCap)
+	return true
+}
+
+// interruptedHangupHint tells the model to answer the caller who spoke over
+// its closing line, and that the call ends on its own after the answer.
+func (a *callActions) interruptedHangupHint() string {
+	if a.session != nil && a.session.cfg.Session.Language == "zh" {
+		return "来电者打断了你的结束语。请用一句简短的话回应他们刚才说的内容,通话会在这句话之后自动结束。不要调用 hangup。"
+	}
+	return "The caller spoke over your closing line. Reply to what they said in one short " +
+		"sentence; the call ends by itself right after it. Do not call hangup."
 }
 
 // lockEnding keeps the ending armed now — or already run — as the call's
@@ -403,9 +505,18 @@ func (a *callActions) disarm() {
 // onPlaybackDone runs whatever was armed, now that the caller has heard the
 // line that precedes it. turn says whose playback this was: the turn the tool
 // call arrived in does not count, only a turn the tool's result created.
-func (a *callActions) onPlaybackDone(turn int) {
+//
+// hasAudio says the turn played something to the caller. It is required only
+// once the caller has interrupted the closing line: a model that answers that
+// interruption with a bare tool call produces an audio-less turn whose
+// playback "ends" at once, and running the ending on it hung up on a question
+// nobody had answered (#147). Before an interruption the rule stays as it was
+// (the line's own turn carries audio, and an audio-less repeat of hangup in it
+// must still end the call), and the "bye now" acknowledgement never reaches
+// here (onBargeIn runs it directly). The cap bounds a model that never speaks.
+func (a *callActions) onPlaybackDone(turn int, hasAudio bool) {
 	a.mu.Lock()
-	if a.armed == nil || turn <= a.armedInTurn {
+	if a.armed == nil || turn <= a.armedInTurn || (a.isInterrupted && !hasAudio) {
 		a.mu.Unlock()
 		return
 	}
@@ -424,10 +535,14 @@ func (a *callActions) onPlaybackDone(turn int) {
 // after the call, and a cap counted from arming then cut the tail of the line
 // off (issue #24). The cap only ever moves later; a line that fits inside it
 // keeps the original.
+//
+// Every later turn does this, not only the first: a caller who interrupts the
+// closing line gets an answer, and a model may answer in two turns (#147: a
+// second answer clipped by a cap that only the first had moved).
 func (a *callActions) onTurnDone(turn int, isInterrupted bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.armed == nil || turn <= a.armedInTurn || isInterrupted || a.isLineSpoken {
+	if a.armed == nil || turn <= a.armedInTurn || isInterrupted {
 		return
 	}
 	a.isLineSpoken = true
@@ -437,24 +552,61 @@ func (a *callActions) onTurnDone(turn int, isInterrupted bool) {
 	}
 }
 
-// onBargeIn fires the armed action when the caller talks over or after the
-// closing line.
+// closingTailAck is how much of the closing line may still be unplayed when
+// the caller speaks for that speech to count as answering it. Caller speech
+// with at most this much of the line left ("bye now" over its last words) is
+// the acknowledgement the call ends on; with more left it is an interruption
+// and the line has not been said. 1.5 s is the last phrase or two of a
+// goodbye: short enough that a question cannot have been cut off in the middle
+// of the line, long enough to cover the lag between the caller starting to
+// answer and the detector reporting it.
+const closingTailAck = 1500 * time.Millisecond
+
+// onBargeIn decides what the caller taking the floor means for an armed ending.
+// unplayed is the audio still queued for the caller when they spoke, read
+// before the barge-in flushed it.
 //
-// This exists because of what real calls showed: the caller answers the
-// goodbye — "bye now" — the detector reports speech, the playback watch is
-// superseded, and PLAYBACK_DONE never arrives; every call then ended on the
-// grace cap, five silent seconds late. A caller speaking after the closing
-// line is not a reason to wait longer; it is the moment to act.
-func (a *callActions) onBargeIn() {
+// Over or before a line that has not finished generating, nothing changes: the
+// ending waits for a line.
+//
+// Over a line that finished generating, there are two cases, told apart by how
+// much of it the caller had left to hear:
+//
+//   - At most closingTailAck: the caller is answering the goodbye ("bye now").
+//     That is what this exists for: the detector reports speech, the playback
+//     watch is superseded, PLAYBACK_DONE never arrives, and every such call
+//     used to end on the grace cap, five silent seconds late. Act now.
+//   - More: the caller cut in on the line, with a question (#147: "wait, what's
+//     the trial offer?" 2.3 s into a 9 s line, and the call was ended on it).
+//     The flush and truncation the barge-in does proceed, the line no longer
+//     counts as said, the ending stays armed, and the model answers in a later
+//     turn whose playback (or, if the caller cuts that one short too, the same
+//     rule) runs it. The cap starts over so that answer has the time to be made.
+func (a *callActions) onBargeIn(unplayed time.Duration) {
 	a.mu.Lock()
 	if a.armed == nil || !a.isLineSpoken {
 		a.mu.Unlock()
 		return
 	}
+	if unplayed > closingTailAck {
+		a.isLineSpoken = false
+		a.isInterrupted = true
+		a.audioTurnsAtInterrupt, _ = a.session.audioProgress()
+		graceCap := a.graceCap
+		if graceCap <= 0 {
+			graceCap = actionGraceCap
+		}
+		a.startCapLocked(graceCap)
+		a.mu.Unlock()
+		a.log.Info("caller spoke over the closing line; answering them before the armed action runs",
+			"unplayedMs", unplayed.Milliseconds())
+		return
+	}
 	armed := a.armed
 	a.armed = nil
 	a.mu.Unlock()
-	a.log.Info("caller spoke after the closing line; running the armed action now")
+	a.log.Info("caller spoke after the closing line; running the armed action now",
+		"unplayedMs", unplayed.Milliseconds())
 	armed()
 }
 

@@ -334,6 +334,12 @@ func (r *Runtime) CloseAtTurnsWithoutToolWall() string {
 	return r.engine.CloseAtTurnsWithoutToolWall()
 }
 
+// CloseAtUnhungFarewell moves the call to the flow's closing target after a
+// goodbye that no tool call ended (Engine.CloseAtUnhungFarewell).
+func (r *Runtime) CloseAtUnhungFarewell() string {
+	return r.engine.CloseAtUnhungFarewell()
+}
+
 // run executes one tool: a built-in acts on the call, anything else is the
 // flow's own declarative backend call.
 func (r *Runtime) run(ctx context.Context, name string, args map[string]any) (Result, error) {
