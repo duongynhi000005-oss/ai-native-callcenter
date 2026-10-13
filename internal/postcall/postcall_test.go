@@ -31,6 +31,7 @@ type fakeLedger struct {
 	usedSec  int
 	cdrs     map[uuid.UUID]store.CDR
 	retries  []time.Time
+	cdrErr   error
 }
 
 func newFakeLedger() *fakeLedger {
@@ -171,6 +172,9 @@ func (f *fakeLedger) RecordingsByCall(_ context.Context, id uuid.UUID) ([]store.
 }
 
 func (f *fakeLedger) GetCDR(_ context.Context, id uuid.UUID) (store.CDR, error) {
+	if f.cdrErr != nil {
+		return store.CDR{}, f.cdrErr
+	}
 	if c, ok := f.cdrs[id]; ok {
 		return c, nil
 	}
@@ -756,5 +760,93 @@ func TestTheBackfillCanRerunAFailedCall(t *testing.T) {
 	}
 	if db.status(running.CallID) != store.TranscriptionRunning {
 		t.Error("a run in flight was restarted")
+	}
+}
+
+// channelsOf transcribes a stereo recording with speech on one side only and
+// returns the channel labels of the segments, given the call's CDR (nil: none).
+func channelsOf(t *testing.T, cdr *store.CDR, speechLeft bool) []string {
+	t.Helper()
+	db := newFakeLedger()
+	rec := db.addRecording(30)
+	if cdr != nil {
+		db.cdrs[rec.CallID] = *cdr
+	}
+	speech, quiet := tone(8000*3, 1000), make([]int16, 8000*3)
+	l, r := speech, quiet
+	if !speechLeft {
+		l, r = quiet, speech
+	}
+	asr := &fakeRecognizer{reply: func(int, transcribe.BatchRequest) (transcribe.BatchResult, error) {
+		return transcribe.BatchResult{Text: "x", Sentences: []transcribe.BatchSentence{{Text: "x", EndMs: 100}}}, nil
+	}}
+	s := newService(db, fakeAudio{b: stereo(l, r, 8000)}, asr, defaultCfg)
+	db.EnqueueTranscription(context.Background(), rec.CallID, rec.ID, 30)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	waitFor(t, "the run to finish", func() bool { return db.status(rec.CallID) == store.TranscriptionDone })
+	var out []string
+	for _, g := range db.segs[rec.CallID] {
+		out = append(out, g.Channel)
+	}
+	return out
+}
+
+// A call a phone places to the trunk is recorded on the phone's leg, so the
+// left channel is the person on the phone, not the customer.
+func TestTheChannelsFollowTheRecordedLeg(t *testing.T) {
+	t.Parallel()
+	flow := uuid.New()
+	cases := []struct {
+		name       string
+		cdr        *store.CDR
+		speechLeft bool
+		want       string
+	}{
+		{"click-to-dial, left", &store.CDR{CallType: "OUTBOUND", AgentIDs: []uuid.UUID{uuid.New()}}, true, store.ChannelFarEnd},
+		{"signed-out phone, left", &store.CDR{CallType: "OUTBOUND"}, true, store.ChannelFarEnd},
+		{"click-to-dial, right", &store.CDR{CallType: "OUTBOUND", AgentIDs: []uuid.UUID{uuid.New()}}, false, store.ChannelCustomer},
+		{"inbound", &store.CDR{CallType: "INBOUND"}, true, store.ChannelCustomer},
+		{"AI outbound by bot seconds", &store.CDR{CallType: "OUTBOUND", BotSec: 12}, true, store.ChannelCustomer},
+		{"AI outbound by flow", &store.CDR{CallType: "OUTBOUND", FlowID: &flow}, true, store.ChannelCustomer},
+		{"no CDR", nil, true, store.ChannelCustomer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := channelsOf(t, tc.cdr, tc.speechLeft); !slices.Equal(got, []string{tc.want}) {
+				t.Fatalf("channels = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+}
+
+// A CDR that cannot be read must not let a run settle with labels that may be
+// the wrong way round.
+func TestAnUnreadableCDRFailsTheAttemptInsteadOfGuessing(t *testing.T) {
+	t.Parallel()
+	db := newFakeLedger()
+	db.cdrErr = errors.New("connection reset")
+	rec := db.addRecording(30)
+	asr := &fakeRecognizer{reply: func(int, transcribe.BatchRequest) (transcribe.BatchResult, error) {
+		return transcribe.BatchResult{Text: "x", Sentences: []transcribe.BatchSentence{{Text: "x", EndMs: 100}}}, nil
+	}}
+	s := newService(db, fakeAudio{b: stereo(tone(8000*3, 1000), make([]int16, 8000*3), 8000)}, asr, defaultCfg)
+	db.EnqueueTranscription(context.Background(), rec.CallID, rec.ID, 30)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	waitFor(t, "the run to fail", func() bool { return db.status(rec.CallID) == store.TranscriptionFailed })
+	if len(db.segs[rec.CallID]) != 0 {
+		t.Errorf("segments written despite the CDR error: %v", db.segs[rec.CallID])
+	}
+	if len(db.retries) != defaultCfg.MaxAttempts-1 {
+		t.Errorf("%d retries, want %d", len(db.retries), defaultCfg.MaxAttempts-1)
+	}
+	if asr.calls() != 0 {
+		t.Errorf("recognizer called %d times before the mapping was known", asr.calls())
 	}
 }
