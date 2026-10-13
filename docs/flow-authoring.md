@@ -362,10 +362,18 @@ A deployment whose provider cannot be cued by text (doubao) refuses to **publish
 
 Rule for a closing phase (`docs/design/02-ai-voice.md` §6): after "anything else?", a decline ("no", "that's all") means call `hangup` at once and never ask a second time; a follow-up or a new request is handled normally; a request to repeat is honoured. Write it into the phase instruction, as `plan_change`'s `done` does.
 
-The engine cannot see a caller's decline, only tool results and silence, so two guards back the rule up. Both go to `global.closingTarget`, a terminal phase with its own `announce`:
+A model-spoken goodbye followed by `hangup` is unreliable ("say the closing line, then call hangup"). Some models, qwen among them, speak the line, end the turn without the tool call and leave the call open until dead air (issue [#147](https://github.com/rasonyang/ai-native-callcenter/issues/147)). Two shapes work:
+
+- **A phase whose whole job is to close is a terminal phase with an `announce`.** The platform arms the ending before the line is said, speaks the line as written and hangs up after the caller has heard it; the model does no part of it. Reach it with a transition on the tool that finishes the work. Everything the line needs must be renderable in `announce` (`{slots.x}`, `{slots.<tool>.<result field>}`, `{slots.<tool>.args.<k>}`); when the line depends on a result, branch with conditioned transitions to separate terminal phases (the seeded `lead_qualification` goes to `finish_advisor` on `result.lead_grade EQ A` and to `finish_thanks` otherwise, `early_collections` ends in `promised` and `no_bill`).
+- **In a phase where the conversation goes on, call the tool first.** Word the instruction as the `hangup` built-in does: call `hangup` immediately, do not say goodbye yourself, the closing line follows (`global.closingTarget`'s `announce`, or a phase-local `hangup` transition to a more specific terminal phase, as `early_collections` does for a caller who refuses to talk). A rule that says "apologize and call hangup" has the same defect as "say goodbye and call hangup".
+
+`closingTarget` and the dead-air path remain backstops, not the normal ending.
+
+The engine cannot see a caller's decline, only tool results and silence, so three guards back the rule up. All go to `global.closingTarget`, a terminal phase with its own `announce`:
 
 - **Silence.** In a phase where no authored rule can fire on `NO_INPUT`, three consecutive silences move the call to `closingTarget`. A rule you wrote that can fire on `NO_INPUT` in that phase, however it is conditioned, switches this default off for the phase.
 - **Tool-less replies.** `maxTurnsWithoutTool` bounds replies in one phase that follow the caller speaking and make no tool call. When the count exceeds it, the call moves to `closingTarget` after the caller has heard the reply. It resets on a tool call and on any phase change. Set it above the longest tool-less stretch any phase is meant to hold; the seeded flows use 10.
+- **A goodbye with no hangup.** If the model said goodbye in words, made no tool call, and the caller then goes quiet, the dead-air path moves the call to `closingTarget` instead of asking the model anything (issue [#147](https://github.com/rasonyang/ai-native-callcenter/issues/147)). It does not apply to a campaign call, a terminal phase, an armed ending or a flow with no `closingTarget`.
 
 These are backstops for a model that ignores the closing instruction, not the mechanism that normally ends a call. `maxTurns` with `fallbackTarget` is the equivalent backstop for a model that calls tools in a loop.
 

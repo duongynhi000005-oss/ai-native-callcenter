@@ -78,6 +78,16 @@ type Event struct {
 
 	Status string
 	Usage  provider.Usage
+	// Unplayed is, on a BARGE_IN, how much of the bot's audio was still queued
+	// for the caller when they took the floor. Read before the flush empties
+	// the queue; the armed ending needs it to tell an acknowledgement of the
+	// closing line ("bye now") from a caller cutting in on it.
+	Unplayed time.Duration
+	// HasAudio is, on a PLAYBACK_DONE, whether the turn queued any audio for
+	// the caller. A turn that only made a tool call plays nothing, and its
+	// playback "finishes" at once.
+	HasAudio bool
+
 	// IsInterrupted marks a TURN_DONE whose turn was cut short — by the
 	// caller, by a keypress, or to make room for another turn. Such a turn
 	// never reaches PLAYBACK_DONE, and what it produced is not a line anybody
@@ -181,6 +191,9 @@ type Session struct {
 	// how much the caller has heard, which is the one thing a provider cannot
 	// work out for itself.
 	framesQueued int
+	// audioTurns counts the turns that finished generating with audio queued
+	// for the caller. A turn that only carried a tool call has none.
+	audioTurns int
 	// isBotSpeaking gates barge-in: there is nothing to interrupt otherwise.
 	isBotSpeaking bool
 	// isResponding is true from a model turn's start to its end, audio or
@@ -799,6 +812,8 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 		}
 	}
 
+	// Before the flush: it empties the queue this measures.
+	unplayed := s.queuedPlayout()
 	playedMs, hadQueued := s.stopPlayback(true)
 	if isGenerating {
 		// A response is still open on the provider's side and will go on
@@ -838,7 +853,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	s.log.Info("the caller took the floor back",
 		"reason", string(reason), "playedMs", playedMs, "wasGenerating", isGenerating)
 	obs.RecordBotInterruption(string(reason))
-	s.emit(Event{Type: EventTypeBargeIn, Text: string(reason)})
+	s.emit(Event{Type: EventTypeBargeIn, Text: string(reason), Unplayed: unplayed})
 }
 
 // tellTheModelWhatWasHeard reports the interruption and how much of the turn
@@ -932,6 +947,14 @@ func (s *Session) queuedPlayout() time.Duration {
 	return time.Duration(s.leg.Pending()) * frameDurationMs * time.Millisecond
 }
 
+// audioProgress reports how many turns have finished generating with audio,
+// and whether the turn in progress has queued any so far.
+func (s *Session) audioProgress() (finishedTurns int, isCurrentSpeaking bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.audioTurns, s.framesQueued > 0
+}
+
 // currentTurn reports which model turn is in progress.
 func (s *Session) currentTurn() int {
 	s.mu.Lock()
@@ -948,7 +971,11 @@ func (s *Session) endTurn() {
 	s.isResponding = false
 	s.openTurns = max(s.openTurns-1, 0)
 	s.drainGeneration++
-	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq}
+	hasAudio := s.framesQueued > 0
+	if hasAudio {
+		s.audioTurns++
+	}
+	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq, hasAudio: hasAudio}
 	s.mu.Unlock()
 
 	select {
@@ -962,6 +989,8 @@ func (s *Session) endTurn() {
 type playbackMarker struct {
 	generation uint64
 	turn       int
+	// hasAudio says the turn queued audio for the caller.
+	hasAudio bool
 }
 
 //
@@ -997,7 +1026,7 @@ func (s *Session) watchPlayback() {
 		if !drained {
 			continue
 		}
-		s.emit(Event{Type: EventTypePlaybackDone, Turn: marker.turn})
+		s.emit(Event{Type: EventTypePlaybackDone, Turn: marker.turn, HasAudio: marker.hasAudio})
 		if s.afterPlaybackDone != nil {
 			s.afterPlaybackDone()
 		}

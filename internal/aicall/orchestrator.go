@@ -542,6 +542,7 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				runtime.OnCallerKeyed()
 
 			case EventTypeToolCall:
+				claims.onToolCall()
 				wall.toolCallTurn = event.Turn
 				if !batch.isOpen {
 					batch.isOpen = true
@@ -554,17 +555,21 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 					enforceLimit(limitCallerSilent)
 					continue
 				}
-				o.handleDeadAir(session, runtime, actions, log)
+				o.handleDeadAir(session, runtime, actions, claims.hasFarewellWithoutHangup(), log)
+				claims.consumeFarewell()
 
 			case EventTypeTurnDone:
 				reportClaims(event.Turn, claims.onTurnDone(event.Turn,
 					event.Turn == wall.toolCallTurn, actions.isArmed()))
+				if event.IsInterrupted {
+					claims.onTurnInterrupted()
+				}
 				actions.onTurnDone(event.Turn, event.IsInterrupted)
 				wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
 				o.closeToolBatch(&batch, session, runtime, log)
 
 			case EventTypeBargeIn:
-				actions.onBargeIn()
+				actions.onBargeIn(event.Unplayed)
 
 			case EventTypePlaybackDone:
 				// A limit waiting for the floor goes first, ahead of the
@@ -588,7 +593,7 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 					isLimitWaiting = false
 					limitDue = nil
 				}
-				o.handlePlaybackDone(event.Turn, &wall, session, runtime, actions, log)
+				o.handlePlaybackDone(event.Turn, event.HasAudio, &wall, session, runtime, actions, log)
 
 			case EventTypeFailed:
 				// The conversation cannot continue; the caller still can.
@@ -685,18 +690,22 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 				log.Warn("could not update instructions", "error", err)
 			}
 		}
-		if err := session.AnswerTool(event.ToolCallID, output, ""); err != nil {
-			log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
-		}
 		if moved != "" {
 			// A phase change re-pins the standing instructions, which is what
 			// keeps collected facts alive past a provider's context limits.
-			// A later move in the batch replaces this one's line.
+			// It goes BEFORE the answer: the answer is what asks the model for
+			// its next turn, and a turn asked for first runs under the phase
+			// the call just left (the model answered the new phase's question
+			// with the old phase's instruction). Same order as the terminal
+			// path below. A later move in the batch replaces this one's line.
 			o.enterPhase(moved, session, runtime, actions, log)
 			batch.lineOwedIn = ""
 			if runtime.Announce() != "" {
 				batch.lineOwedIn = moved
 			}
+		}
+		if err := session.AnswerTool(event.ToolCallID, output, ""); err != nil {
+			log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
 		}
 		return
 	}
@@ -848,8 +857,16 @@ func (o *Orchestrator) armTheEnding(moved string, session *Session,
 
 // handleDeadAir asks the model to re-engage a silent caller, or moves the flow
 // on when its rules treat silence as an answer.
+//
+// isFarewellUnhung says the bot's last finished turn said goodbye in words and
+// made no tool call (claimWatch). That conversation is over and nobody ended
+// it, and asking the model anything makes it re-open a call it closed (#147:
+// "are you still there?", a second goodbye, a hangup 22 s late). So the flow's
+// closing target ends it, through the path every engine-decided ending takes.
+// Not when an ending is already armed, in a terminal phase, on a campaign
+// call, or in a flow with no closing target: those keep the cue.
 func (o *Orchestrator) handleDeadAir(session *Session, runtime *flow.Runtime,
-	actions *callActions, log *slog.Logger) {
+	actions *callActions, isFarewellUnhung bool, log *slog.Logger) {
 
 	moved := runtime.OnNoInput()
 	// A move that carried words of its own has already asked for the next
@@ -861,10 +878,30 @@ func (o *Orchestrator) handleDeadAir(session *Session, runtime *flow.Runtime,
 		return
 	}
 
-	cue := "(The caller has been silent. Gently check whether they are still there " +
-		"and repeat the current question.)"
+	if isFarewellUnhung && !actions.isArmed() && !actions.isCampaign() {
+		if closing := runtime.CloseAtUnhungFarewell(); closing != "" {
+			log.Info("the bot said goodbye without hanging up and the caller went quiet; "+
+				"closing the call at the flow's closing target", "node", closing)
+			if o.afterMove(closing, session, runtime, actions, log) {
+				return
+			}
+			if err := session.SendCue(goodbyeCue(runtime.Engine().Lang(), true)); err != nil {
+				log.Warn("could not ask for the goodbye", "error", err)
+			}
+			return
+		}
+	}
+
+	// A model that closed the conversation in words and never called hangup
+	// (#147) is waiting here too, and "repeat the current question" made it
+	// re-ask a question it had already filed. So the cue says which way to
+	// go: a closed conversation is ended with the tool, silently.
+	cue := "(The caller has been silent. If your last turn closed the conversation " +
+		"(a goodbye or a closing line), call hangup now without saying anything. " +
+		"Otherwise gently check that they are still there and briefly repeat the current question.)"
 	if runtime.Engine().Lang() == flow.LangZH {
-		cue = "（来电者一直没有说话。请温和地确认对方是否还在线，并重复当前的问题。）"
+		cue = "（来电者一直没有说话。如果你上一轮已经结束了对话（道别或说了结束语），请立即调用 hangup，不要再说话。" +
+			"否则请温和地确认对方是否还在线，并简短重复当前的问题。）"
 	}
 	if moved != "" && runtime.Engine().IsTerminal() {
 		// The flow has decided the conversation is over; the model's next words
@@ -939,13 +976,13 @@ func (w *turnsWithoutToolWatch) onTurnDone(turn int, isInterrupted bool, runtime
 // closing phase with no line gets the goodbye cue instead, as handleDeadAir's
 // terminal move does — without it the model has nothing to answer and the call
 // ends on the grace cap in silence.
-func (o *Orchestrator) handlePlaybackDone(turn int, wall *turnsWithoutToolWatch,
+func (o *Orchestrator) handlePlaybackDone(turn int, hasAudio bool, wall *turnsWithoutToolWatch,
 	session *Session, runtime *flow.Runtime, actions *callActions, log *slog.Logger) {
 
 	// An action already armed ends the call its own way; the wall has nothing
 	// to add to it.
 	wasArmed := actions.isArmed()
-	actions.onPlaybackDone(turn)
+	actions.onPlaybackDone(turn, hasAudio)
 	if wasArmed || wall.crossedInTurn == 0 || turn != wall.crossedInTurn {
 		return
 	}

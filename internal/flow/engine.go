@@ -385,6 +385,20 @@ func (e *Engine) CloseAtSessionLimit() string {
 	return e.enter(target)
 }
 
+// CloseAtUnhungFarewell moves the call to the flow's closing target because the
+// bot said goodbye in words, made no tool call, and the caller has gone quiet
+// (#147). It returns the new phase, or an empty string when there is nowhere to
+// go: no closing target, or the call is already in a terminal phase.
+func (e *Engine) CloseAtUnhungFarewell() string {
+	target := e.spec.Global.ClosingTarget
+	if target == "" || e.current.IsTerminal {
+		return ""
+	}
+	e.log.Warn("the bot said goodbye without a tool call; closing the call",
+		"node", e.current.id, "target", target)
+	return e.enter(target)
+}
+
 // resetTurnsWithoutTool starts the wall's count over.
 func (e *Engine) resetTurnsWithoutTool() {
 	e.turnsWithoutTool = 0

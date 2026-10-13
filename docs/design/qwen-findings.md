@@ -278,6 +278,48 @@ later turn's playback. On `d31ad143` the caller spoke twice and the transfer ran
 on the second, 13:33:45.039, 6.5 s after the tool; a caller who stays silent
 waits for the 10 s cap.
 
+**W-Q6 — N tool results asked N times for a turn, and qwen speaks a closing line
+without calling the tool (issue #147, 2026-10-13).** Two findings from the dev
+logs of 2026-10-12, both about a call that should have ended on a `hangup` and
+idled until dead air instead.
+
+*The race.* A response that called N tools produced N-1 `invalid_value: Cannot
+create response while another response is in progress` WARNs, about 100 ms after
+the batch (for example `lead_submit` moving the call to its next phase). By the
+time the orchestrator sends the results, `response.done` has been handled, so
+`isResponseOpen` is false and W-Q4's owed-turn rule does not apply. The first
+`SendToolResult` asks for the turn (`isResponseRequested` is set); until the
+provider reports `response.created` nothing is open, and the second result asked
+again. The provider refused the duplicate, harmlessly for the turn itself, but
+the WARN count of a healthy call stopped meaning anything. Fixed in
+`Realtime.SendToolResult`: a turn that is already asked for and not yet started
+covers the results that follow it, so one batch asks for exactly one response
+(`TestSeveralToolResultsAfterTheResponseEndedAskForOneTurn`). The flag is
+cleared when the response is created (as before) and now also when the provider
+refuses a request for any reason but a response already running, so a refused
+request never swallows a later legitimate turn. What this does not prove: a
+later result in the batch reaches the provider after the `response.create` that
+the first result asked for, so that response may be made without it. It was not
+measured whether qwen reads the later outputs; the live calls to check it are
+the ones that answer a multi-tool batch.
+
+*The closing line without the tool.* In a phase whose instruction said "say the
+closing line, then call `hangup`" (lead_qualification `done`, early_collections
+`promised`), qwen spoke the line, ended the turn with no tool call, and the call
+idled until the 8 s dead-air cue or the caller speaking; only then did it call
+`hangup`. The unbacked-claim check saw it (`claim=FAREWELL phrase=再见`). The
+model treats the spoken goodbye as having done the job. The proven shapes are
+tool-first (`hangup` first, the goodbye after it, as `novanet_support`'s
+`welcome` and the global `hangup` -> `closingTarget` rule) and a terminal phase
+with an `announce`, where the platform arms the ending before the line is spoken
+and does not depend on the model. The seeded closing phases were moved to those
+shapes and the authoring rule written down (`docs/flow-authoring.md` 5.3).
+Backstops added: the dead-air cue now tells a model that has closed the
+conversation to call `hangup` silently instead of repeating the question, the
+farewell detector reads the closing phrases the flows use, and a non-terminal
+phase move now sends the new phase's instructions before the tool answer asks
+for a turn, so that turn is not made under the previous phase.
+
 ## 7. Observations that are not defects
 
 **The doubled goodbye.** Even when the announce is said correctly, the caller

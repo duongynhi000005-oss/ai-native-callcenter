@@ -85,6 +85,30 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- AI calls: a bot no longer says its closing line and then leaves the call
+  open until the dead-air timer. The seeded closing phases that asked the model
+  to speak a goodbye and then call `hangup` (`lead_qualification`,
+  `early_collections`, `campaign_lead_followup`) are now terminal phases with an
+  `announce`, or tool-first, and `docs/flow-authoring.md` states the rule. On
+  the Realtime clients one batch of tool results now asks for one response, not
+  one per result (no more `Cannot create response while another response is in
+  progress` WARNs); a non-terminal phase change sends the new instructions
+  before the tool answer asks for a turn; the dead-air cue tells a bot that has
+  closed the conversation to call `hangup` instead of repeating its question;
+  and the unbacked-claim check reads "Thanks for your time", "have a great day"
+  and "祝您生活愉快" as farewells. A caller who speaks over the start of the closing
+  line (more than 1.5 s of it still unplayed) is now answered before the armed
+  hangup or transfer runs, instead of the call ending on their question; speech
+  over its last 1.5 s still ends the call at once. The grace cap covers every
+  answer to such an interruption, not only the first, and a `transfer_to_agent`
+  or `hangup` the armed ending makes pointless is refused (`CALL_ENDING`) so the
+  model does not promise a transfer that will not happen; after such an
+  interruption the model's first bare `hangup` is refused once, and only a turn
+  that played audio runs the ending. A bot that says goodbye in
+  words without calling `hangup`, followed by a silent caller, is closed through
+  `closingTarget` instead of being asked "are you still there?". `early_collections`
+  now has an owner-refuses branch in `greet`, no model-spoken goodbye in its
+  `hangup` rule, and `maxTurnsWithoutTool: 10` (#147).
 - Installer: on Linux, `.env` is root-owned and mode 0600, so the closing
   message's "the password is `AICC_SEED_PASSWORD` in `/opt/aicc/.env`" led to
   a `Permission denied`. The installer now also prints the command that reads

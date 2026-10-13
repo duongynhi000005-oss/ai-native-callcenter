@@ -70,8 +70,15 @@ var claimPatterns = []claimPattern{
 			`|已(?:经)?(?:为|帮|给)?您(?:记录|登记|提交|转达|留言)` +
 			`|(?:留言|信息|请求|回电请求)已(?:经)?(?:记录|登记|提交|转达)`)},
 	// Farewell: a goodbye is a claim that the call is ending.
+	// Besides the word itself, the closing phrases the seeded flows use ("Thanks
+	// for your time", "祝您生活愉快"). A plain "thank you" is not one: it is said
+	// mid-call all the time.
 	{store.UnbackedClaimFarewell, regexp.MustCompile(
-		`\b(?:good-?bye|bye-bye|bye now)\b|再见|拜拜`)},
+		`(?i)\b(?:good-?bye|bye-bye|bye now)\b|` +
+			`\bthank(?:s| you) for your (?:time|cooperation)\b|` +
+			`\bhave a (?:great|good|nice|wonderful|lovely) (?:day|evening|night)\b|` +
+			`\btake care(?:[.!,]|\s*$)|` +
+			`再见|拜拜|祝您[^，。！？,.!?]{0,8}愉快|感谢您的(?:配合|时间)|感谢配合`)},
 }
 
 // notAClaim marks a sentence that offers or supposes rather than claims.
@@ -142,6 +149,35 @@ type claimWatch struct {
 	isLastDoneBacked bool
 	// isToolReplyNext says the next turn to finish answers a tool result.
 	isToolReplyNext bool
+	// isFarewellUnhung says the latest finished turn said goodbye in words
+	// with nothing behind it: no tool call, no armed ending (#147). The next
+	// turn of any kind, or a tool call, takes it back.
+	isFarewellUnhung bool
+}
+
+// hasFarewellWithoutHangup reports whether the bot's last finished turn said
+// goodbye and did nothing to end the call. A caller who then goes quiet is
+// not waiting for a question; the conversation is over and nobody ended it.
+func (w *claimWatch) hasFarewellWithoutHangup() bool { return w.isFarewellUnhung }
+
+// onToolCall takes the farewell back: the model is acting after all.
+func (w *claimWatch) onToolCall() { w.isFarewellUnhung = false }
+
+// onTurnInterrupted takes the farewell back: a turn the caller talked over was
+// not heard to the end, so nothing was said that the call could be left on.
+func (w *claimWatch) onTurnInterrupted() { w.isFarewellUnhung = false }
+
+// consumeFarewell takes the farewell back once it has been acted on.
+func (w *claimWatch) consumeFarewell() { w.isFarewellUnhung = false }
+
+// hasFarewell reports whether any of the claims is a goodbye.
+func hasFarewell(found []claim) bool {
+	for _, c := range found {
+		if c.kind == store.UnbackedClaimFarewell {
+			return true
+		}
+	}
+	return false
 }
 
 // onBotSaid takes a final line of the bot's. A line for the turn that just
@@ -156,7 +192,9 @@ func (w *claimWatch) onBotSaid(turn int, text string) []claim {
 		if w.isLastDoneBacked {
 			return nil
 		}
-		return detectClaims(text)
+		found := detectClaims(text)
+		w.isFarewellUnhung = w.isFarewellUnhung || hasFarewell(found)
+		return found
 	case turn < w.lastDoneTurn:
 		return nil
 	}
@@ -176,6 +214,7 @@ func (w *claimWatch) onTurnDone(turn int, isToolCall, isArmed bool) []claim {
 	w.isToolReplyNext = isToolCall
 	w.lastDoneTurn = turn
 	w.isLastDoneBacked = isBacked
+	w.isFarewellUnhung = false
 
 	text := w.pending[turn]
 	for pendingTurn := range w.pending {
@@ -186,5 +225,7 @@ func (w *claimWatch) onTurnDone(turn int, isToolCall, isArmed bool) []claim {
 	if isBacked || text == "" {
 		return nil
 	}
-	return detectClaims(text)
+	found := detectClaims(text)
+	w.isFarewellUnhung = hasFarewell(found)
+	return found
 }

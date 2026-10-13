@@ -588,6 +588,13 @@ func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
 // never made. So while a response is open, or a tool turn is already owed,
 // the request is owed instead of sent, and releaseOwedTurn asks for it once
 // that response is done. Several results in one response owe one turn.
+//
+// A batch answered after its response has ended is the same case in another
+// shape: the first result asks for the turn, and until the provider reports
+// response.created nothing is open, so the next result would ask again and be
+// refused (qwen-findings W-Q6). A turn already asked for and not yet started
+// covers the results that follow it, so one batch of results asks for exactly
+// one response.
 func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 	if err := r.sendEvent(map[string]any{
 		"type": "conversation.item.create",
@@ -609,7 +616,13 @@ func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 	if isOwed {
 		r.isTurnOwed = true
 	}
+	isCovered := !isOwed && r.isResponseRequested
 	r.mu.Unlock()
+	if isCovered {
+		r.log.Debug("a turn is already asked for; this tool result rides on it",
+			"toolCallId", toolCallID)
+		return nil
+	}
 	if isOwed {
 		r.log.Debug("a response holds the floor; the turn for this tool result waits for it to end",
 			"toolCallId", toolCallID)
@@ -1292,6 +1305,17 @@ func (r *Realtime) handleError(event *wireEvent) {
 		r.log.Debug("the provider refused to delete an item",
 			"code", err.Code, "message", err.Message)
 		return
+	}
+
+	// A request for a turn that the provider refused for any reason but a
+	// response already running will never be created, so it must not go on
+	// covering the tool results that follow it (SendToolResult).
+	if !strings.Contains(err.Message, "another response is in progress") {
+		r.mu.Lock()
+		if !r.isResponseOpen.Load() {
+			r.isResponseRequested = false
+		}
+		r.mu.Unlock()
 	}
 
 	r.finishStart(err)

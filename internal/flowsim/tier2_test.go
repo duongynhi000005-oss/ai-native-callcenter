@@ -73,7 +73,7 @@ func scenarioOf(t *testing.T, body string) Scenario {
 
 const promiseScenario = `{"name":"promise","lang":"en","caller":"92223333",
 	"callerPersona":{"goal":"say you will pay on Friday","persona":"You are the account owner."},
-	"model":{"phase":"finish","ending":"hangup","visits":["promised"],"avoids":["need_transfer"]}}`
+	"model":{"phase":"promised","ending":"none","visits":["promised"],"avoids":["need_transfer"]}}`
 
 // The happy path: the bot model is shown the real instructions and tools, its
 // tool calls move the real engine, and the run is judged on the outcome.
@@ -81,7 +81,7 @@ func TestTier2PromiseCall(t *testing.T) {
 	backend := MockBackends()
 	bot := queue(
 		tool("bill_lookup", `{}`), text("You have a bill of 45.60 overdue."),
-		tool("promise_record", `{"pay_date":"Friday"}`), tool("hangup", `{}`), text("Goodbye."),
+		tool("promise_record", `{"pay_date":"Friday"}`),
 	)
 	caller := queue(text("Yes, it is me."), text("I will pay on Friday."), text(callerHangup))
 
@@ -94,10 +94,12 @@ func TestTier2PromiseCall(t *testing.T) {
 		t.Fatalf("scenario failed: %+v", r)
 	}
 	run := r.Runs[0]
-	if got := strings.Join(run.Path, ">"); got != "greet>remind>promised>finish" {
+	if got := strings.Join(run.Path, ">"); got != "greet>remind>promised" {
 		t.Errorf("path = %s", got)
 	}
-	if run.Ending != "hangup" {
+	// promised is a terminal phase: the platform ends the call after its
+	// announce, so the model never calls hangup.
+	if run.Ending != "none" {
 		t.Errorf("ending = %s", run.Ending)
 	}
 
@@ -125,8 +127,8 @@ func TestTier2PromiseCall(t *testing.T) {
 	// After the move the model is re-instructed with the new phase and has read
 	// the tool result as the runtime returned it.
 	last := bot.requests[len(bot.requests)-1]
-	if !strings.Contains(last.Messages[0].Content, "this Friday") && !strings.Contains(last.Messages[0].Content, "Friday") {
-		t.Errorf("the final system prompt does not carry the promised phase: %s", last.Messages[0].Content)
+	if !strings.Contains(strings.Join(run.Log, "\n"), "payment by Friday") {
+		t.Errorf("the promised phase's announce does not carry the date: %v", run.Log)
 	}
 	var sawResult bool
 	for _, m := range last.Messages {
@@ -288,7 +290,7 @@ func TestJudgeNamesWhatWentWrong(t *testing.T) {
 	bot := queue(tool("bill_lookup", `{}`), text("ok"), tool("hangup", `{}`), text("bye"))
 	r := RunModel(context.Background(), earlyCollections(t), backend,
 		ModelConfig{Bot: bot, Caller: queue(text("hi"), text("bye")), Runs: 1}, []Scenario{sc})[0]
-	for _, want := range []string{`ended in phase "finish", want "finish_transfer"`, `ended with "hangup"`, "no transfer succeeded",
+	for _, want := range []string{`ended in phase "finish_declined", want "finish_transfer"`, `ended with "hangup"`, "no transfer succeeded",
 		`never entered "disputed"`, `entered "remind", which it must not`} {
 		if !strings.Contains(r.Runs[0].Failure, want) {
 			t.Errorf("failure lacks %q: %s", want, r.Runs[0].Failure)
