@@ -442,6 +442,7 @@ func run() error {
 			announceCallback(ctx, hub),
 			announceBotSession(ctx, hub),
 			outboundSvc.Data(),
+			registry,
 			st.Attempts(),
 			cfg.IsBotGreetingGated,
 			cfg.BotGreetingMediaWait,

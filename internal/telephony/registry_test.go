@@ -517,3 +517,48 @@ func TestTheCallSaysWhenItIsBeingRecorded(t *testing.T) {
 		}
 	}
 }
+
+// A bot session starts after the call began and after the carrier answered, so
+// it asks the registry for both (#181). The carrier-facing leg is the
+// originator: an agent leg's answer is not the call becoming billable.
+func TestCallTimelineIsTheCallsStartAndTheCarrierLegsAnswer(t *testing.T) {
+	t.Parallel()
+	reg := NewRegistry(nullPublisher{})
+	t.Cleanup(reg.Shutdown)
+
+	created := time.Date(2026, 10, 12, 14, 46, 22, 0, time.UTC)
+	answered := created.Add(22 * time.Second)
+	callID := uuid.New()
+	if _, err := reg.CreateCall(t.Context(), callID, events.CallTypeOutbound, "en", true, created); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not yet answered: the start is known, the answer is not.
+	if err := reg.Do(callID, func(c *Call) {
+		p := c.AddParty("carrier-chan", "13800138000", created)
+		p.Role = RoleOriginator
+		agent := c.AddParty("agent-chan", "1008", created)
+		agent.Role, agent.AgentID = RoleTarget, idPtr(testAgentID)
+		agent.AnsweredAt = created.Add(time.Second)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gotCreated, gotAnswered, ok := reg.CallTimeline(callID)
+	if !ok || !gotCreated.Equal(created) || !gotAnswered.IsZero() {
+		t.Fatalf("before the answer: got %v, %v, %v; want %v, zero, true", gotCreated, gotAnswered, ok, created)
+	}
+
+	if err := reg.Do(callID, func(c *Call) {
+		c.PartyByChannel("carrier-chan").AnsweredAt = answered
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gotCreated, gotAnswered, ok = reg.CallTimeline(callID)
+	if !ok || !gotCreated.Equal(created) || !gotAnswered.Equal(answered) {
+		t.Fatalf("after the answer: got %v, %v, %v; want %v, %v, true", gotCreated, gotAnswered, ok, created, answered)
+	}
+
+	if _, _, ok := reg.CallTimeline(uuid.New()); ok {
+		t.Error("an unknown call reported a timeline")
+	}
+}

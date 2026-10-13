@@ -535,3 +535,71 @@ func TestACallNoAgentPlacedIsStillWrittenByTheBot(t *testing.T) {
 		})
 	}
 }
+
+// The bot's row begins when the call did and bills from the carrier answer
+// (#181). Per row: answeredAt >= startedAt, totalSec = endedAt - startedAt,
+// billSec = endedAt - answeredAt, ringSec = answeredAt - startedAt, and botSec
+// still counts from the moment the bot's leg came up.
+func TestABotRowTakesItsTimelineFromTheCall(t *testing.T) {
+	t.Parallel()
+	const talk = 40 * time.Second
+	sec := time.Second
+	for _, tt := range []struct {
+		name string
+		// created and answered are offsets from the bot session start; zero
+		// with has=false means the lookup knew nothing.
+		createdBefore  time.Duration
+		answeredBefore time.Duration
+		hasCreated     bool
+		hasAnswered    bool
+		wantRing       time.Duration
+	}{
+		{"placed at the answer", 0, 0, true, true, 0},
+		{"3 s of ringing", 3 * sec, 0, true, true, 3 * sec},
+		{"45 s of ringing", 45 * sec, 0, true, true, 45 * sec},
+		{"carrier answered before the bot leg came up", 5 * sec, 1 * sec, true, true, 4 * sec},
+		{"start known, answer not yet known", 3 * sec, 0, true, false, 3 * sec},
+		{"nothing known", 0, 0, false, false, 0},
+		{"creation later than the session (skew)", -2 * sec, 0, true, true, 0},
+		{"answer later than the session (skew)", 3 * sec, -2 * sec, true, true, 3 * sec},
+		{"answer before the call began", 3 * sec, 9 * sec, true, true, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			session := time.Now().Add(-talk)
+			r := newCallRecorder(uuid.New(), session, nil)
+			var created, answered time.Time
+			if tt.hasCreated {
+				created = session.Add(-tt.createdBefore)
+			}
+			if tt.hasAnswered {
+				answered = session.Add(-tt.answeredBefore)
+			}
+			r.setTimeline(created, answered)
+
+			ledger := newFakeLedger()
+			r.finish(ledger, testFacts(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if len(ledger.cdrs) != 1 {
+				t.Fatalf("rows = %d, want 1", len(ledger.cdrs))
+			}
+			c := ledger.cdrs[0]
+			if c.AnsweredAt.Before(c.StartedAt) {
+				t.Errorf("answeredAt %v precedes startedAt %v", c.AnsweredAt, c.StartedAt)
+			}
+			if want := int(c.EndedAt.Sub(c.StartedAt).Seconds()); c.TotalSec != want {
+				t.Errorf("totalSec = %d, want %d", c.TotalSec, want)
+			}
+			if want := int(c.EndedAt.Sub(c.AnsweredAt).Seconds()); c.BillSec != want {
+				t.Errorf("billSec = %d, want %d", c.BillSec, want)
+			}
+			if want := int(c.AnsweredAt.Sub(c.StartedAt).Seconds()); c.RingSec != want {
+				t.Errorf("ringSec = %d, want %d", c.RingSec, want)
+			}
+			if c.RingSec != int(tt.wantRing.Seconds()) {
+				t.Errorf("ringSec = %d, want %d", c.RingSec, int(tt.wantRing.Seconds()))
+			}
+			if want := int(c.EndedAt.Sub(session).Seconds()); c.BotSec != want {
+				t.Errorf("botSec = %d, want %d (from the bot's own start)", c.BotSec, want)
+			}
+		})
+	}
+}

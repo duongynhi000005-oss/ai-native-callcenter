@@ -38,9 +38,17 @@ type Ledger interface {
 // agent's call whoever it reached, so the human path writes its row whether or
 // not the bot hands it on (callFacts.isPlacedByAgent).
 type callRecorder struct {
-	callID     uuid.UUID
+	callID uuid.UUID
+	// startedAt and answeredAt are the CDR's: when the call began and when the
+	// carrier-facing leg was answered, which is when it became billable. Both
+	// start out as the bot session's own start and move earlier once the call's
+	// own timeline is known (setTimeline).
 	startedAt  time.Time
 	answeredAt time.Time
+	// botAnsweredAt is when the bot's leg came up. The bot's share of the call
+	// (botSec) and the flow's time budget run from here, whatever the carrier
+	// answer was: neither includes the time before the bot was reached.
+	botAnsweredAt time.Time
 
 	// transcript is the call's sole seq allocator and transcript writer. The
 	// recorder posts to it rather than accumulating, so the bot phase is
@@ -75,10 +83,34 @@ type callRecorder struct {
 
 func newCallRecorder(callID uuid.UUID, startedAt time.Time, actor *transcript.Actor) *callRecorder {
 	return &callRecorder{
-		callID:     callID,
-		startedAt:  startedAt,
-		answeredAt: startedAt, // a bot answers the moment the leg is up
-		transcript: actor,
+		callID:        callID,
+		startedAt:     startedAt,
+		answeredAt:    startedAt, // a bot answers the moment the leg is up
+		botAnsweredAt: startedAt,
+		transcript:    actor,
+	}
+}
+
+// setTimeline moves the row's startedAt and answeredAt to the call's own
+// facts: createdAt is when the call began (the first leg created, for an
+// outbound call the originate) and carrierAnsweredAt when the leg facing the
+// carrier was answered. A zero value is unknown and leaves the bot session's
+// start in place.
+//
+// Neither may be later than the bot session's start: the bot cannot be
+// reached before the call began or before it was answered, so a later value is
+// a clock that disagrees and the session's own start stands. The answer never
+// precedes the start.
+func (r *callRecorder) setTimeline(createdAt, carrierAnsweredAt time.Time) {
+	session := r.botAnsweredAt
+	if !createdAt.IsZero() && createdAt.Before(r.startedAt) {
+		r.startedAt = createdAt
+	}
+	if !carrierAnsweredAt.IsZero() && carrierAnsweredAt.Before(session) {
+		r.answeredAt = carrierAnsweredAt
+	}
+	if r.answeredAt.Before(r.startedAt) {
+		r.answeredAt = r.startedAt
 	}
 }
 
@@ -261,7 +293,7 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 	if hangupCause == "" {
 		hangupCause = "NORMAL_CLEARING"
 	}
-	botSec := int(endedAt.Sub(r.answeredAt).Seconds())
+	botSec := int(endedAt.Sub(r.botAnsweredAt).Seconds())
 
 	// Which end is which depends on who called whom, and the two facts we
 	// have do not move: the DID is always this side and the ANI is always the
@@ -311,8 +343,11 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 		// person answered — from the answer to the end. This path writes the
 		// row for calls that never reached a person, and those are billed too;
 		// leaving it at zero told the ledger they were free.
-		BillSec:     max(0, int(endedAt.Sub(r.answeredAt).Seconds())),
-		TotalSec:    int(endedAt.Sub(r.startedAt).Seconds()),
+		BillSec:  max(0, int(endedAt.Sub(r.answeredAt).Seconds())),
+		TotalSec: int(endedAt.Sub(r.startedAt).Seconds()),
+		// Ringing before the first answer: from the call's start to the answer
+		// on the leg facing the carrier. Zero when the timeline is unknown.
+		RingSec:     max(0, int(r.answeredAt.Sub(r.startedAt).Seconds())),
 		Status:      status,
 		HangupCause: hangupCause,
 		// Contained: the bot answered and finished the call itself, properly —
@@ -403,7 +438,7 @@ func (a *callActions) stampBotShare(facts *callFacts) {
 // about the disagreement on every correctly transferred call. A warning that
 // fires every time is one nobody reads.
 func (a *callActions) stampBotSec(recorder *callRecorder) {
-	botSec := int(time.Since(recorder.answeredAt).Seconds())
+	botSec := int(time.Since(recorder.botAnsweredAt).Seconds())
 	a.stampChannel("aicc_bot_sec", strconv.Itoa(botSec))
 }
 

@@ -2522,7 +2522,7 @@ export interface components {
             /** Format: uuid */
             primaryAgentId?: string;
             /**
-             * @description Seconds spent ringing an agent. For an answered call, from the answering leg's creation to its bridge; for one nobody answered, from the first leg dialled to the last one released — a queue that re-offers dials a fresh leg each time, so no single leg holds the answer.
+             * @description Seconds spent ringing. For a call a person answered, from the answering leg's creation to its bridge; for one nobody answered, from the first leg dialled to the last one released — a queue that re-offers dials a fresh leg each time, so no single leg holds the answer. For a call the bot answered and that never reached a person, the ringing before the bot answered: from startedAt to answeredAt.
              *
              *     Not a segment of the call to be added to the others: on a queued call it lies inside queueWaitSec, and on a call that never queued there is no queue window for it to lie inside, so it overlaps whatever else was happening. See totalSec.
              */

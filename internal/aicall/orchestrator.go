@@ -91,6 +91,17 @@ type CallDataSource interface {
 	CallData(callID uuid.UUID) map[string]any
 }
 
+// TimelineSource answers when a call began and when its carrier-facing leg was
+// answered, from the call the human path tracks. The bot session starts after
+// both, so its own clock cannot say; without this a bot-written row lost the
+// ringing before the answer.
+type TimelineSource interface {
+	// CallTimeline reports false when the call is not tracked (an unknown or
+	// minted id, a call already gone). A zero answeredAt means the
+	// carrier-facing leg has not been answered, or is not known.
+	CallTimeline(callID uuid.UUID) (createdAt, answeredAt time.Time, ok bool)
+}
+
 // LeadSink stores the lead a campaign call has concluded so far on its attempt.
 // The last write wins and its side effects (a DNC row, a callback) run once, in
 // the attempt's finish transaction, so this is only a write of the current
@@ -120,6 +131,9 @@ type OrchestratorConfig struct {
 	// Nil leaves the bot's ledger row without it, which is what happened
 	// before there was anywhere to ask.
 	CallData CallDataSource
+	// Timeline answers when a call began and was answered at the carrier. Nil
+	// keeps the bot session's own start for both.
+	Timeline TimelineSource
 	// Leads receives what record_lead concludes on a campaign call. Nil makes
 	// record_lead fail with a refusal the model can read.
 	Leads LeadSink
@@ -327,6 +341,13 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	// stamped by whoever originated it; the default is a caller dialing in.
 	direction := callTypeFromHeader(headers[headerCallType])
 	recorder := newCallRecorder(ledgerCallID, time.Now(), o.transcriptActor(ledgerCallID, direction))
+	// The row this session may write begins when the call did, not when the
+	// bot was reached (#181).
+	if o.cfg.Timeline != nil {
+		if createdAt, answeredAt, ok := o.cfg.Timeline.CallTimeline(ledgerCallID); ok {
+			recorder.setTimeline(createdAt, answeredAt)
+		}
+	}
 	facts := &callFacts{
 		callType:           direction,
 		isPlacedToCustomer: headers[headerPlacedToCustomer] == "true",
@@ -422,7 +443,7 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	}
 
 	o.drive(ctx, session, runtime, actions, recorder,
-		budgetFor(spec).since(recorder.answeredAt, time.Now()), log)
+		budgetFor(spec).since(recorder.botAnsweredAt, time.Now()), log)
 	// The call is over. Whatever was waiting for a closing line to be heard
 	// will never hear it, and the caller's channel is gone with the call.
 	actions.disarm()

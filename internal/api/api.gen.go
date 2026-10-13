@@ -1503,7 +1503,7 @@ type CDR struct {
 	// QueueWaitSec Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it.
 	QueueWaitSec int `json:"queueWaitSec"`
 
-	// RingSec Seconds spent ringing an agent. For an answered call, from the answering leg's creation to its bridge; for one nobody answered, from the first leg dialled to the last one released — a queue that re-offers dials a fresh leg each time, so no single leg holds the answer.
+	// RingSec Seconds spent ringing. For a call a person answered, from the answering leg's creation to its bridge; for one nobody answered, from the first leg dialled to the last one released — a queue that re-offers dials a fresh leg each time, so no single leg holds the answer. For a call the bot answered and that never reached a person, the ringing before the bot answered: from startedAt to answeredAt.
 	//
 	// Not a segment of the call to be added to the others: on a queued call it lies inside queueWaitSec, and on a call that never queued there is no queue window for it to lie inside, so it overlaps whatever else was happening. See totalSec.
 	RingSec   int       `json:"ringSec"`
