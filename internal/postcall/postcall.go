@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcribe"
 )
@@ -585,11 +586,27 @@ func (s *Service) transcribe(ctx context.Context, job store.CallTranscription) (
 	}
 	raw = nil
 
+	// The stereo record puts the recorded leg's read stream on the left.
+	// Inbound calls and AI outbound are recorded on the customer's leg, so
+	// left is the customer. A call a phone places to the trunk is recorded on
+	// the phone's own leg: left is the person on the phone, right the customer.
+	// No agent is required, because a dial from a signed-out phone carries
+	// none and is still recorded on the phone's leg. Decided once per run.
+	left, right := store.ChannelCustomer, store.ChannelFarEnd
+	cdr, err := s.db.GetCDR(ctx, job.CallID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return nil, err
+	case cdr.CallType == string(events.CallTypeOutbound) && cdr.BotSec == 0 && cdr.FlowID == nil:
+		left, right = store.ChannelFarEnd, store.ChannelCustomer
+	}
+
 	var pieces []store.TranscriptionSegment
 	for ch, samples := range pcm.Channels {
-		channel := store.ChannelCustomer
+		channel := left
 		if ch == 1 {
-			channel = store.ChannelFarEnd
+			channel = right
 		}
 		for _, clip := range transcribe.Clips(samples, pcm.Rate) {
 			res, err := s.rec.Recognize(ctx, transcribe.BatchRequest{
