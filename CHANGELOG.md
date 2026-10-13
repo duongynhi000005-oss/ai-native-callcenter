@@ -129,6 +129,11 @@ carries the one-line installer's files.
   when the extension comes back. Until the first answer the phone chip says
   "Connecting…", and the header's state timer says in a tooltip that it is the
   time spent in the current state (#187).
+- Live transcription on `qwen` sends the call's language as `language_hints`
+  on `qwen-audio-3.1-asr-flash-message` too. Since that model became the
+  default, nothing told the recogniser which language a call was in, and the
+  recognised language drifted within a call (an English "Hello." stored as
+  `哈喽。`) (#127).
 
 ## v0.4.0 - 2026-10-10
 

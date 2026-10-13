@@ -64,3 +64,6 @@ eslprobe
 web/.env.local
 
 CLAUDE.local.md
+
+# Generated language-drift test audio (internal/transcribe/testdata/langdrift/generate.py)
+internal/transcribe/testdata/langdrift/cache/

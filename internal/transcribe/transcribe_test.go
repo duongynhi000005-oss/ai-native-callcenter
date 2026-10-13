@@ -669,6 +669,12 @@ func TestQwenDefaultModelIsTheMessageFamily(t *testing.T) {
 // parameters the fake service received.
 func runTaskParams(t *testing.T, model string, cfg Config) map[string]any {
 	t.Helper()
+	return runTaskFrame(t, model, cfg).Payload.Parameters
+}
+
+// runTaskFrame is runTaskParams for the whole run-task frame.
+func runTaskFrame(t *testing.T, model string, cfg Config) dsRunTask {
+	t.Helper()
 	engine := newFakeEngine(t, func(c *websocket.Conn) {
 		_ = c.WriteJSON(map[string]any{"header": map[string]any{"event": "task-started"}})
 	})
@@ -684,11 +690,11 @@ func runTaskParams(t *testing.T, model string, cfg Config) map[string]any {
 		if err := json.Unmarshal([]byte(raw), &run); err != nil {
 			t.Fatalf("run-task did not decode: %v", err)
 		}
-		return run.Payload.Parameters
+		return run
 	case <-time.After(2 * time.Second):
 		t.Fatal("no run-task was sent")
 	}
-	return nil
+	return dsRunTask{}
 }
 
 func TestRunTaskParametersFollowTheModelFamily(t *testing.T) {
@@ -699,7 +705,10 @@ func TestRunTaskParametersFollowTheModelFamily(t *testing.T) {
 	if msg["intermediate_result_enabled"] != true {
 		t.Errorf("message model must ask for partials: %v", msg)
 	}
-	for _, k := range []string{"language_hints", "semantic_punctuation_enabled", "disfluency_removal_enabled"} {
+	if hints, ok := msg["language_hints"].([]any); !ok || len(hints) != 1 || hints[0] != "zh" {
+		t.Errorf("message model language_hints = %v", msg["language_hints"])
+	}
+	for _, k := range []string{"semantic_punctuation_enabled", "disfluency_removal_enabled"} {
 		if _, ok := msg[k]; ok {
 			t.Errorf("message model must not send %s: %v", k, msg)
 		}
@@ -754,5 +763,67 @@ func TestQwenModelGuard(t *testing.T) {
 	// The openai profile's model is not checked.
 	if err := (Profile{Name: ProviderOpenAI, Endpoint: "wss://x.invalid", Model: "anything"}).Validate(); err != nil {
 		t.Errorf("openai model checked: %v", err)
+	}
+}
+
+// A caller who hangs up while a sentence is still open gets that sentence as a
+// final: the partial arrived, Close asked the service to flush, and the final
+// that answers it is delivered before the session ends.
+func TestHangUpMidSentenceStillDeliversItsFinal(t *testing.T) {
+	t.Parallel()
+	f := newFakeEngine(t, func(c *websocket.Conn) {
+		_ = c.WriteJSON(map[string]any{"header": map[string]any{"event": "task-started"}})
+		_ = c.WriteJSON(dsResult(1, "my order number is", false))
+	})
+	f.onFinish = func(c *websocket.Conn) {
+		_ = c.WriteJSON(dsResult(1, "my order number is 4471.", true))
+		_ = c.WriteJSON(map[string]any{"header": map[string]any{"event": "task-finished"}})
+	}
+	client := newDashscope(Profile{Name: ProviderQwen, Endpoint: f.url(),
+		Model: "qwen-audio-3.1-asr-flash-message", SampleRate: 16000}, "k", nopLogger{})
+	if err := client.Start(t.Context(), Config{Language: "en"}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	got := make(chan Event, 16)
+	go func() {
+		for ev := range client.Events() {
+			got <- ev
+		}
+		close(got)
+	}()
+	deadline := time.After(3 * time.Second)
+	select { // the sentence is open: its partial has been heard
+	case ev := <-got:
+		if ev.Type != EventPartial {
+			t.Fatalf("first event = %v, want the open sentence's partial", ev.Type)
+		}
+	case <-deadline:
+		t.Fatal("no partial")
+	}
+	_ = client.Close(context.Background())
+	for {
+		select {
+		case ev, ok := <-got:
+			if !ok {
+				t.Fatal("the session ended without the open sentence's final")
+			}
+			if ev.Type == EventFinal && ev.Text == "my order number is 4471." {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the open sentence was lost on hang-up")
+		}
+	}
+}
+
+// A call whose language is unknown still starts, and says nothing about
+// language to the service on any family.
+func TestAnEmptyLanguageStillStarts(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"qwen-audio-3.1-asr-flash-message", "qwen-audio-3.1-asr-flash-streaming"} {
+		params := runTaskParams(t, model, Config{})
+		if _, ok := params["language_hints"]; ok {
+			t.Errorf("%s: language_hints sent for an empty language: %v", model, params)
+		}
 	}
 }

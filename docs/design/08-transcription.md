@@ -2088,9 +2088,12 @@ transcribed, finals arrived while audio streamed, and `task-finished` followed
   (one empty partial per sentence). The client sends `true`; partials are cumulative.
 - `disfluency_removal_enabled` exists only on this model (default false). Not sent, so a
   call transcript stays verbatim.
-- `language_hints`, `semantic_punctuation_enabled`, `multi_threshold_mode_enabled` and
+- ~~`language_hints`, `semantic_punctuation_enabled`, `multi_threshold_mode_enabled` and
   `special_word_filter` are documented unsupported (tolerated, no error). The client
-  sends neither `language_hints` nor `semantic_punctuation_enabled` for this family.
+  sends neither `language_hints` nor `semantic_punctuation_enabled` for this family.~~
+  *Superseded (2026-10-13, #127): `language_hints` is listed for this family and is now
+  sent; see the amendment below. `semantic_punctuation_enabled`,
+  `multi_threshold_mode_enabled` and `special_word_filter` remain unsupported and unsent.*
 - `vocabulary`, `context`, `continue-task`, `keep_dialect` and `vad_model` are supported.
 - Finals carry word `fixed:false` (`-streaming`: true), the payload has only
   `output.sentence`, and usage is billed in tokens. Nothing in the client reads word
@@ -2102,6 +2105,40 @@ fails only after `finish-task` with `task-failed InvalidParameter "Model not exi
 `Start()` cannot catch it. `Profile.Validate` therefore refuses, at startup, a qwen-client
 model outside the known DashScope-native families. The `-streaming` and `fun-asr-*` models
 remain available through `AICC_TRANSCRIBE_MODEL` with their parameters unchanged.
+
+**Amendment (2026-10-13, issue #127): the message family gets `language_hints`.**
+Since the 2026-09-24 switch nothing told the recogniser which language a call was in, and
+the recognised language drifted within a call (an English "Hello." stored as `halo.`, a
+Chinese count switching to English partials). The message family's run-task parameter list
+(<https://www.alibabacloud.com/help/en/model-studio/qwen-asr-message-client-events>) does
+list `language_hints` (up to 4 values, **applied to finals only**; partials are not
+steered), contrary to the note above. The client now sends `[cfg.Language]` on every
+DashScope family whenever the call's language is known, and nothing when it is empty. A
+free-text `context` (task `input.context`, 400 characters) was tried and did not change
+the language of the output, so the client does not send one.
+
+Run-task parameters by family, as `Start` sends them:
+
+| Parameter | `-message` | `-streaming`, `fun-asr-*` |
+|---|---|---|
+| `format` (`pcm`), `sample_rate`, `max_sentence_silence`, `heartbeat` | sent | sent |
+| `intermediate_result_enabled` (`true`) | sent (partials are off by default) | not sent |
+| `semantic_punctuation_enabled` (`true`) | not sent (unsupported) | sent |
+| `language_hints` (`[language]`) | sent when the language is known | sent when the language is known |
+| `vocabulary` (`term: 4`) | sent when `Config.Hints` is set | sent when `Config.Hints` is set |
+
+The comparison behind the change (a synthetic, deterministic test set; results are
+reported in the pull request, not here) lives in `internal/transcribe/testdata/langdrift/`:
+44 call-centre utterances per language, rendered clean, with background noise and with
+crosstalk, through 8 kHz G.711 and resampled to 16 kHz. Generate the audio, then stream it
+through the real client under each configuration (real money):
+
+```sh
+python3 internal/transcribe/testdata/langdrift/generate.py
+AICC_LIVE_PROVIDER_TEST=1 AICC_LANGDRIFT_OUT=/tmp/langdrift ALIYUN_API_KEY=… \
+  AICC_TRANSCRIBE_ENDPOINT=wss://<workspace>.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference \
+  go test -count=1 -run TestLiveLanguageDrift ./internal/transcribe/
+```
 
 **D15 — ~~the OpenAI path needs a 3:2 resampler~~ → CLOSED by measurement (2026-08-17):
 there is no Go-side resampler. The tap emits 24 kHz itself.**
