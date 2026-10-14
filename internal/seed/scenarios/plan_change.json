@@ -1,89 +1,230 @@
 {
   "scenarios": [
     {
-      "name": "caller verifies, picks a plan and the change is booked",
+      "name": "eligible account: check, submit, status, hangup",
+      "description": "10086001 is OK_TO_CHANGE: no identity check. The submit returns a ticket at once; the first status is PROCESSING, the second DONE.",
       "lang": "en",
       "caller": "13700001111",
       "steps": [
-        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {
-          "phase": "verify", "result": {"found": "1", "in_contract": "0"}}},
-        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "3333"}, "expect": {
-          "phase": "offer", "result": {"match": "1"}}},
-        {"call": "bb_plans", "expect": {"phase": "offer"}},
-        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 2}, "expect": {
-          "phase": "done", "slots": {"bb_change.args.plan_id": 2}}},
+        {"call": "plan_check", "args": {"service_no": "10086001"}, "expect": {
+          "phase": "confirm",
+          "result": {"decision": "OK_TO_CHANGE"},
+          "instructionContains": ["100M fibre, 68 yuan a month", "Plan 2, 500M fibre, 108 yuan a month"]}},
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "2"}, "expect": {
+          "phase": "submitted",
+          "slots": {"plan_submit.ticket": "PC-12001", "plan_submit.args.plan_id": "2"},
+          "instructionContains": ["PC-12001", "next billing cycle"]}},
+        {"call": "plan_status", "args": {"ticket": "PC-12001"}, "expect": {
+          "phase": "submitted", "result": {"state": "PROCESSING"}}},
+        {"call": "plan_status", "args": {"ticket": "PC-12001"}, "expect": {
+          "phase": "submitted", "result": {"state": "DONE"}}},
         {"call": "hangup", "expect": {"phase": "finish"}}
       ],
       "expect": {
-        "path": ["identity", "verify", "offer", "done", "finish"],
+        "path": ["identity", "confirm", "submitted", "finish"],
         "ending": "hangup",
-        "toolsRun": ["bb_account", "bb_verify", "bb_plans", "bb_change", "hangup"]
+        "toolsRun": ["plan_check", "plan_submit", "plan_status", "plan_status", "hangup"]
       }
     },
     {
-      "name": "a plan cannot be changed before the phone is verified",
+      "name": "chinese caller: the zh wording reaches the instructions",
+      "lang": "zh",
+      "caller": "13700001112",
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086001"}, "expect": {
+          "phase": "confirm",
+          "instructionContains": ["100M 光纤，每月 68 元", "套餐二，500M 光纤，每月 108 元"]}},
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "1"}, "expect": {
+          "phase": "submitted", "instructionContains": ["PC-12001", "下一个账期生效"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["identity", "confirm", "submitted", "finish"], "ending": "hangup"}
+    },
+    {
+      "name": "identity check passes, then the change is submitted",
+      "description": "10086003 is NEED_ID_VERIFY; the explanation is rendered in the verify phase and the plan options in confirm.",
       "lang": "en",
       "caller": "13700002222",
       "steps": [
-        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "verify"}},
-        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 2}, "expect": {"isRefused": true, "phase": "verify"}}
+        {"call": "plan_check", "args": {"service_no": "10086003"}, "expect": {
+          "phase": "verify",
+          "result": {"decision": "NEED_ID_VERIFY", "reason": "CHANGE_REQUIRES_ID_CHECK"},
+          "instructionContains": ["quick identity check"]}},
+        {"call": "plan_verify", "args": {"service_no": "10086003", "phone_last4": "5555"}, "expect": {
+          "phase": "confirm", "result": {"match": "1"},
+          "instructionContains": ["200M fibre, 78 yuan a month", "Plan 3, gigabit fibre"]}},
+        {"call": "plan_submit", "args": {"service_no": "10086003", "plan_id": "3"}, "expect": {"phase": "submitted"}}
       ],
-      "expect": {"path": ["identity", "verify"], "toolsRun": ["bb_account"]}
+      "expect": {"path": ["identity", "verify", "confirm", "submitted"], "toolsRun": ["plan_check", "plan_verify", "plan_submit"]}
     },
     {
-      "name": "two failed verifications go to a person",
+      "name": "one wrong phone check is retried, the second is right",
+      "lang": "en",
+      "caller": "13700002223",
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086003"}, "expect": {"phase": "verify"}},
+        {"call": "plan_verify", "args": {"service_no": "10086003", "phone_last4": "0000"}, "expect": {"phase": "verify", "result": {"match": "0"}}},
+        {"call": "plan_verify", "args": {"service_no": "10086003", "phone_last4": "5555"}, "expect": {"phase": "confirm"}}
+      ],
+      "expect": {"path": ["identity", "verify", "confirm"]}
+    },
+    {
+      "name": "two mismatches go to a person",
       "lang": "en",
       "caller": "13700003333",
       "queues": ["support-en"],
       "steps": [
-        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "verify"}},
-        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "0000"}, "expect": {"phase": "verify", "result": {"match": "0"}}},
-        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "1111"}, "expect": {"phase": "need_transfer"}},
-        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "VERIFY_FAILED", "summary": "could not verify"},
+        {"call": "plan_check", "args": {"service_no": "10086003"}, "expect": {"phase": "verify"}},
+        {"call": "plan_verify", "args": {"service_no": "10086003", "phone_last4": "0000"}, "expect": {"phase": "verify"}},
+        {"call": "plan_verify", "args": {"service_no": "10086003", "phone_last4": "1111"}, "expect": {
+          "phase": "need_transfer",
+          "instructionContains": ["NEED_ID_VERIFY", "CHANGE_REQUIRES_ID_CHECK"]}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "VERIFY_FAILED", "summary": "NEED_ID_VERIFY: phone check failed twice"},
           "expect": {"phase": "finish_transfer"}}
       ],
-      "expect": {"path": ["identity", "verify", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent"}
+      "expect": {
+        "path": ["identity", "verify", "need_transfer", "finish_transfer"],
+        "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-en", "reason": "VERIFY_FAILED"}
+      }
     },
     {
-      "name": "three unknown service numbers go to a person",
-      "lang": "zh",
+      "name": "the backend decides NEED_HUMAN for a contract account",
+      "description": "10086002 is inside its contract. The flow holds no rule: the decision and the reason reach the hand-over instruction, which tells the model to put them in the transfer summary.",
+      "lang": "en",
       "caller": "13700004444",
+      "queues": ["support-en"],
       "steps": [
-        {"call": "bb_account", "args": {"service_no": "00000001"}, "expect": {"phase": "identity", "result": {"found": "0"}}},
-        {"call": "bb_account", "args": {"service_no": "00000002"}, "expect": {"phase": "identity"}},
-        {"call": "bb_account", "args": {"service_no": "00000003"}, "expect": {"phase": "need_transfer"}}
+        {"call": "plan_check", "args": {"service_no": "10086002"}, "expect": {
+          "phase": "need_transfer",
+          "result": {"decision": "NEED_HUMAN", "reason": "IN_CONTRACT_EARLY_TERMINATION_FEE"},
+          "instructionContains": ["decision: NEED_HUMAN", "reason: IN_CONTRACT_EARLY_TERMINATION_FEE", "support-en"]}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "NEED_HUMAN", "summary": "NEED_HUMAN: IN_CONTRACT_EARLY_TERMINATION_FEE"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {
+        "path": ["identity", "need_transfer", "finish_transfer"],
+        "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-en", "reason": "NEED_HUMAN"}
+      }
+    },
+    {
+      "name": "an account in arrears is handed over in Chinese",
+      "lang": "zh",
+      "caller": "13700004445",
+      "queues": ["support-zh"],
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086004"}, "expect": {
+          "phase": "need_transfer",
+          "result": {"decision": "NEED_HUMAN", "reason": "ARREARS"},
+          "instructionContains": ["原因:ARREARS", "support-zh"]}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-zh", "reason": "NEED_HUMAN", "summary": "欠费"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {"path": ["identity", "need_transfer", "finish_transfer"], "ending": "transfer_to_agent", "transfer": {"queue": "support-zh"}}
+    },
+    {
+      "name": "a closed queue: the caller leaves a message",
+      "lang": "en",
+      "caller": "13700004446",
+      "queues": ["support-en"],
+      "actions": {"transfer_to_agent": {"isOk": false, "error": "QUEUE_CLOSED", "hint": "offer to take a message"}},
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086004"}, "expect": {"phase": "need_transfer"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "NEED_HUMAN", "summary": "ARREARS"},
+          "expect": {"isOk": false, "phase": "need_transfer"}},
+        {"call": "take_message", "args": {"message": "Call me back about my account"}, "expect": {"phase": "need_transfer"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["identity", "need_transfer", "finish"], "ending": "hangup", "toolsRun": ["plan_check", "transfer_to_agent", "take_message", "hangup"]}
+    },
+    {
+      "name": "an unknown number is asked for again",
+      "lang": "en",
+      "caller": "13700005555",
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "00000001"}, "expect": {
+          "phase": "identity", "result": {"decision": "NOT_FOUND"}}},
+        {"call": "plan_check", "args": {"service_no": "10086001"}, "expect": {"phase": "confirm"}}
+      ],
+      "expect": {"path": ["identity", "confirm"]}
+    },
+    {
+      "name": "three failing number checks go to a person",
+      "lang": "zh",
+      "caller": "13700005556",
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "00000001"}, "expect": {"phase": "identity"}},
+        {"call": "plan_check", "args": {"service_no": "00000002"}, "expect": {"phase": "identity"}},
+        {"call": "plan_check", "args": {"service_no": "00000003"}, "expect": {"phase": "need_transfer"}}
       ],
       "expect": {"path": ["identity", "need_transfer"]}
     },
     {
-      "name": "a rejected change goes to a person",
-      "description": "The backend refuses plan 9; the failed call moves the call to need_transfer.",
-      "lang": "en",
-      "caller": "13700005555",
-      "steps": [
-        {"call": "bb_account", "args": {"service_no": "10086002"}, "expect": {"phase": "verify", "result": {"in_contract": "1"}}},
-        {"call": "bb_verify", "args": {"service_no": "10086002", "phone_last4": "7777"}, "expect": {"phase": "offer"}},
-        {"call": "bb_change", "args": {"service_no": "10086002", "plan_id": 9}, "expect": {"isOk": false, "phase": "need_transfer"}}
-      ],
-      "expect": {"path": ["identity", "verify", "offer", "need_transfer"]}
-    },
-    {
-      "name": "after the change the caller can still ask about plans",
+      "name": "a knowledge answer is found, a missing one is not invented",
+      "description": "kb_search stays in the phase either way; found 0 carries no answer for the model to repeat.",
       "lang": "en",
       "caller": "13700006666",
       "steps": [
-        {"call": "bb_account", "args": {"service_no": "10086001"}},
-        {"call": "bb_verify", "args": {"service_no": "10086001", "phone_last4": "3333"}},
-        {"call": "bb_change", "args": {"service_no": "10086001", "plan_id": 1}, "expect": {"phase": "done"}},
-        {"call": "bb_plans", "expect": {"phase": "done"}},
-        {"call": "bb_account", "args": {"service_no": "10086001"}, "expect": {"phase": "done"}}
+        {"call": "kb_search", "args": {"query": "what is the early termination fee"}, "expect": {
+          "phase": "identity", "result": {"found": "1", "answer": "Changing plan inside the contract term costs an early-termination fee of 200 yuan, so an agent handles it."}}},
+        {"call": "plan_check", "args": {"service_no": "10086001"}, "expect": {"phase": "confirm"}},
+        {"call": "kb_search", "args": {"query": "when will the change take effect"}, "expect": {
+          "phase": "confirm", "result": {"found": "1"}}},
+        {"call": "kb_search", "args": {"query": "do you sell mobile phones"}, "expect": {
+          "phase": "confirm", "result": {"found": "0", "answer": ""}}},
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "1"}, "expect": {"phase": "submitted"}},
+        {"call": "kb_search", "args": {"query": "installation fee"}, "expect": {"phase": "submitted", "result": {"found": "1"}}}
       ],
-      "expect": {"path": ["identity", "verify", "offer", "done"]}
+      "expect": {"path": ["identity", "confirm", "submitted"]}
+    },
+    {
+      "name": "a refused submit goes to a person",
+      "description": "Plan 3 is not available at 10086001's address; the refusal is a branch, not a retry.",
+      "lang": "en",
+      "caller": "13700007777",
+      "queues": ["support-en"],
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086001"}, "expect": {"phase": "confirm"}},
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "3"}, "expect": {
+          "isOk": false, "phase": "need_transfer"}},
+        {"call": "transfer_to_agent", "args": {"queue": "support-en", "reason": "SUBMIT_REFUSED", "summary": "plan 3 refused"},
+          "expect": {"phase": "finish_transfer"}}
+      ],
+      "expect": {
+        "path": ["identity", "confirm", "need_transfer", "finish_transfer"],
+        "ending": "transfer_to_agent",
+        "transfer": {"queue": "support-en", "reason": "SUBMIT_REFUSED"}
+      }
+    },
+    {
+      "name": "a plan cannot be submitted before the account is checked",
+      "lang": "en",
+      "caller": "13700008888",
+      "steps": [
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "1"}, "expect": {"isRefused": true, "phase": "identity"}},
+        {"call": "plan_check", "args": {"service_no": "10086003"}, "expect": {"phase": "verify"}},
+        {"call": "plan_submit", "args": {"service_no": "10086003", "plan_id": "1"}, "expect": {"isRefused": true, "phase": "verify"}}
+      ],
+      "expect": {"path": ["identity", "verify"], "toolsRun": ["plan_check"]}
+    },
+    {
+      "name": "after the change the caller can still ask a question, then declines",
+      "lang": "en",
+      "caller": "13700009999",
+      "steps": [
+        {"call": "plan_check", "args": {"service_no": "10086001"}},
+        {"call": "plan_submit", "args": {"service_no": "10086001", "plan_id": "1"}, "expect": {"phase": "submitted"}},
+        {"call": "kb_search", "args": {"query": "price of the plans"}, "expect": {"phase": "submitted", "result": {"found": "1"}}},
+        {"exchange": "ok thanks, that is all", "expect": {"phase": "submitted"}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["identity", "confirm", "submitted", "finish"], "ending": "hangup"}
     },
     {
       "name": "silence at the greeting closes the call",
       "lang": "en",
-      "caller": "13700007777",
+      "caller": "13700007770",
       "steps": [
         {"noInput": true},
         {"noInput": true},
@@ -94,7 +235,7 @@
     {
       "name": "a bot that keeps chatting is closed by the tool-less wall",
       "lang": "en",
-      "caller": "13700008888",
+      "caller": "13700008880",
       "steps": [
         {"repeat": 10, "exchange": "what plans do you have?", "expect": {"phase": "identity"}},
         {"exchange": "and the price?", "expect": {"phase": "finish"}}
@@ -102,16 +243,29 @@
       "expect": {"path": ["identity", "finish"]}
     },
     {
-      "name": "model: verified caller changes plan",
-      "description": "Tier 2. The caller gives the service number, passes the phone check and picks plan 2.",
+      "name": "model: eligible caller changes plan",
+      "description": "Tier 2. The caller gives an eligible service number and picks plan 2.",
       "lang": "en",
       "caller": "13700001111",
       "callerPersona": {
-        "goal": "Move to the 500M plan. Give your service number when asked, answer the verification question, and choose the second plan offered.",
-        "persona": "Your broadband service number is 10086001. The registered phone ends in 3333.",
+        "goal": "Move to the 500M plan. Give your service number when asked and choose the second plan offered.",
+        "persona": "Your broadband service number is 10086001.",
         "behaviour": "Cooperative; say digits one by one."
       },
-      "model": {"visits": ["done"], "avoids": ["need_transfer"]}
+      "model": {"visits": ["submitted"], "avoids": ["need_transfer"]}
+    },
+    {
+      "name": "model: contract caller is handed to a person",
+      "description": "Tier 2. The backend decides NEED_HUMAN; the bot must transfer.",
+      "lang": "en",
+      "caller": "13700001112",
+      "queues": ["support-en", "support-zh"],
+      "callerPersona": {
+        "goal": "Change to the gigabit plan. Give your service number when asked.",
+        "persona": "Your broadband service number is 10086002.",
+        "behaviour": "Cooperative; say digits one by one."
+      },
+      "model": {"ending": "transfer_to_agent", "transfer": {"queue": "support-en"}, "phase": "finish_transfer", "avoids": ["submitted"]}
     }
   ]
 }

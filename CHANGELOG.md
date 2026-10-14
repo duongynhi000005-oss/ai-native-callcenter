@@ -59,6 +59,16 @@ carries the one-line installer's files.
   Creating a campaign now publishes one `CAMPAIGN_UPDATED` (status `DRAFT`),
   shortly after the `201`. The campaign form reads all three, and pre-validates
   the calling window and numeric limits before sending (#189).
+- Authoring guide for flows (`docs/flow-authoring.md`): where business rules,
+  knowledge and long operations belong, the closing rule, and how to verify a
+  flow. Its worked example is now the seeded `plan_change` flow, reworked to
+  match: one `plan_check` decision tool (`OK_TO_CHANGE`, `NEED_ID_VERIFY`,
+  `NEED_HUMAN`, `NOT_FOUND`) replaces the account lookup and the in-contract
+  prompt rule, `kb_search` answers fee and policy questions, `plan_submit`
+  returns a ticket that `plan_status` follows, and a `NEED_HUMAN` or refused
+  submit hands over with the decision and reason in the transfer summary. The
+  mock backend serves `/api/plan/*` and `/api/kb/search` in place of
+  `/api/bb/*`, with a fixture number per decision (#83).
 
 ### Changed
 
