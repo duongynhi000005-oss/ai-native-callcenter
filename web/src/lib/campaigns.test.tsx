@@ -11,7 +11,8 @@ import { ApiError } from './api'
 import {
   CAMPAIGN_ERROR_CODES, CAMPAIGN_FIELDS, campaignApi, hasCallRecord, useCampaignMutations, actionsFor, applyCampaignUpdated, blankForm,
   campaignFieldError, campaignKey, campaignPayloadOf, createBodyOf, describeState, formFrom,
-  defaultTimeZone, isFieldEditable, patchOf, type Campaign, type CampaignStatus, type SseCampaignUpdatedPayload,
+  defaultTimeZone, isFieldEditable, patchOf, retryFields, rangesOutsideHours, formProblems,
+  type CampaignWrite, type CampaignSettings, type Campaign, type CampaignStatus, type SseCampaignUpdatedPayload,
 } from './campaigns'
 import { applyToCache } from './use-event-stream'
 
@@ -224,6 +225,15 @@ describe('which fields can change in which status', () => {
   })
 
   describe('the create body', () => {
+    it('type-checks with only the four required fields', () => {
+      const minimal: CampaignWrite = {
+        name: 'Q4', didId: 'did-1', timeZone: 'UTC',
+        callingWindow: { days: ['MON'], ranges: [{ start: '09:00', end: '18:00' }] },
+      }
+      expect(createBodyOf(blankForm('UTC'))).not.toHaveProperty('retryPolicy')
+      expect(Object.keys(minimal)).toHaveLength(4)
+    })
+
     it('sends the required fields and leaves the rest to the server', () => {
       const form = { ...blankForm('Asia/Shanghai'), name: ' Q4 ', didId: 'did-1' }
       expect(createBodyOf(form)).toEqual({
@@ -237,7 +247,8 @@ describe('which fields can change in which status', () => {
     it('adds what the operator filled in, and the retry policy only when edited', () => {
       const form = {
         ...blankForm('UTC'), name: 'Q4', didId: 'did-1', maxConcurrent: '12', ringTimeoutSec: '25',
-        defaultCountryCode: '44', followUpQueueId: 'queue-1', isDefaultRetry: false, maxAttempts: '2',
+        defaultCountryCode: '44', followUpQueueId: 'queue-1', isDefaultRetry: false,
+        ...retryFields(campaignFixture().retryPolicy), maxAttempts: '2',
       }
       const body = createBodyOf(form)
       expect(body).toMatchObject({
@@ -245,6 +256,73 @@ describe('which fields can change in which status', () => {
       })
       expect(body.retryPolicy?.maxAttempts).toBe(2)
       expect(body.retryPolicy?.transientBackoff).toEqual({ baseSec: 300, factor: 3, capSec: 14400 })
+    })
+  })
+})
+
+const range = (start: string, end: string) => [{ start, end }]
+
+describe('pre-validating a calling window against the outer hours', () => {
+  // The server's rule (dayrange.Range.Within) and the table of
+  // TestCampaignSettingsAreTheValuesTheServerEnforces, plus the cases that
+  // distinguish a midnight-crossing outer range.
+  const cases: Array<[string, [string, string], [string, string], boolean]> = [
+    ['default hours: the hours themselves', ['08:00', '21:00'], ['08:00', '21:00'], true],
+    ['default hours: inside', ['08:00', '21:00'], ['10:00', '12:00'], true],
+    ['default hours: a minute before the start', ['08:00', '21:00'], ['07:59', '21:00'], false],
+    ['default hours: a minute past the end', ['08:00', '21:00'], ['08:00', '21:01'], false],
+    ['default hours: entirely outside', ['08:00', '21:00'], ['22:00', '23:00'], false],
+    ['default hours: a night range crossing midnight', ['08:00', '21:00'], ['22:00', '02:00'], false],
+    ['default hours: ending at 24:00', ['08:00', '21:00'], ['20:00', '24:00'], false],
+    ['narrow: the hours themselves', ['10:00', '12:00'], ['10:00', '12:00'], true],
+    ['narrow: inside', ['10:00', '12:00'], ['10:30', '11:30'], true],
+    ['narrow: a minute before', ['10:00', '12:00'], ['09:59', '12:00'], false],
+    ['narrow: a minute past', ['10:00', '12:00'], ['10:00', '12:01'], false],
+    ['narrow: entirely outside', ['10:00', '12:00'], ['13:00', '14:00'], false],
+    ['night: the hours themselves', ['20:00', '04:00'], ['20:00', '04:00'], true],
+    ['night: crossing midnight inside', ['20:00', '04:00'], ['22:00', '02:00'], true],
+    ['night: before midnight only', ['20:00', '04:00'], ['23:00', '23:30'], true],
+    ['night: after midnight only', ['20:00', '04:00'], ['01:00', '03:00'], true],
+    ['night: a minute before the start', ['20:00', '04:00'], ['19:59', '04:00'], false],
+    ['night: a minute past the end', ['20:00', '04:00'], ['20:00', '04:01'], false],
+    ['night: a same-day range spanning the gap', ['20:00', '04:00'], ['03:00', '21:00'], false],
+    ['night: entirely in the gap', ['20:00', '04:00'], ['09:00', '12:00'], false],
+    ['night: end at 00:00 means the end of the day', ['20:00', '04:00'], ['22:00', '00:00'], true],
+    ['night: end at 24:00', ['20:00', '04:00'], ['22:00', '24:00'], true],
+  ]
+  it.each(cases)('%s', (_name, outer, window, isAccepted) => {
+    const outside = rangesOutsideHours(range(...window), { start: outer[0], end: outer[1] })
+    expect(outside.length === 0).toBe(isAccepted)
+  })
+
+  it('names which of several ranges is outside', () => {
+    const ranges = [...range('09:00', '12:00'), ...range('20:00', '22:00')]
+    expect(rangesOutsideHours(ranges, { start: '08:00', end: '21:00' })).toEqual([1])
+  })
+
+  it('leaves text that is not a range to the server', () => {
+    const outer = { start: '08:00', end: '21:00' }
+    for (const bad of [['9:00', '18:00'], ['', ''], ['10:00', '10:00'], ['25:00', '26:00']]) {
+      expect(rangesOutsideHours(range(bad[0], bad[1]), outer)).toEqual([])
+    }
+  })
+
+  it('judges nothing without settings, and only what a locked-down edit can still change', () => {
+    const form = { ...blankForm('UTC'), ranges: range('03:00', '04:00'), ringTimeoutSec: '99' }
+    expect(formProblems(form, undefined)).toEqual({ outsideRanges: [] })
+    const settings: CampaignSettings = {
+      outboundHours: { start: '08:00', end: '21:00' },
+      defaults: { maxConcurrent: 5, ringTimeoutSec: 30, retryPolicy: campaignFixture().retryPolicy },
+      limits: { maxConcurrent: { min: 1, max: 10 }, ringTimeoutSec: { min: 5, max: 59 } },
+    }
+    expect(formProblems(form, settings)).toEqual({ outsideRanges: [0], ringTimeoutSec: true })
+    // A running campaign's ring timeout is locked; an untouched window is not re-judged.
+    const running = campaignFixture({
+      status: 'RUNNING', callingWindow: { days: ['MON'], ranges: range('03:00', '04:00') },
+    })
+    expect(formProblems(formFrom(running), settings, running)).toEqual({ outsideRanges: [] })
+    expect(formProblems({ ...formFrom(running), maxConcurrent: '11' }, settings, running)).toEqual({
+      outsideRanges: [], maxConcurrent: true,
     })
   })
 })

@@ -16,6 +16,7 @@ import (
 
 	"github.com/rasonyang/ai-native-callcenter/internal/api"
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
+	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 )
 
 // CampaignService is the campaign use cases as the API uses them
@@ -33,6 +34,8 @@ type CampaignService interface {
 	ImportContacts(ctx context.Context, id uuid.UUID, rows []campaign.ImportRow) (campaign.ImportResult, error)
 	ListContacts(ctx context.Context, id uuid.UUID, f campaign.ContactFilter) ([]campaign.Contact, int64, error)
 	ListAttempts(ctx context.Context, id uuid.UUID, f campaign.AttemptFilter) ([]campaign.Attempt, int64, error)
+	Settings() campaign.Settings
+	ReadyDIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
 // maxCampaignBody bounds a campaign request body. The 5000 rows of a full
@@ -82,6 +85,32 @@ func (s *Server) CreateCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, campaignOut(c))
+}
+
+// GetCampaignSettings reports the rules a campaign write is held to, read from
+// the values the validators use.
+func (s *Server) GetCampaignSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, campaignSettingsOut(s.campaigns.Settings()))
+}
+
+// markCampaignReady fills IsCampaignReady on numbers about to be returned. The
+// flag is advice for a form; createCampaign applies the same rule itself.
+func (s *Server) markCampaignReady(ctx context.Context, dids []catalog.DID) error {
+	if s.campaigns == nil || len(dids) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(dids))
+	for i, d := range dids {
+		ids[i] = d.ID
+	}
+	ready, err := s.campaigns.ReadyDIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range dids {
+		dids[i].IsCampaignReady = ready[dids[i].ID]
+	}
+	return nil
 }
 
 // GetCampaign returns one campaign.
@@ -450,6 +479,38 @@ func retryPolicyIn(w api.CampaignRetryPolicyWrite) campaign.RetryPolicy {
 	return p
 }
 
+func retryPolicyOut(p campaign.RetryPolicy) api.CampaignRetryPolicy {
+	outcomes := make([]api.CampaignRetryOutcome, len(p.RetryOutcomes))
+	for i, o := range p.RetryOutcomes {
+		outcomes[i] = api.CampaignRetryOutcome(o)
+	}
+	intervals := make(api.CampaignIntervalSec, len(p.IntervalSec))
+	for o, sec := range p.IntervalSec {
+		intervals[string(o)] = sec
+	}
+	return api.CampaignRetryPolicy{
+		MaxAttempts: p.MaxAttempts, MaxSystemRetries: p.MaxSystemRetries,
+		RetryOutcomes: outcomes, IntervalSec: intervals,
+		TransientBackoff: api.CampaignBackoff{
+			BaseSec: p.TransientBackoff.BaseSec,
+			Factor:  p.TransientBackoff.Factor,
+			CapSec:  p.TransientBackoff.CapSec,
+		},
+	}
+}
+
+// campaignSettingsOut maps the service's rules to api.CampaignSettings.
+func campaignSettingsOut(st campaign.Settings) api.CampaignSettings {
+	var out api.CampaignSettings
+	out.OutboundHours = api.CampaignTimeRange{Start: st.OutboundHours.StartText(), End: st.OutboundHours.EndText()}
+	out.Defaults.MaxConcurrent = st.DefaultMaxConcurrent
+	out.Defaults.RingTimeoutSec = st.DefaultRingTimeoutSec
+	out.Defaults.RetryPolicy = retryPolicyOut(st.DefaultRetryPolicy)
+	out.Limits.MaxConcurrent = api.CampaignIntRange{Min: st.MaxConcurrent.Min, Max: st.MaxConcurrent.Max}
+	out.Limits.RingTimeoutSec = api.CampaignIntRange{Min: st.RingTimeoutSec.Min, Max: st.RingTimeoutSec.Max}
+	return out
+}
+
 func campaignOut(c campaign.Campaign) api.Campaign {
 	days := make([]api.Weekday, len(c.CallingWindow.Days))
 	for i, d := range c.CallingWindow.Days {
@@ -459,28 +520,12 @@ func campaignOut(c campaign.Campaign) api.Campaign {
 	for i, r := range c.CallingWindow.Ranges {
 		ranges[i] = api.CampaignTimeRange{Start: r.Start, End: r.End}
 	}
-	outcomes := make([]api.CampaignRetryOutcome, len(c.RetryPolicy.RetryOutcomes))
-	for i, o := range c.RetryPolicy.RetryOutcomes {
-		outcomes[i] = api.CampaignRetryOutcome(o)
-	}
-	intervals := make(api.CampaignIntervalSec, len(c.RetryPolicy.IntervalSec))
-	for o, sec := range c.RetryPolicy.IntervalSec {
-		intervals[string(o)] = sec
-	}
 	out := api.Campaign{
 		ID: c.ID, Name: c.Name, DIDID: c.DIDID, DIDNumber: c.DIDNumber,
 		Status: api.CampaignStatus(c.Status), TimeZone: c.TimeZone,
 		CallingWindow: api.CampaignCallingWindow{Days: days, Ranges: ranges},
 		MaxConcurrent: c.MaxConcurrent, RingTimeoutSec: c.RingTimeoutSec,
-		RetryPolicy: api.CampaignRetryPolicy{
-			MaxAttempts: c.RetryPolicy.MaxAttempts, MaxSystemRetries: c.RetryPolicy.MaxSystemRetries,
-			RetryOutcomes: outcomes, IntervalSec: intervals,
-			TransientBackoff: api.CampaignBackoff{
-				BaseSec: c.RetryPolicy.TransientBackoff.BaseSec,
-				Factor:  c.RetryPolicy.TransientBackoff.Factor,
-				CapSec:  c.RetryPolicy.TransientBackoff.CapSec,
-			},
-		},
+		RetryPolicy:     retryPolicyOut(c.RetryPolicy),
 		FollowUpQueueID: c.FollowUpQueueID,
 		CreatedAt:       c.CreatedAt, StartedAt: c.StartedAt, FinishedAt: c.FinishedAt,
 		Contacts: api.CampaignContactCounts{

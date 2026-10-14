@@ -5095,7 +5095,7 @@
           "campaigns"
         ],
         "summary": "Create a campaign",
-        "description": "Creates a DRAFT. Nothing is dialled until it is started.\n\nThe DID must exist, be enabled, allow outbound calls (allowOutbound; else 422 CAMPAIGN_DID_NOT_OUTBOUND) and have a published flow, and that flow must not be able to transfer the caller to a person: a campaign call has no way to one, and a flow that offers transfer_to_agent in any phase (by name, by \"*\", or among its always-allowed tools) is refused with 422 CAMPAIGN_FLOW_HAS_TRANSFER. ringTimeoutSec must be at least 5 and below the originator's 60-second answer window (422 CAMPAIGN_RING_TIMEOUT_TOO_LONG). timeZone must be an IANA name, and every range of callingWindow must lie wholly inside the deployment's outer calling hours (AICC_OUTBOUND_HOURS) or the request is 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT. Any other bad value is 422 VALIDATION_FAILED with params {field, rule}. Needs campaigns:write.",
+        "description": "Creates a DRAFT. Nothing is dialled until it is started.\n\nThe DID must exist, be enabled, allow outbound calls (allowOutbound; else 422 CAMPAIGN_DID_NOT_OUTBOUND) and have a published flow, and that flow must not be able to transfer the caller to a person: a campaign call has no way to one, and a flow that offers transfer_to_agent in any phase (by name, by \"*\", or among its always-allowed tools) is refused with 422 CAMPAIGN_FLOW_HAS_TRANSFER. ringTimeoutSec must be at least 5 and below the originator's 60-second answer window (422 CAMPAIGN_RING_TIMEOUT_TOO_LONG). timeZone must be an IANA name, and every range of callingWindow must lie wholly inside the deployment's outer calling hours (AICC_OUTBOUND_HOURS) or the request is 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT (GET /campaigns/settings states the hours, defaults and limits). Any other bad value is 422 VALIDATION_FAILED with params {field, rule}. A created campaign is announced on the event stream as CAMPAIGN_UPDATED. Needs campaigns:write.",
         "security": [
           {
             "cookieSession": [
@@ -5146,6 +5146,49 @@
             "$ref": "#/components/responses/InternalError"
           }
         }
+      }
+    },
+    "/campaigns/settings": {
+      "get": {
+        "operationId": "getCampaignSettings",
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Read the campaign rules of this deployment",
+        "description": "What the server enforces when a campaign is written, from the same values it validates against, so a client can pre-validate instead of learning from a 422: the outer calling hours (AICC_OUTBOUND_HOURS), the defaults a create applies to the fields it leaves out, and the limits of the numeric fields. The server still enforces every rule on every write. Needs campaigns:read.",
+        "responses": {
+          "200": {
+            "description": "The deployment's campaign settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "security": [
+          {
+            "cookieSession": [
+              "campaigns:read"
+            ]
+          },
+          {
+            "apiKeyBearer": [
+              "campaigns:read"
+            ]
+          }
+        ]
       }
     },
     "/campaigns/{campaignId}": {
@@ -8471,6 +8514,11 @@
             "minimum": 1,
             "maximum": 100000,
             "description": "How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit."
+          },
+          "isCampaignReady": {
+            "type": "boolean",
+            "readOnly": true,
+            "description": "Whether a campaign can be created on this number right now: it is enabled, allows outbound calls, has a published flow, and that flow cannot transfer the caller to a person. Computed from the published revision on every read, so republishing the flow flips it. It is advice for a form: the server checks the same rule again on every campaign write and refuses with CAMPAIGN_DID_NOT_OUTBOUND, CAMPAIGN_FLOW_HAS_TRANSFER or VALIDATION_FAILED (DID_DISABLED, DID_HAS_NO_PUBLISHED_FLOW). Ignored when sent in a write."
           }
         },
         "required": [
@@ -8482,7 +8530,8 @@
           "isEnabled",
           "allowInbound",
           "allowOutbound",
-          "isDefaultOutbound"
+          "isDefaultOutbound",
+          "isCampaignReady"
         ]
       },
       "DIDWrite": {
@@ -9916,7 +9965,7 @@
       },
       "SseCampaignUpdatedPayload": {
         "type": "object",
-        "description": "Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published only when something in it changed, at most once per second per campaign (the latest state wins; a final status is never dropped). Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields.",
+        "description": "Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published when a campaign is created (status DRAFT, zero contacts) and whenever something in it changes, at most once per second per campaign (the latest state wins, so a campaign created and started inside one second is announced once, as RUNNING; a final status is never dropped). A create that fails publishes nothing. Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields.",
         "properties": {
           "campaignId": {
             "type": "string",
@@ -11360,16 +11409,18 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 100000,
-            "default": 5
+            "default": 5,
+            "description": "Defaults to 5 when omitted. GET /campaigns/settings states the default and the limits of this deployment."
           },
           "ringTimeoutSec": {
             "type": "integer",
             "minimum": 5,
             "default": 30,
-            "description": "At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG."
+            "description": "Defaults to 30 when omitted. At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. GET /campaigns/settings states the limits."
           },
           "retryPolicy": {
-            "$ref": "#/components/schemas/CampaignRetryPolicyWrite"
+            "$ref": "#/components/schemas/CampaignRetryPolicyWrite",
+            "description": "Omitted: the default policy, which GET /campaigns/settings states."
           },
           "defaultCountryCode": {
             "type": "string",
@@ -11413,14 +11464,12 @@
           "maxConcurrent": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 100000,
-            "default": 5
+            "maximum": 100000
           },
           "ringTimeoutSec": {
             "type": "integer",
             "minimum": 5,
-            "default": 30,
-            "description": "At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG."
+            "description": "At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. Absent keeps the stored value."
           },
           "retryPolicy": {
             "$ref": "#/components/schemas/CampaignRetryPolicyWrite"
@@ -11782,6 +11831,74 @@
         "required": [
           "items",
           "total"
+        ]
+      },
+      "CampaignIntRange": {
+        "type": "object",
+        "description": "An inclusive integer range.",
+        "properties": {
+          "min": {
+            "type": "integer"
+          },
+          "max": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ]
+      },
+      "CampaignSettings": {
+        "type": "object",
+        "description": "The rules the server applies when a campaign is written, read from the values it validates against (docs/design/10-campaigns.md section 14). Nothing here is a second copy: change the deployment's configuration and this changes with it.",
+        "properties": {
+          "outboundHours": {
+            "$ref": "#/components/schemas/CampaignTimeRange",
+            "description": "The deployment's outer calling hours (AICC_OUTBOUND_HOURS), in the callee's local time, every day. Every range of a campaign's callingWindow must lie wholly inside them, else 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT. A range whose end is before its start crosses midnight (22:00-04:00): a window range is inside it only if it lies within the same stretch, so a same-day range never spans the gap."
+          },
+          "defaults": {
+            "type": "object",
+            "description": "What a create applies to the fields it leaves out.",
+            "properties": {
+              "maxConcurrent": {
+                "type": "integer"
+              },
+              "ringTimeoutSec": {
+                "type": "integer"
+              },
+              "retryPolicy": {
+                "$ref": "#/components/schemas/CampaignRetryPolicy"
+              }
+            },
+            "required": [
+              "maxConcurrent",
+              "ringTimeoutSec",
+              "retryPolicy"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "description": "The bounds the server enforces on the numeric fields, both ends inclusive.",
+            "properties": {
+              "maxConcurrent": {
+                "$ref": "#/components/schemas/CampaignIntRange"
+              },
+              "ringTimeoutSec": {
+                "$ref": "#/components/schemas/CampaignIntRange",
+                "description": "max is the largest whole number of seconds strictly below the originator's answer window (59 for the 60-second window); above it the write is 422 CAMPAIGN_RING_TIMEOUT_TOO_LONG, below min it is 422 VALIDATION_FAILED."
+              }
+            },
+            "required": [
+              "maxConcurrent",
+              "ringTimeoutSec"
+            ]
+          }
+        },
+        "required": [
+          "outboundHours",
+          "defaults",
+          "limits"
         ]
       }
     }

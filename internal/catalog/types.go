@@ -275,6 +275,11 @@ type DID struct {
 	// once (ringing plus talking): what the carrier sells per number. Nil is no
 	// limit. Inbound lines are neither counted nor limited by it.
 	MaxOutboundChannels *int `json:"maxOutboundChannels,omitempty"`
+
+	// IsCampaignReady is computed when the API reads a number, never stored:
+	// whether a campaign can be created on it now (campaign.DIDFlow.CheckForCampaign).
+	// Whatever a write body carries here is ignored.
+	IsCampaignReady bool `json:"isCampaignReady"`
 }
 
 // MaxOutboundChannelsLimit is the largest outbound line limit a number may be given.

@@ -16,7 +16,7 @@ import { Route as CampaignListRoute } from '@/routes/_app.admin.campaigns.index'
 import { Route as DncRoute } from '@/routes/_app.admin.dnc'
 import { applyToCache } from '@/lib/use-event-stream'
 import {
-  blankForm, formFrom, type Campaign, type CampaignForm,
+  blankForm, createBodyOf, formFrom, type Campaign, type CampaignForm, type CampaignSettings,
 } from '@/lib/campaigns'
 import { renderWithProviders } from '@/test/harness'
 
@@ -59,17 +59,36 @@ afterEach(() => {
 
 // --- the form's locks ----------------------------------------------------------
 
-function FormHarness({ campaign, error }: { campaign?: Campaign; error?: unknown }) {
+const SETTINGS: CampaignSettings = {
+  outboundHours: { start: '08:00', end: '21:00' },
+  defaults: {
+    maxConcurrent: 5,
+    ringTimeoutSec: 30,
+    retryPolicy: {
+      maxAttempts: 3,
+      maxSystemRetries: 5,
+      retryOutcomes: ['NO_ANSWER', 'BUSY', 'REJECTED', 'UNKNOWN', 'TRANSIENT', 'ORIGINATE_FAILED'],
+      intervalSec: { NO_ANSWER: 7200, BUSY: 1800, REJECTED: 86400, UNKNOWN: 86400 },
+      transientBackoff: { baseSec: 300, factor: 3, capSec: 14400 },
+    },
+  },
+  limits: { maxConcurrent: { min: 1, max: 100000 }, ringTimeoutSec: { min: 5, max: 59 } },
+}
+
+function FormHarness({
+  campaign, error, settings, onSubmit = () => {},
+}: { campaign?: Campaign; error?: unknown; settings?: CampaignSettings; onSubmit?: (form: CampaignForm) => void }) {
   const [form, setForm] = useState<CampaignForm>(() => (campaign ? formFrom(campaign) : blankForm('UTC')))
   return (
     <CampaignFormView
       value={form}
       onChange={setForm}
-      onSubmit={() => {}}
+      onSubmit={() => onSubmit(form)}
       campaign={campaign}
+      settings={settings}
       dids={[
-        { id: campaign?.didId ?? 'did-1', number: '95099', description: '', isEnabled: true, allowOutbound: true, allowInbound: false, isDefaultOutbound: false, isRecordingEnabled: true, language: 'en' },
-        { id: 'did-in', number: '95001', description: '', isEnabled: true, allowOutbound: false, allowInbound: true, isDefaultOutbound: false, isRecordingEnabled: true, language: 'en' },
+        { id: campaign?.didId ?? 'did-1', number: '95099', description: '', isEnabled: true, allowOutbound: true, allowInbound: false, isDefaultOutbound: false, isRecordingEnabled: true, language: 'en', isCampaignReady: true },
+        { id: 'did-in', number: '95001', description: '', isEnabled: true, allowOutbound: false, allowInbound: true, isDefaultOutbound: false, isRecordingEnabled: true, language: 'en', isCampaignReady: false },
       ]}
       queues={[]}
       error={error}
@@ -127,18 +146,111 @@ describe('the campaign form', () => {
     expect(screen.queryByText(/hours this deployment permits/)).not.toBeInTheDocument()
   })
 
-  it('offers only numbers that can dial out', () => {
+  it('lets only a campaign-ready number be chosen, and says why the others cannot', () => {
     renderWithProviders(<FormHarness />)
     const select = screen.getByLabelText('Number to dial from')
-    expect(within(select).queryByRole('option', { name: '95001' })).not.toBeInTheDocument()
-    expect(within(select).getByRole('option', { name: '95099' })).toBeInTheDocument()
+    expect(within(select).getByRole('option', { name: '95099' })).toBeEnabled()
+    const notReady = within(select).getByRole('option', { name: /95001/ })
+    expect(notReady).toBeDisabled()
+    expect(notReady).toHaveTextContent('outbound not allowed')
+  })
+
+  it('keeps the stored number of a campaign readable after it stopped being ready', () => {
+    const campaign = campaignFixture({ didId: 'did-in', didNumber: '95001' })
+    renderWithProviders(<FormHarness campaign={campaign} />)
+    const select = screen.getByLabelText('Number to dial from')
+    expect(select).toHaveValue('did-in')
+    expect(within(select).getByRole('option', { name: /95001/ })).toBeEnabled()
   })
 
   it('lets a new campaign take the default retry policy or edit it', async () => {
     const { user } = renderWithProviders(<FormHarness />)
     expect(screen.queryByLabelText('Maximum attempts')).not.toBeInTheDocument()
     await user.click(screen.getByLabelText("Use the deployment's default retry policy"))
+    // Settings have not arrived: the starting point is not known yet, so editing waits.
+    expect(screen.getByLabelText("Use the deployment's default retry policy")).toBeChecked()
+  })
+
+  it('starts the retry edit from the deployment’s own policy', async () => {
+    const { user } = renderWithProviders(<FormHarness settings={SETTINGS} />)
+    await user.click(screen.getByLabelText("Use the deployment's default retry policy"))
     expect(screen.getByLabelText('Maximum attempts')).toHaveValue(3)
+    expect(screen.getByLabelText('Maximum system retries')).toHaveValue(5)
+  })
+
+  it('takes placeholders and bounds from the settings', () => {
+    renderWithProviders(<FormHarness settings={SETTINGS} />)
+    const concurrent = screen.getByLabelText('Maximum concurrent calls')
+    expect(concurrent).toHaveAttribute('placeholder', '5')
+    expect(concurrent).toHaveAttribute('max', '100000')
+    const ring = screen.getByLabelText('Ring timeout (seconds)')
+    expect(ring).toHaveAttribute('placeholder', '30')
+    expect(ring).toHaveAttribute('min', '5')
+    expect(ring).toHaveAttribute('max', '59')
+  })
+
+  it('works while the settings are loading or failed: nothing is pre-validated', async () => {
+    const submitted = vi.fn()
+    const { user } = renderWithProviders(
+      <FormHarness onSubmit={submitted} />,
+    )
+    const ring = screen.getByLabelText('Ring timeout (seconds)')
+    expect(ring).toHaveAttribute('placeholder', 'Deployment default')
+    await user.type(ring, '99')
+    await user.clear(screen.getByLabelText('Range 1 start'))
+    await user.type(screen.getByLabelText('Range 1 start'), '03:00')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(submitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a window range outside the calling hours before sending, naming the hours', async () => {
+    const submitted = vi.fn()
+    const { user } = renderWithProviders(<FormHarness settings={SETTINGS} onSubmit={submitted} />)
+    await user.clear(screen.getByLabelText('Range 1 start'))
+    await user.type(screen.getByLabelText('Range 1 start'), '07:00')
+    expect(screen.getByText('07:00–18:00 is outside the allowed calling hours 08:00–21:00.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(submitted).not.toHaveBeenCalled()
+
+    await user.clear(screen.getByLabelText('Range 1 start'))
+    await user.type(screen.getByLabelText('Range 1 start'), '08:00')
+    expect(screen.queryByText(/outside the allowed calling hours/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(submitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('says the same in Chinese', async () => {
+    await i18n.changeLanguage('zh')
+    const { user } = renderWithProviders(<FormHarness settings={SETTINGS} />)
+    await user.clear(screen.getByLabelText('第 1 段开始'))
+    await user.type(screen.getByLabelText('第 1 段开始'), '07:00')
+    expect(screen.getByText('07:00–18:00 超出允许的外呼时段 08:00–21:00。')).toBeInTheDocument()
+  })
+
+  it('refuses a number outside the limits the settings state', async () => {
+    const submitted = vi.fn()
+    const { user } = renderWithProviders(<FormHarness settings={SETTINGS} onSubmit={submitted} />)
+    await user.type(screen.getByLabelText('Ring timeout (seconds)'), '60')
+    expect(screen.getByText('Enter a whole number from 5 to 59.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(submitted).not.toHaveBeenCalled()
+    await user.clear(screen.getByLabelText('Ring timeout (seconds)'))
+    await user.type(screen.getByLabelText('Ring timeout (seconds)'), '59')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(submitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends only the four required fields when nothing optional is touched', async () => {
+    let sent: CampaignForm | undefined
+    const { user } = renderWithProviders(
+      <FormHarness settings={SETTINGS} onSubmit={(form) => { sent = form }} />,
+    )
+    await user.type(screen.getByLabelText('Name'), 'Q4')
+    await user.selectOptions(screen.getByLabelText('Number to dial from'), 'did-1')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(Object.keys(createBodyOf(sent as CampaignForm)).toSorted()).toEqual([
+      'callingWindow', 'didId', 'name', 'timeZone',
+    ])
   })
 })
 
@@ -198,6 +310,30 @@ describe('the campaign list', () => {
     expect(screen.queryByText(/waiting for calling hours/)).not.toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
     expect(requests).toHaveLength(1)
+  })
+
+  it('shows a campaign created elsewhere when its first CAMPAIGN_UPDATED arrives', async () => {
+    const fresh = campaignFixture({ id: 'fresh-1', name: 'Fresh draft' })
+    let created = false
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      json({ items: created ? [fresh] : [], total: created ? 1 : 0 }),
+    ))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    renderList(client)
+    await waitFor(() => expect(client.isFetching()).toBe(0))
+    expect(screen.queryByText('Fresh draft')).not.toBeInTheDocument()
+
+    created = true
+    act(() => {
+      applyToCache(client, {
+        version: 1, seq: 2, type: 'CAMPAIGN_UPDATED', occurredAt: new Date().toISOString(),
+        payload: {
+          campaignId: 'fresh-1', status: 'DRAFT',
+          contacts: { total: 0, active: 0, done: 0, exhausted: 0, invalidNumber: 0, dnc: 0 },
+        },
+      })
+    })
+    expect(await screen.findByText('Fresh draft')).toBeInTheDocument()
   })
 
   it('filters by status through the API', async () => {

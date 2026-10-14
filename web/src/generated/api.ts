@@ -1346,9 +1346,29 @@ export interface paths {
          * Create a campaign
          * @description Creates a DRAFT. Nothing is dialled until it is started.
          *
-         *     The DID must exist, be enabled, allow outbound calls (allowOutbound; else 422 CAMPAIGN_DID_NOT_OUTBOUND) and have a published flow, and that flow must not be able to transfer the caller to a person: a campaign call has no way to one, and a flow that offers transfer_to_agent in any phase (by name, by "*", or among its always-allowed tools) is refused with 422 CAMPAIGN_FLOW_HAS_TRANSFER. ringTimeoutSec must be at least 5 and below the originator's 60-second answer window (422 CAMPAIGN_RING_TIMEOUT_TOO_LONG). timeZone must be an IANA name, and every range of callingWindow must lie wholly inside the deployment's outer calling hours (AICC_OUTBOUND_HOURS) or the request is 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT. Any other bad value is 422 VALIDATION_FAILED with params {field, rule}. Needs campaigns:write.
+         *     The DID must exist, be enabled, allow outbound calls (allowOutbound; else 422 CAMPAIGN_DID_NOT_OUTBOUND) and have a published flow, and that flow must not be able to transfer the caller to a person: a campaign call has no way to one, and a flow that offers transfer_to_agent in any phase (by name, by "*", or among its always-allowed tools) is refused with 422 CAMPAIGN_FLOW_HAS_TRANSFER. ringTimeoutSec must be at least 5 and below the originator's 60-second answer window (422 CAMPAIGN_RING_TIMEOUT_TOO_LONG). timeZone must be an IANA name, and every range of callingWindow must lie wholly inside the deployment's outer calling hours (AICC_OUTBOUND_HOURS) or the request is 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT (GET /campaigns/settings states the hours, defaults and limits). Any other bad value is 422 VALIDATION_FAILED with params {field, rule}. A created campaign is announced on the event stream as CAMPAIGN_UPDATED. Needs campaigns:write.
          */
         post: operations["createCampaign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/campaigns/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the campaign rules of this deployment
+         * @description What the server enforces when a campaign is written, from the same values it validates against, so a client can pre-validate instead of learning from a 422: the outer calling hours (AICC_OUTBOUND_HOURS), the defaults a create applies to the fields it leaves out, and the limits of the numeric fields. The server still enforces every rule on every write. Needs campaigns:read.
+         */
+        get: operations["getCampaignSettings"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2170,7 +2190,7 @@ export interface components {
              * @default AGENT_OUTBOUND
              * @enum {string}
              */
-            kind: "AI_OUTBOUND" | "AGENT_OUTBOUND";
+            kind?: "AI_OUTBOUND" | "AGENT_OUTBOUND";
             /** @description The number to dial: 3 to 20 digits, optionally with one leading "+" (canonical E.164, for example +8613800138000). A national number is accepted too. The number is dialled and recorded in the call ledger exactly as sent. Spaces, dashes, brackets and a second "+" are refused. */
             to: string;
             /** @description AI_OUTBOUND only: the DID whose flow and caller id the call uses. */
@@ -2327,12 +2347,12 @@ export interface components {
              * @description 0 defaults to 1.
              * @default 1
              */
-            level: number;
+            level?: number;
             /**
              * @description 0 defaults to 1.
              * @default 1
              */
-            position: number;
+            position?: number;
         };
         /** @description An external number and which way calls go through it. A number callers can reach answers with a bot flow; the fallback queue takes the caller when the bot cannot. A number used only for dialling out has no flow to bind, because nobody calls it. */
         DID: {
@@ -2356,6 +2376,8 @@ export interface components {
             isDefaultOutbound: boolean;
             /** @description How many outbound calls this number may carry at once, ringing and talking together: what the carrier sells per number. Absent means no limit. Inbound lines are separate and are neither counted nor limited. Every call the platform places from the number (single calls, campaigns, click-to-dial) takes a line before it is originated and gives it back when the call ends; a call an agent dials by hand through the number counts while it lasts. A single call or click-to-dial over the limit is refused with 409 DID_CHANNELS_EXHAUSTED, and a campaign waits (activity AT_CAPACITY). Writing the number without this property clears the limit. */
             maxOutboundChannels?: number;
+            /** @description Whether a campaign can be created on this number right now: it is enabled, allows outbound calls, has a published flow, and that flow cannot transfer the caller to a person. Computed from the published revision on every read, so republishing the flow flips it. It is advice for a form: the server checks the same rule again on every campaign write and refuses with CAMPAIGN_DID_NOT_OUTBOUND, CAMPAIGN_FLOW_HAS_TRANSFER or VALIDATION_FAILED (DID_DISABLED, DID_HAS_NO_PUBLISHED_FLOW). Ignored when sent in a write. */
+            readonly isCampaignReady: boolean;
         };
         /**
          * @description Create or update a number. Omitted fields take server defaults (language en, inbound, isEnabled true, isRecordingEnabled true).
@@ -2882,7 +2904,7 @@ export interface components {
         SseCallbackEventPayload: {
             callback: components["schemas"]["Callback"];
         };
-        /** @description Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published only when something in it changed, at most once per second per campaign (the latest state wins; a final status is never dropped). Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields. */
+        /** @description Payload of CAMPAIGN_UPDATED: the campaign's state as the dialer sees it, published when a campaign is created (status DRAFT, zero contacts) and whenever something in it changes, at most once per second per campaign (the latest state wins, so a campaign created and started inside one second is announced once, as RUNNING; a final status is never dropped). A create that fails publishes nothing. Delivered to subjects that hold calls:read:all, never to an agent's own stream. After a SYSTEM_RESET, read GET /campaigns/{campaignId} for the same fields. */
         SseCampaignUpdatedPayload: {
             /** Format: uuid */
             campaignId: string;
@@ -3278,7 +3300,7 @@ export interface components {
              * @default MANUAL
              * @enum {string}
              */
-            source: "MANUAL" | "IMPORT";
+            source?: "MANUAL" | "IMPORT";
         };
         DncNumberList: {
             items: components["schemas"]["DncNumber"][];
@@ -3341,11 +3363,11 @@ export interface components {
         /** @description A CampaignBackoff whose omitted fields take the defaults. */
         CampaignBackoffWrite: {
             /** @default 300 */
-            baseSec: number;
+            baseSec?: number;
             /** @default 3 */
-            factor: number;
+            factor?: number;
             /** @default 14400 */
-            capSec: number;
+            capSec?: number;
         };
         /** @description Seconds to wait after an outcome that reached the customer before dialling again: NO_ANSWER, BUSY, REJECTED and UNKNOWN, each from 60 to 2592000. Defaults: 7200, 1800, 86400, 86400. TRANSIENT and ORIGINATE_FAILED follow transientBackoff instead. */
         CampaignIntervalSec: {
@@ -3364,9 +3386,9 @@ export interface components {
         /** @description A retry policy as a client writes it. The object sent is the whole policy: a field left out takes its default (never the stored value), and an interval left out of intervalSec takes its default. The default retries every retryable outcome. */
         CampaignRetryPolicyWrite: {
             /** @default 3 */
-            maxAttempts: number;
+            maxAttempts?: number;
             /** @default 5 */
-            maxSystemRetries: number;
+            maxSystemRetries?: number;
             retryOutcomes?: components["schemas"]["CampaignRetryOutcome"][];
             intervalSec?: components["schemas"]["CampaignIntervalSec"];
             transientBackoff?: components["schemas"]["CampaignBackoffWrite"];
@@ -3441,13 +3463,17 @@ export interface components {
             /** @description IANA name, for example Asia/Shanghai or America/New_York. */
             timeZone: string;
             callingWindow: components["schemas"]["CampaignCallingWindow"];
-            /** @default 5 */
-            maxConcurrent: number;
             /**
-             * @description At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG.
+             * @description Defaults to 5 when omitted. GET /campaigns/settings states the default and the limits of this deployment.
+             * @default 5
+             */
+            maxConcurrent?: number;
+            /**
+             * @description Defaults to 30 when omitted. At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. GET /campaigns/settings states the limits.
              * @default 30
              */
-            ringTimeoutSec: number;
+            ringTimeoutSec?: number;
+            /** @description Omitted: the default policy, which GET /campaigns/settings states. */
             retryPolicy?: components["schemas"]["CampaignRetryPolicyWrite"];
             /** @description Digits without +. Omitted: the deployment's AICC_DEFAULT_COUNTRY_CODE. */
             defaultCountryCode?: string;
@@ -3465,13 +3491,9 @@ export interface components {
             /** @description IANA name, for example Asia/Shanghai or America/New_York. */
             timeZone?: string;
             callingWindow?: components["schemas"]["CampaignCallingWindow"];
-            /** @default 5 */
-            maxConcurrent: number;
-            /**
-             * @description At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG.
-             * @default 30
-             */
-            ringTimeoutSec: number;
+            maxConcurrent?: number;
+            /** @description At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. Absent keeps the stored value. */
+            ringTimeoutSec?: number;
             retryPolicy?: components["schemas"]["CampaignRetryPolicyWrite"];
             defaultCountryCode?: string | null;
             /** Format: uuid */
@@ -3611,6 +3633,28 @@ export interface components {
             items: components["schemas"]["CampaignAttempt"][];
             /** @description Total rows matching the filter, for paging. */
             total: number;
+        };
+        /** @description An inclusive integer range. */
+        CampaignIntRange: {
+            min: number;
+            max: number;
+        };
+        /** @description The rules the server applies when a campaign is written, read from the values it validates against (docs/design/10-campaigns.md section 14). Nothing here is a second copy: change the deployment's configuration and this changes with it. */
+        CampaignSettings: {
+            /** @description The deployment's outer calling hours (AICC_OUTBOUND_HOURS), in the callee's local time, every day. Every range of a campaign's callingWindow must lie wholly inside them, else 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT. A range whose end is before its start crosses midnight (22:00-04:00): a window range is inside it only if it lies within the same stretch, so a same-day range never spans the gap. */
+            outboundHours: components["schemas"]["CampaignTimeRange"];
+            /** @description What a create applies to the fields it leaves out. */
+            defaults: {
+                maxConcurrent: number;
+                ringTimeoutSec: number;
+                retryPolicy: components["schemas"]["CampaignRetryPolicy"];
+            };
+            /** @description The bounds the server enforces on the numeric fields, both ends inclusive. */
+            limits: {
+                maxConcurrent: components["schemas"]["CampaignIntRange"];
+                /** @description max is the largest whole number of seconds strictly below the originator's answer window (59 for the 60-second window); above it the write is 422 CAMPAIGN_RING_TIMEOUT_TOO_LONG, below min it is 422 VALIDATION_FAILED. */
+                ringTimeoutSec: components["schemas"]["CampaignIntRange"];
+            };
         };
     };
     responses: {
@@ -6030,6 +6074,29 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getCampaignSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The deployment's campaign settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignSettings"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

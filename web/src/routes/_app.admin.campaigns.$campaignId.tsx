@@ -18,7 +18,7 @@ import { useNameThisPage } from '@/lib/breadcrumb'
 import { useDIDs, useQueues } from '@/lib/catalog'
 import {
   CAMPAIGN_OUTCOMES, CONTACT_STATUSES, hasCallRecord, LEAD_INTENTS, actionsFor, formFrom, isFinished, patchOf,
-  useCampaign, useCampaignAttempts, useCampaignContacts, useCampaignMutations,
+  useCampaign, useCampaignAttempts, useCampaignContacts, useCampaignMutations, useCampaignSettings,
   useInvalidateContacts, type Campaign, type CampaignContactStatus, type CampaignLeadIntent,
   type CampaignOutcome,
 } from '@/lib/campaigns'
@@ -232,6 +232,7 @@ function SettingsTab({ campaign }: { campaign: Campaign }) {
   const { t } = useTranslation()
   const dids = useDIDs()
   const queues = useQueues()
+  const settings = useCampaignSettings()
   const { update } = useCampaignMutations()
   const [form, setForm] = useState(() => formFrom(campaign))
   const [isSaved, setIsSaved] = useState(false)
@@ -245,6 +246,7 @@ function SettingsTab({ campaign }: { campaign: Campaign }) {
           setForm(next)
         }}
         campaign={campaign}
+        settings={settings.data}
         dids={dids.data?.items ?? []}
         queues={queues.data?.items ?? []}
         error={update.error}

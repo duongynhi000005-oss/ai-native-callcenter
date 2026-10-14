@@ -13,26 +13,10 @@ import { ApiError, request, type ErrorCode } from './api'
  */
 
 export type Campaign = components['schemas']['Campaign']
-/**
- * The generated write types mark every field that has a server default as
- * required, but the API accepts the body without it. These are the shapes
- * actually sent: only what the operator chose.
- */
-export type CampaignRetryPolicyBody = Partial<
-  Omit<components['schemas']['CampaignRetryPolicyWrite'], 'transientBackoff'>
-> & {
-  transientBackoff?: Partial<components['schemas']['CampaignBackoffWrite']>
-}
-export type CampaignWrite = Omit<
-  components['schemas']['CampaignWrite'],
-  'maxConcurrent' | 'ringTimeoutSec' | 'retryPolicy'
-> &
-  Partial<Pick<components['schemas']['CampaignWrite'], 'maxConcurrent' | 'ringTimeoutSec'>> & {
-    retryPolicy?: CampaignRetryPolicyBody
-  }
-export type CampaignPatch = Partial<
-  Omit<components['schemas']['CampaignPatch'], 'retryPolicy'>
-> & { retryPolicy?: CampaignRetryPolicyBody }
+export type CampaignWrite = components['schemas']['CampaignWrite']
+export type CampaignPatch = components['schemas']['CampaignPatch']
+export type CampaignRetryPolicyWrite = components['schemas']['CampaignRetryPolicyWrite']
+export type CampaignSettings = components['schemas']['CampaignSettings']
 export type CampaignStatus = components['schemas']['CampaignStatus']
 export type CampaignPauseReason = components['schemas']['CampaignPauseReason']
 export type CampaignActivity = components['schemas']['CampaignActivity']
@@ -110,6 +94,7 @@ export const campaignApi = {
   list: (filter: CampaignFilter) =>
     request<components['schemas']['CampaignList']>(`/campaigns${query({ ...filter })}`),
   get: (id: string) => request<Campaign>(`/campaigns/${id}`),
+  settings: () => request<CampaignSettings>('/campaigns/settings'),
   create: (body: CampaignWrite) =>
     request<Campaign>('/campaigns', { method: 'POST', body: JSON.stringify(body) }),
   update: (id: string, body: CampaignPatch) =>
@@ -146,6 +131,21 @@ export function useCampaigns(filter: CampaignFilter) {
   return useQuery({
     queryKey: [...LIST_KEY, filter],
     queryFn: () => campaignApi.list(filter),
+  })
+}
+
+const SETTINGS_KEY = ['campaigns', 'settings'] as const
+
+/**
+ * The deployment's campaign rules: outer calling hours, defaults and limits.
+ * They move only with the server's configuration, so they are kept for ten
+ * minutes. The form works without them (no pre-validation, no placeholders).
+ */
+export function useCampaignSettings() {
+  return useQuery({
+    queryKey: SETTINGS_KEY,
+    queryFn: campaignApi.settings,
+    staleTime: 10 * 60_000,
   })
 }
 
@@ -358,20 +358,6 @@ export interface CampaignForm {
   backoffCapSec: string
 }
 
-/**
- * The policy a new campaign gets when none is sent (docs/design/10-campaigns.md
- * section 7.2). The contract does not publish it, so the create form shows it
- * as a starting point once the operator asks to edit; a campaign that keeps
- * "defaults" sends no policy at all and the server's own copy applies.
- */
-export const DEFAULT_RETRY_POLICY: CampaignRetryPolicy = {
-  maxAttempts: 3,
-  maxSystemRetries: 5,
-  retryOutcomes: [...RETRY_OUTCOMES],
-  intervalSec: { NO_ANSWER: 7200, BUSY: 1800, REJECTED: 86400, UNKNOWN: 86400 },
-  transientBackoff: { baseSec: 300, factor: 3, capSec: 14400 },
-}
-
 export const DEFAULT_WINDOW: CampaignCallingWindow = {
   days: [...WEEKDAYS],
   ranges: [{ start: '09:00', end: '18:00' }],
@@ -395,7 +381,7 @@ export function defaultTimeZone(): string {
 
 const minutesOf = (sec: number | undefined) => (sec === undefined ? '' : String(sec / 60))
 
-function retryFields(policy: CampaignRetryPolicy): Pick<
+export function retryFields(policy: CampaignRetryPolicy): Pick<
   CampaignForm,
   'maxAttempts' | 'maxSystemRetries' | 'retryOutcomes' | 'intervalMin' | 'backoffBaseSec' | 'backoffFactor' | 'backoffCapSec'
 > {
@@ -416,6 +402,17 @@ function retryFields(policy: CampaignRetryPolicy): Pick<
   }
 }
 
+/** Retry inputs before the operator asks to edit: the policy comes from the settings then. */
+const EMPTY_RETRY_FIELDS: ReturnType<typeof retryFields> = {
+  maxAttempts: '',
+  maxSystemRetries: '',
+  retryOutcomes: [],
+  intervalMin: { NO_ANSWER: '', BUSY: '', REJECTED: '', UNKNOWN: '' },
+  backoffBaseSec: '',
+  backoffFactor: '',
+  backoffCapSec: '',
+}
+
 export function blankForm(timeZone: string): CampaignForm {
   return {
     name: '',
@@ -428,7 +425,7 @@ export function blankForm(timeZone: string): CampaignForm {
     defaultCountryCode: '',
     followUpQueueId: '',
     isDefaultRetry: true,
-    ...retryFields(DEFAULT_RETRY_POLICY),
+    ...EMPTY_RETRY_FIELDS,
   }
 }
 
@@ -455,7 +452,7 @@ const intOrUndefined = (text: string): number | undefined => {
   return Number.isFinite(value) ? Math.round(value) : undefined
 }
 
-function retryPolicyOf(form: CampaignForm): CampaignRetryPolicyBody {
+function retryPolicyOf(form: CampaignForm): CampaignRetryPolicyWrite {
   const intervalSec: Partial<Record<IntervalOutcome, number>> = {}
   for (const outcome of INTERVAL_OUTCOMES) {
     const minutes = intOrUndefinedFloat(form.intervalMin[outcome])
@@ -481,7 +478,7 @@ function intOrUndefinedFloat(text: string): number | undefined {
   return Number.isFinite(value) ? value : undefined
 }
 
-const windowOf = (form: CampaignForm): CampaignCallingWindow => ({
+export const windowOf = (form: CampaignForm): CampaignCallingWindow => ({
   days: WEEKDAYS.filter((d) => form.days.includes(d)),
   ranges: form.ranges.map((r) => ({ start: r.start, end: r.end })),
 })
@@ -548,6 +545,115 @@ export function patchOf(original: Campaign, form: CampaignForm): CampaignPatch {
   }
   return patch
 }
+
+// --- Pre-validation -----------------------------------------------------------
+
+const MINUTES_PER_DAY = 24 * 60
+
+interface Minutes {
+  start: number
+  end: number
+}
+
+function parseClock(text: string): number | undefined {
+  const match = /^(\d{2}):(\d{2})$/.exec(text)
+  if (!match) return undefined
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  return hours > 23 || minutes > 59 ? undefined : hours * 60 + minutes
+}
+
+/**
+ * A range as minutes since midnight, read the way the server reads it
+ * (dayrange.New): "24:00" and "00:00" as an end mean the end of the day, an end
+ * before the start crosses midnight, equal ends are no range. Undefined for
+ * text that is not a range, which the server answers itself.
+ */
+export function parseRange(range: CampaignTimeRange): Minutes | undefined {
+  const start = parseClock(range.start.trim())
+  if (start === undefined) return undefined
+  const endText = range.end.trim()
+  let end = endText === '24:00' ? MINUTES_PER_DAY : parseClock(endText)
+  if (end === undefined) return undefined
+  if (end === 0 && start !== 0) end = MINUTES_PER_DAY
+  return start === end ? undefined : { start, end }
+}
+
+/** The range split at midnight into pieces that each sit inside one day. */
+function pieces(r: Minutes): Array<[number, number]> {
+  return r.end < r.start ? [[r.start, MINUTES_PER_DAY], [0, r.end]] : [[r.start, r.end]]
+}
+
+/**
+ * Whether every minute of `range` lies inside `outer`, both possibly crossing
+ * midnight (dayrange.Range.Within): 22:00-02:00 is inside 20:00-04:00, and
+ * 08:00-23:00 is not inside 20:00-04:00 even though both ends are, because a
+ * same-day range never spans the gap.
+ */
+export function isRangeWithin(range: Minutes, outer: Minutes): boolean {
+  const outerPieces = pieces(outer)
+  return pieces(range).every(([from, to]) =>
+    outerPieces.some(([oFrom, oTo]) => oFrom <= from && to <= oTo),
+  )
+}
+
+/** Indexes of the window ranges that parse and lie outside the outer hours. */
+export function rangesOutsideHours(
+  ranges: CampaignTimeRange[],
+  outerHours: CampaignTimeRange | undefined,
+): number[] {
+  const outer = outerHours ? parseRange(outerHours) : undefined
+  if (!outer) return []
+  const outside: number[] = []
+  ranges.forEach((r, index) => {
+    const parsed = parseRange(r)
+    if (parsed && !isRangeWithin(parsed, outer)) outside.push(index)
+  })
+  return outside
+}
+
+export interface FormProblems {
+  /** Indexes of ranges outside the deployment's calling hours. */
+  outsideRanges: number[]
+  maxConcurrent?: boolean
+  ringTimeoutSec?: boolean
+}
+
+const isOutside = (text: string, limit: { min: number; max: number }): boolean => {
+  const value = intOrUndefined(text)
+  return value !== undefined && (value < limit.min || value > limit.max)
+}
+
+/**
+ * What the settings let the form refuse before the request. Only a field the
+ * operator can change AND has changed from the stored campaign is judged, as
+ * the server judges only what a write carries. Without settings nothing is
+ * judged; the server's 422 remains the backstop for every rule.
+ */
+export function formProblems(
+  form: CampaignForm,
+  settings: CampaignSettings | undefined,
+  original?: Campaign,
+): FormProblems {
+  const problems: FormProblems = { outsideRanges: [] }
+  if (!settings) return problems
+  const can = (field: CampaignField) => isFieldEditable(original?.status, field)
+  if (can('callingWindow') && (!original || !sameJSON(windowOf(form).ranges, original.callingWindow.ranges.map((r) => ({ start: r.start, end: r.end }))))) {
+    problems.outsideRanges = rangesOutsideHours(form.ranges, settings.outboundHours)
+  }
+  if (can('maxConcurrent') && form.maxConcurrent !== String(original?.maxConcurrent ?? '')
+    && isOutside(form.maxConcurrent, settings.limits.maxConcurrent)) {
+    problems.maxConcurrent = true
+  }
+  if (can('ringTimeoutSec') && form.ringTimeoutSec !== String(original?.ringTimeoutSec ?? '')
+    && isOutside(form.ringTimeoutSec, settings.limits.ringTimeoutSec)) {
+    problems.ringTimeoutSec = true
+  }
+  return problems
+}
+
+export const hasProblems = (p: FormProblems): boolean =>
+  p.outsideRanges.length > 0 || Boolean(p.maxConcurrent) || Boolean(p.ringTimeoutSec)
 
 // --- Words ---------------------------------------------------------------------
 

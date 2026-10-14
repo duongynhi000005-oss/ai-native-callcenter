@@ -100,6 +100,9 @@ WHERE is_default_outbound AND id <> $1;
 -- name: GetDIDByNumber :one
 SELECT * FROM dids WHERE number = $1;
 
+-- name: GetDIDsByIDs :many
+SELECT * FROM dids WHERE id = ANY($1::uuid[]);
+
 -- name: ListDIDs :many
 SELECT * FROM dids ORDER BY number;
 

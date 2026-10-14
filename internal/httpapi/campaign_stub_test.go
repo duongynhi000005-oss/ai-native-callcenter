@@ -49,3 +49,8 @@ func (stubCampaigns) ListContacts(context.Context, uuid.UUID, campaign.ContactFi
 func (stubCampaigns) ListAttempts(context.Context, uuid.UUID, campaign.AttemptFilter) ([]campaign.Attempt, int64, error) {
 	return nil, 0, nil
 }
+
+func (stubCampaigns) Settings() campaign.Settings { return campaign.Settings{} }
+func (stubCampaigns) ReadyDIDs(context.Context, []uuid.UUID) (map[uuid.UUID]bool, error) {
+	return nil, nil
+}

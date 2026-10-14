@@ -30,6 +30,33 @@ type DIDFlow struct {
 	Spec *flow.Spec
 }
 
+// CheckForCampaign says whether a campaign may dial from this number: nil when
+// it may, else the refusal a write is answered with. It is the one statement of
+// the rule: the create and start checks apply it, and the DID list's
+// isCampaignReady is "this returns nil", so the two cannot disagree.
+func (d DIDFlow) CheckForCampaign() error {
+	switch {
+	case !d.IsEnabled:
+		return invalid("didId", "DID_DISABLED", "DID %s is disabled", d.Number)
+	case !d.AllowOutbound:
+		return &Error{
+			Kind: ErrDIDNotOutbound, Field: "didId", Rule: "DID_NOT_OUTBOUND",
+			Message: fmt.Sprintf("DID %s does not allow outbound calls; a campaign dials from its DID", d.Number),
+			Params:  map[string]any{"didNumber": d.Number},
+		}
+	case d.Spec == nil:
+		return invalid("didId", "DID_HAS_NO_PUBLISHED_FLOW",
+			"DID %s has no published flow; a campaign talks to a flow", d.Number)
+	case flow.CanTransfer(d.Spec):
+		return &Error{
+			Kind: ErrFlowHasTransfer, Field: "didId", Rule: "FLOW_CAN_TRANSFER",
+			Message: fmt.Sprintf("the flow behind DID %s can transfer the caller to a person; a campaign call has no way to one", d.Number),
+			Params:  map[string]any{"didNumber": d.Number},
+		}
+	}
+	return nil
+}
+
 // ErrDIDNotFound is returned by Repository.DIDFlow for an unknown DID.
 var ErrDIDNotFound = errors.New("campaign: no such DID")
 
@@ -60,6 +87,9 @@ type Stored struct {
 type Repository interface {
 	// DIDFlow looks a DID up with its published flow.
 	DIDFlow(ctx context.Context, didID uuid.UUID) (DIDFlow, error)
+	// DIDFlows is DIDFlow for many numbers at once; an unknown ID is simply
+	// absent from the result.
+	DIDFlows(ctx context.Context, didIDs []uuid.UUID) ([]DIDFlow, error)
 
 	Create(ctx context.Context, c Campaign) (Campaign, error)
 	Get(ctx context.Context, id uuid.UUID) (Campaign, error)
@@ -133,6 +163,31 @@ type Env struct {
 	DefaultCountryCode string
 }
 
+// ringTimeoutMaxSec is the largest whole number of seconds strictly below the
+// answer window: a ring timeout at the window would let a call answered at the
+// very end reach a customer who hears silence.
+func (e Env) ringTimeoutMaxSec() int {
+	return int((e.AnswerWindow - 1) / time.Second)
+}
+
+// IntRange is an inclusive range of whole numbers.
+type IntRange struct{ Min, Max int }
+
+// Settings are the rules this service applies to a write, as the API reports
+// them. It is built from the same constants and environment the validators
+// read, never from a second copy.
+type Settings struct {
+	// OutboundHours are the outer calling hours, callee-local.
+	OutboundHours dayrange.Range
+	// Defaults are what a create applies to the fields it leaves out.
+	DefaultMaxConcurrent  int
+	DefaultRingTimeoutSec int
+	DefaultRetryPolicy    RetryPolicy
+	// Limits are inclusive.
+	MaxConcurrent  IntRange
+	RingTimeoutSec IntRange
+}
+
 // Service is the campaign use cases.
 type Service struct {
 	repo Repository
@@ -142,6 +197,43 @@ type Service struct {
 	// progress and observer connect the dialer; both optional.
 	progress ProgressSource
 	observer Observer
+	// onCreated hears of every campaign stored by Create; optional.
+	onCreated func(id uuid.UUID)
+}
+
+// WithCreatedHook sets what is told that a campaign was created. A create is a
+// state change (nothing existed, now a DRAFT does), which supervisors' screens
+// learn of through it; the dialer's Observer is not enough because it is absent
+// when the AI path is off.
+func (s *Service) WithCreatedHook(f func(id uuid.UUID)) *Service {
+	s.onCreated = f
+	return s
+}
+
+// Settings reports the rules a write is held to.
+func (s *Service) Settings() Settings {
+	return Settings{
+		OutboundHours:         s.env.OutboundHours,
+		DefaultMaxConcurrent:  DefaultMaxConcurrent,
+		DefaultRingTimeoutSec: DefaultRingTimeoutSec,
+		DefaultRetryPolicy:    DefaultRetryPolicy(),
+		MaxConcurrent:         IntRange{Min: minMaxConcurrent, Max: maxMaxConcurrent},
+		RingTimeoutSec:        IntRange{Min: minRingTimeoutSec, Max: s.env.ringTimeoutMaxSec()},
+	}
+}
+
+// ReadyDIDs says, for each of the given DIDs, whether a campaign could be
+// created on it right now (DIDFlow.CheckForCampaign). Unknown IDs are absent.
+func (s *Service) ReadyDIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	flows, err := s.repo.DIDFlows(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]bool, len(flows))
+	for _, d := range flows {
+		out[d.ID] = d.CheckForCampaign() == nil
+	}
+	return out, nil
 }
 
 // WithDialer connects the dialer's read side and its change notices. Either
@@ -205,6 +297,7 @@ func NewService(repo Repository, ctl Controller, env Env) *Service {
 const (
 	DefaultMaxConcurrent  = 5
 	DefaultRingTimeoutSec = 30
+	minMaxConcurrent      = 1
 	maxMaxConcurrent      = 100000
 	maxNameRunes          = 200
 	minRingTimeoutSec     = int(config.MinOutboundRingTimeout / time.Second)
@@ -272,7 +365,14 @@ func (s *Service) Create(ctx context.Context, in New) (Campaign, error) {
 	if c, err = s.validate(ctx, c, all); err != nil {
 		return Campaign{}, err
 	}
-	return s.repo.Create(ctx, c)
+	stored, err := s.repo.Create(ctx, c)
+	if err != nil {
+		return stored, err
+	}
+	if s.onCreated != nil {
+		s.onCreated(stored.ID)
+	}
+	return stored, nil
 }
 
 // Get returns one campaign.
@@ -511,17 +611,16 @@ func (s *Service) validate(ctx context.Context, c Campaign, touched changes) (Ca
 		}
 		c.CallingWindow = w
 	}
-	if touched["maxConcurrent"] && (c.MaxConcurrent < 1 || c.MaxConcurrent > maxMaxConcurrent) {
+	if touched["maxConcurrent"] && (c.MaxConcurrent < minMaxConcurrent || c.MaxConcurrent > maxMaxConcurrent) {
 		return c, invalid("maxConcurrent", "OUT_OF_RANGE",
-			"maxConcurrent is from 1 to %d, got %d", maxMaxConcurrent, c.MaxConcurrent)
+			"maxConcurrent is from %d to %d, got %d", minMaxConcurrent, maxMaxConcurrent, c.MaxConcurrent)
 	}
 	if touched["ringTimeoutSec"] {
-		ring := time.Duration(c.RingTimeoutSec) * time.Second
 		switch {
 		case c.RingTimeoutSec < minRingTimeoutSec:
 			return c, invalid("ringTimeoutSec", "OUT_OF_RANGE",
 				"ringTimeoutSec is at least %d, got %d", minRingTimeoutSec, c.RingTimeoutSec)
-		case ring >= s.env.AnswerWindow:
+		case c.RingTimeoutSec > s.env.ringTimeoutMaxSec():
 			return c, &Error{
 				Kind: ErrRingTimeoutTooLong, Field: "ringTimeoutSec", Rule: "NOT_BELOW_ANSWER_WINDOW",
 				Message: fmt.Sprintf("ringTimeoutSec %d must be below the %d-second answer window: a call answered after the window would reach a customer who hears silence",
@@ -550,24 +649,8 @@ func (s *Service) validate(ctx context.Context, c Campaign, touched changes) (Ca
 		if err != nil {
 			return c, err
 		}
-		switch {
-		case !d.IsEnabled:
-			return c, invalid("didId", "DID_DISABLED", "DID %s is disabled", d.Number)
-		case !d.AllowOutbound:
-			return c, &Error{
-				Kind: ErrDIDNotOutbound, Field: "didId", Rule: "DID_NOT_OUTBOUND",
-				Message: fmt.Sprintf("DID %s does not allow outbound calls; a campaign dials from its DID", d.Number),
-				Params:  map[string]any{"didNumber": d.Number},
-			}
-		case d.Spec == nil:
-			return c, invalid("didId", "DID_HAS_NO_PUBLISHED_FLOW",
-				"DID %s has no published flow; a campaign talks to a flow", d.Number)
-		case flow.CanTransfer(d.Spec):
-			return c, &Error{
-				Kind: ErrFlowHasTransfer, Field: "didId", Rule: "FLOW_CAN_TRANSFER",
-				Message: fmt.Sprintf("the flow behind DID %s can transfer the caller to a person; a campaign call has no way to one", d.Number),
-				Params:  map[string]any{"didNumber": d.Number},
-			}
+		if err := d.CheckForCampaign(); err != nil {
+			return c, err
 		}
 		c.DIDNumber = d.Number
 	}

@@ -1864,6 +1864,12 @@ type CampaignImportRowResult struct {
 // CampaignImportRowStatus defines model for CampaignImportRowStatus.
 type CampaignImportRowStatus string
 
+// CampaignIntRange An inclusive integer range.
+type CampaignIntRange struct {
+	Max int `json:"max"`
+	Min int `json:"min"`
+}
+
 // CampaignIntervalSec Seconds to wait after an outcome that reached the customer before dialling again: NO_ANSWER, BUSY, REJECTED and UNKNOWN, each from 60 to 2592000. Defaults: 7200, 1800, 86400, 86400. TRANSIENT and ORIGINATE_FAILED follow transientBackoff instead.
 type CampaignIntervalSec map[string]int
 
@@ -1896,7 +1902,7 @@ type CampaignPatch struct {
 	// RetryPolicy A retry policy as a client writes it. The object sent is the whole policy: a field left out takes its default (never the stored value), and an interval left out of intervalSec takes its default. The default retries every retryable outcome.
 	RetryPolicy *CampaignRetryPolicyWrite `json:"retryPolicy,omitempty"`
 
-	// RingTimeoutSec At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG.
+	// RingTimeoutSec At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. Absent keeps the stored value.
 	RingTimeoutSec *int `json:"ringTimeoutSec,omitempty"`
 
 	// TimeZone IANA name, for example Asia/Shanghai or America/New_York.
@@ -1933,6 +1939,30 @@ type CampaignRetryPolicyWrite struct {
 	TransientBackoff *CampaignBackoffWrite `json:"transientBackoff,omitempty"`
 }
 
+// CampaignSettings The rules the server applies when a campaign is written, read from the values it validates against (docs/design/10-campaigns.md section 14). Nothing here is a second copy: change the deployment's configuration and this changes with it.
+type CampaignSettings struct {
+	// Defaults What a create applies to the fields it leaves out.
+	Defaults struct {
+		MaxConcurrent int `json:"maxConcurrent"`
+
+		// RetryPolicy What happens to a contact after an attempt ends without settling it. Two budgets are counted separately: maxAttempts is how many times the customer's phone may be rung; maxSystemRetries is how many times our own or the network's failures are retried, and those never use up maxAttempts.
+		RetryPolicy    CampaignRetryPolicy `json:"retryPolicy"`
+		RingTimeoutSec int                 `json:"ringTimeoutSec"`
+	} `json:"defaults"`
+
+	// Limits The bounds the server enforces on the numeric fields, both ends inclusive.
+	Limits struct {
+		// MaxConcurrent An inclusive integer range.
+		MaxConcurrent CampaignIntRange `json:"maxConcurrent"`
+
+		// RingTimeoutSec max is the largest whole number of seconds strictly below the originator's answer window (59 for the 60-second window); above it the write is 422 CAMPAIGN_RING_TIMEOUT_TOO_LONG, below min it is 422 VALIDATION_FAILED.
+		RingTimeoutSec CampaignIntRange `json:"ringTimeoutSec"`
+	} `json:"limits"`
+
+	// OutboundHours The deployment's outer calling hours (AICC_OUTBOUND_HOURS), in the callee's local time, every day. Every range of a campaign's callingWindow must lie wholly inside them, else 422 CAMPAIGN_WINDOW_OUTSIDE_LIMIT. A range whose end is before its start crosses midnight (22:00-04:00): a window range is inside it only if it lies within the same stretch, so a same-day range never spans the gap.
+	OutboundHours CampaignTimeRange `json:"outboundHours"`
+}
+
 // CampaignStatus DRAFT is being written and dials nothing. RUNNING dials. PAUSED has stopped admitting new calls (pauseReason says who stopped it); calls in flight finish. COMPLETED and CANCELLED are final: nothing changes, contacts and leads stay readable. COMPLETED is reached only by the dialer, when nothing is left to dial and nothing is in flight; there is no operation for it.
 type CampaignStatus string
 
@@ -1956,13 +1986,15 @@ type CampaignWrite struct {
 	// DIDID An enabled DID whose flow is published and cannot transfer to a person (CAMPAIGN_FLOW_HAS_TRANSFER) and allows outbound calls (CAMPAIGN_DID_NOT_OUTBOUND).
 	DIDID           openapi_types.UUID  `json:"didId"`
 	FollowUpQueueID *openapi_types.UUID `json:"followUpQueueId,omitempty"`
-	MaxConcurrent   *int                `json:"maxConcurrent,omitempty"`
-	Name            string              `json:"name"`
 
-	// RetryPolicy A retry policy as a client writes it. The object sent is the whole policy: a field left out takes its default (never the stored value), and an interval left out of intervalSec takes its default. The default retries every retryable outcome.
+	// MaxConcurrent Defaults to 5 when omitted. GET /campaigns/settings states the default and the limits of this deployment.
+	MaxConcurrent *int   `json:"maxConcurrent,omitempty"`
+	Name          string `json:"name"`
+
+	// RetryPolicy Omitted: the default policy, which GET /campaigns/settings states.
 	RetryPolicy *CampaignRetryPolicyWrite `json:"retryPolicy,omitempty"`
 
-	// RingTimeoutSec At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG.
+	// RingTimeoutSec Defaults to 30 when omitted. At least 5 and strictly below the 60-second answer window, else CAMPAIGN_RING_TIMEOUT_TOO_LONG. GET /campaigns/settings states the limits.
 	RingTimeoutSec *int `json:"ringTimeoutSec,omitempty"`
 
 	// TimeZone IANA name, for example Asia/Shanghai or America/New_York.
@@ -2092,6 +2124,9 @@ type DID struct {
 	FallbackQueueID *openapi_types.UUID `json:"fallbackQueueId,omitempty"`
 	FlowID          *openapi_types.UUID `json:"flowId,omitempty"`
 	ID              openapi_types.UUID  `json:"id"`
+
+	// IsCampaignReady Whether a campaign can be created on this number right now: it is enabled, allows outbound calls, has a published flow, and that flow cannot transfer the caller to a person. Computed from the published revision on every read, so republishing the flow flips it. It is advice for a form: the server checks the same rule again on every campaign write and refuses with CAMPAIGN_DID_NOT_OUTBOUND, CAMPAIGN_FLOW_HAS_TRANSFER or VALIDATION_FAILED (DID_DISABLED, DID_HAS_NO_PUBLISHED_FLOW). Ignored when sent in a write.
+	IsCampaignReady *bool `json:"isCampaignReady,omitempty"`
 
 	// IsDefaultOutbound The number an agent's call goes out from when nothing names one. At most one number in the deployment carries this, enforced by the database rather than by whoever remembers to clear the last one.
 	IsDefaultOutbound  bool `json:"isDefaultOutbound"`
@@ -3554,6 +3589,9 @@ type ServerInterface interface {
 	// CreateCampaign Create a campaign
 	// (POST /campaigns)
 	CreateCampaign(w http.ResponseWriter, r *http.Request)
+	// GetCampaignSettings Read the campaign rules of this deployment
+	// (GET /campaigns/settings)
+	GetCampaignSettings(w http.ResponseWriter, r *http.Request)
 	// DeleteCampaign Delete a draft campaign
 	// (DELETE /campaigns/{campaignId})
 	DeleteCampaign(w http.ResponseWriter, r *http.Request, campaignID openapi_types.UUID)
@@ -4034,6 +4072,12 @@ func (_ Unimplemented) ListCampaigns(w http.ResponseWriter, r *http.Request, par
 // CreateCampaign Create a campaign
 // (POST /campaigns)
 func (_ Unimplemented) CreateCampaign(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetCampaignSettings Read the campaign rules of this deployment
+// (GET /campaigns/settings)
+func (_ Unimplemented) GetCampaignSettings(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5592,6 +5636,20 @@ func (siw *ServerInterfaceWrapper) CreateCampaign(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateCampaign(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetCampaignSettings operation middleware
+func (siw *ServerInterfaceWrapper) GetCampaignSettings(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetCampaignSettings(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -7786,6 +7844,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/campaigns", wrapper.CreateCampaign)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/campaigns/settings", wrapper.GetCampaignSettings)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/campaigns/{campaignId}", wrapper.DeleteCampaign)
