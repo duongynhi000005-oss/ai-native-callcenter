@@ -744,8 +744,17 @@ prefix such as a landline area code's leading `0` is not restored (known limit).
 
 ### 9.2 Import
 
-`POST /campaigns/{campaignId}/contacts` takes a JSON array; the SPA parses CSV in the browser.
+`POST /campaigns/{campaignId}/contacts` takes a JSON array; the SPA parses the file in the browser.
+CSV (`csv.ts`) and Excel workbooks (`xlsx.ts`) both arrive as the row model in `table.ts`, so the
+mapping, preview, chunking and per-row report are the same for either.
 
+- `.xlsx` is read with `read-excel-file` (MIT), imported only once a workbook is chosen. The first
+  sheet is used; when the workbook has several, the operator picks one.
+- A cell is the value the spreadsheet holds, not a float that lost it: text keeps its own
+  characters (a leading zero stays part of it), a number keeps its digits (never `1.38e10`), a date
+  is `yyyy-mm-dd`, a formula is its cached result. Cell *display* formats are not applied.
+- A `.xlsx` that cannot be read — a corrupt archive, a legacy `.xls` — is reported and imports
+  nothing. `.xls` itself is out of scope.
 - The result is per row: imported, merged as a duplicate, or rejected with an error code
   (`NUMBER_EMPTY`, `NUMBER_INVALID`, `SLOT_UNKNOWN`, `SLOT_TOO_LONG`, …).
 - One bad row never fails the import.
@@ -915,7 +924,8 @@ configuration today, so only the env names `AICC_OVERFLOW_HOLD` and the like app
 
 - campaign list; create and edit (the same field locks as the API); start / pause / resume /
   cancel;
-- CSV import: parsed in the browser, sent to the import API, the per-row result shown;
+- contact import from CSV or Excel: parsed in the browser, sent to the import API, the per-row
+  result shown;
 - live progress (SSE `CAMPAIGN_UPDATED`, including `activity` and `nextDialAt`);
 - leads: filtered by intent, a `HIGH` lead linked to its callback;
 - DNC list: view, add, remove;

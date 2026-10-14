@@ -1,12 +1,14 @@
 import type { CampaignContactRow, CampaignImportResult } from './campaigns'
 import { IMPORT_CHUNK_SIZE } from './campaigns'
-import { toCsv, type CsvTable } from './csv'
+import { toCsv } from './csv'
+import type { Table } from './table'
 
 /**
- * Turning a parsed CSV into import requests and the answers back into one
- * report. The parsing is in csv.ts; this file decides what each column means,
- * which rows are sent, and how the per-chunk results are put back together
- * against the lines of the file the operator knows.
+ * Turning a parsed list into import requests and the answers back into one
+ * report. The parsing is in csv.ts (text files) and xlsx.ts (workbooks); this
+ * file decides what each column means, which rows are sent, and how the
+ * per-chunk results are put back together against the lines of the file the
+ * operator knows.
  */
 
 export type ColumnRole =
@@ -68,7 +70,7 @@ export interface ImportRecord {
  * guessed at: which cell is missing is unknowable, so it stays here and is
  * reported as rejected with the line it came from.
  */
-export function buildRecords(table: CsvTable, roles: ColumnRole[]): ImportRecord[] {
+export function buildRecords(table: Table, roles: ColumnRole[]): ImportRecord[] {
   const width = table.header.length
   const numberAt = roles.findIndex((r) => r.kind === 'number')
   const zoneAt = roles.findIndex((r) => r.kind === 'timeZone')
