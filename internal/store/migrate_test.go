@@ -899,7 +899,7 @@ func TestMigrationsGiveTheDirectoryItsFallbackPasswordBack(t *testing.T) {
 	if err := goose.UpToContext(ctx, db, "migrations", 32); err != nil {
 		t.Fatalf("migrating to 32 failed: %v", err)
 	}
-	checkGrant := ensureLuaRole(t, db)
+	ensureLuaRole(t, db)
 
 	const (
 		password = "aicc@123"
@@ -916,7 +916,7 @@ func TestMigrationsGiveTheDirectoryItsFallbackPasswordBack(t *testing.T) {
 		t.Fatalf("seed a live session: %v", err)
 	}
 	// The grant the migration must restore is one this database already holds.
-	if checkGrant && !luaCanRead(t, db) {
+	if !luaCanRead(t, db) {
 		t.Fatal("the Lua role cannot read luacc.directory before the migration; " +
 			"the fixture is wrong, not the migration")
 	}
@@ -925,7 +925,7 @@ func TestMigrationsGiveTheDirectoryItsFallbackPasswordBack(t *testing.T) {
 		t.Fatalf("migrating a database with phones on it failed: %v", err)
 	}
 
-	if checkGrant && !luaCanRead(t, db) {
+	if !luaCanRead(t, db) {
 		t.Error("the migration dropped the view and did not give the Lua role its " +
 			"SELECT back — the switch would read no directory and nothing would register")
 	}
@@ -944,7 +944,7 @@ func TestMigrationsGiveTheDirectoryItsFallbackPasswordBack(t *testing.T) {
 	if cols := columnsOf(t, db, "luacc", "directory"); slicesContains(cols, "password") {
 		t.Errorf("after the rollback luacc.directory has %v, want the password gone again", cols)
 	}
-	if checkGrant && !luaCanRead(t, db) {
+	if !luaCanRead(t, db) {
 		t.Error("the rollback dropped the view and did not give the Lua role its SELECT back")
 	}
 	if got := directoryHash(t, db, "1001"); got == nil || *got != hash {
@@ -956,42 +956,20 @@ func TestMigrationsGiveTheDirectoryItsFallbackPasswordBack(t *testing.T) {
 	}
 }
 
-// ensureLuaRole makes the confined Lua role exist, and reports whether the
-// grant assertions can be trusted. Roles are cluster-wide, so a role this test
-// created is removed again and one it found is left exactly as it was.
-func ensureLuaRole(t *testing.T, db *sql.DB) bool {
+// ensureLuaRole makes the confined Lua role exist and gives it the grant the
+// database at 00032 holds. The role is cluster-wide and is never dropped: the
+// migrations other packages run at the same time grant to it in their own
+// scratch databases, so a role this test created could not be dropped again
+// (#214). A deployment creates it once with lua_role.sql and keeps it too.
+func ensureLuaRole(t *testing.T, db *sql.DB) {
 	t.Helper()
-	ctx := context.Background()
-
-	var exists bool
-	if err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aicc_lua')`).Scan(&exists); err != nil {
-		t.Fatalf("look for the Lua role: %v", err)
-	}
-	if !exists {
-		if _, err := db.ExecContext(ctx, `CREATE ROLE aicc_lua NOLOGIN`); err != nil {
-			// No permission to create one, or something else made it first.
-			// The migration's DO block skips a role that is not there, so
-			// there is nothing left to assert.
-			t.Logf("no Lua role and none could be created (%v); the grant is not checked", err)
-			return false
-		}
-		t.Cleanup(func() {
-			// Every privilege the role holds is a dependency PostgreSQL will
-			// refuse to drop the role over, and they live in this database,
-			// which outlives this cleanup by one step.
-			_, _ = db.Exec(`DROP OWNED BY aicc_lua`)
-			if _, err := db.Exec(`DROP ROLE IF EXISTS aicc_lua`); err != nil {
-				t.Errorf("the Lua role this test created outlived it: %v", err)
-			}
-		})
-	}
+	testdb.Role(t, "aicc_lua")
 	// 00031 and 00033 both grant on the view; make sure the pre-migration
 	// state has it whether or not the role existed when they ran.
-	if _, err := db.ExecContext(ctx, `GRANT SELECT ON luacc.directory TO aicc_lua`); err != nil {
+	if _, err := db.ExecContext(context.Background(),
+		`GRANT SELECT ON luacc.directory TO aicc_lua`); err != nil {
 		t.Fatalf("grant the Lua role its SELECT: %v", err)
 	}
-	return true
 }
 
 // luaCanRead asks the server what the view's ACL says, which is the only place

@@ -96,6 +96,13 @@ jobs:
 
       # Always -race. It has caught real bugs in this codebase, in the actor
       # and jitter paths that only misbehave under load.
+      # The confined Lua role exists before any package migrates, as it does on
+      # a deployment, and nothing drops it. A test that created it raced the
+      # other packages' migrations, which grant to it whenever it exists, and
+      # then could not drop it (#214).
+      - name: Lua role
+        run: psql "$AICC_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE ROLE aicc_lua NOLOGIN'
+
       - name: Test
         run: go test -race ./...
 
