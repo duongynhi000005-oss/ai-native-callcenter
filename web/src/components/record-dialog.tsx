@@ -148,7 +148,7 @@ export function Select({
 }: {
   value: string
   onChange: (next: string) => void
-  options: Array<{ value: string; label: string }>
+  options: Array<{ value: string; label: string; disabled?: boolean }>
   ariaLabel?: string
   disabled?: boolean
   id?: string
@@ -163,7 +163,7 @@ export function Select({
       onChange={(event) => onChange(event.target.value)}
     >
       {options.map((option) => (
-        <option key={option.value} value={option.value}>
+        <option key={option.value} value={option.value} disabled={option.disabled}>
           {option.label}
         </option>
       ))}

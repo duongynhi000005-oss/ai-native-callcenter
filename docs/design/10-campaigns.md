@@ -877,14 +877,36 @@ Contract first in `docs/openapi.json`; final shapes come with the PR.
 - `POST /campaigns/{campaignId}/start | pause | resume | cancel`
 - `POST/GET /campaigns/{campaignId}/contacts` (filter by `status`, `leadIntent`)
 - `GET /campaigns/{campaignId}/attempts`
+- `GET /campaigns/settings` (`campaigns:read`): the rules a write is held to, so a form does not
+  mirror them. `outboundHours` is `AICC_OUTBOUND_HOURS` as a `CampaignTimeRange` (callee-local; a
+  range whose end is before its start crosses midnight, and a window range is inside it only within
+  the same stretch). `defaults` is what a create applies to what it leaves out (`maxConcurrent`,
+  `ringTimeoutSec`, the full `retryPolicy`). `limits` are inclusive: `maxConcurrent` 1 to 100000,
+  `ringTimeoutSec` from 5 to the largest whole number of seconds below the 60-second answer window
+  (59). One source: the service builds the response from the constants and the environment its
+  validators read (`Service.Settings`), and a test creates at each advertised edge and one past it.
+  The server still enforces every rule; the response only lets a client pre-validate.
 - `POST/GET/DELETE /dnc-numbers`
-- `/dids`: a DID gains `maxOutboundChannels` (§6.6)
+- `/dids`: a DID gains `maxOutboundChannels` (§6.6) and the read-only `isCampaignReady`: enabled,
+  `allowOutbound`, a published flow, and that flow cannot transfer (`flow.CanTransfer`). It is
+  `DIDFlow.CheckForCampaign() == nil`, the same function create and start apply, so the flag and the
+  refusal (`CAMPAIGN_DID_NOT_OUTBOUND`, `CAMPAIGN_FLOW_HAS_TRANSFER`, `DID_DISABLED`,
+  `DID_HAS_NO_PUBLISHED_FLOW`) cannot disagree. It is computed from the published revision on every
+  read (two queries for the whole list, not one per number), so republishing flips it; a client
+  value in a write body is ignored. A number whose published revision cannot be loaded reads as not
+  ready.
 
 **CDR, webhooks, SSE:**
 
 - The CDR gains `campaignId`; webhook filters accept `campaignId`.
 - SSE `CAMPAIGN_UPDATED` carries status, `activity`, `nextDialAt` and counters, coalesced to at most
-  one per second per campaign.
+  one per second per campaign. It is also published when a campaign is created (status `DRAFT`,
+  zero contacts): nothing existed and now a `DRAFT` does, which is a state change, so a second open
+  list learns of it without a refetch. `Service.Create` tells the same reporter every other change
+  goes through (`WithCreatedHook`), after the row is stored; a create that is refused stores
+  nothing and publishes nothing. The window opens at the create, so the event follows the `201`
+  response by up to `ReportInterval` (1 s), never precedes it, and a campaign started inside that
+  second is announced once, as `RUNNING`.
 
 **Naming (checked against `07-naming.md`):** the `CAMPAIGN_*` SSE event type is a new scope
 prefix and joins the catalogue in `04-api-sse.md` §4 when the contract lands. Durations that reach

@@ -382,6 +382,7 @@ func (s *Server) router() chi.Router {
 				if s.campaigns != nil {
 					private.Get("/campaigns", op.ListCampaigns)
 					private.Post("/campaigns", op.CreateCampaign)
+					private.Get("/campaigns/settings", op.GetCampaignSettings)
 					private.Get("/campaigns/{campaignId}", op.GetCampaign)
 					private.Patch("/campaigns/{campaignId}", op.UpdateCampaign)
 					private.Delete("/campaigns/{campaignId}", op.DeleteCampaign)

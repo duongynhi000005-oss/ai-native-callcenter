@@ -6,9 +6,10 @@ import { Field, Input, Select } from '@/components/record-dialog'
 import { Button } from '@/components/ui/button'
 import type { DID, Queue } from '@/lib/catalog'
 import {
-  INTERVAL_OUTCOMES, RETRY_OUTCOMES, WEEKDAYS, campaignFieldError, isFieldBound, isFieldEditable,
+  INTERVAL_OUTCOMES, RETRY_OUTCOMES, WEEKDAYS, campaignFieldError, formProblems, hasProblems,
+  isFieldBound, isFieldEditable, retryFields,
   type Campaign, type CampaignField, type CampaignForm, type CampaignRetryOutcome,
-  type CampaignStatus, type Weekday,
+  type CampaignSettings, type CampaignStatus, type Weekday,
 } from '@/lib/campaigns'
 import { describeError } from '@/lib/errors'
 
@@ -54,6 +55,7 @@ export function CampaignFormView({
   onChange,
   onSubmit,
   campaign,
+  settings,
   dids,
   queues,
   error,
@@ -65,6 +67,8 @@ export function CampaignFormView({
   onSubmit: () => void
   /** Present when editing, which is what decides the locks. */
   campaign?: Campaign
+  /** The deployment's rules; absent while loading or when the read failed, and the form still works. */
+  settings?: CampaignSettings
   dids: DID[]
   queues: Queue[]
   error?: unknown
@@ -92,14 +96,50 @@ export function CampaignFormView({
   }
   const hasEditable = !status || !isFinished
 
-  // Only DIDs a campaign can dial from are offered; the one already chosen is
-  // always there so a stored campaign still reads true after the number changed.
+  // Every DID is listed so a stored campaign still reads true, but only a
+  // ready one can be chosen: the others are disabled with the reason beside
+  // them (isCampaignReady is the server's own verdict on the published flow).
+  const notReadyReason = (d: DID) =>
+    !d.isEnabled
+      ? t('campaign.form.didReasonDisabled')
+      : !d.allowOutbound
+        ? t('campaign.form.didReasonNoOutbound')
+        : t('campaign.form.didReasonFlow')
   const didOptions = [
     { value: '', label: t('campaign.form.chooseDid') },
-    ...dids
-      .filter((d) => (d.isEnabled && d.allowOutbound) || d.id === value.didId)
-      .map((d) => ({ value: d.id, label: d.description ? `${d.number} · ${d.description}` : d.number })),
+    ...dids.map((d) => {
+      const name = d.description ? `${d.number} · ${d.description}` : d.number
+      return d.isCampaignReady
+        ? { value: d.id, label: name }
+        : { value: d.id, label: `${name} (${notReadyReason(d)})`, disabled: d.id !== value.didId }
+    }),
   ]
+  const problems = formProblems(value, settings, campaign)
+  const limits = settings?.limits
+  const defaults = settings?.defaults
+  const hours = settings?.outboundHours
+    ? `${settings.outboundHours.start}–${settings.outboundHours.end}`
+    : undefined
+  const rangeError = problems.outsideRanges.length
+    ? t('campaign.form.rangeOutsideHours', {
+        ranges: problems.outsideRanges
+          .map((i) => `${value.ranges[i].start}–${value.ranges[i].end}`)
+          .join(', '),
+        hours,
+      })
+    : undefined
+  const limitError = (key: 'maxConcurrent' | 'ringTimeoutSec') =>
+    problems[key] && limits
+      ? t('campaign.form.outOfLimits', { min: limits[key].min, max: limits[key].max })
+      : undefined
+  // Starting to edit the retry policy of a new campaign begins from the
+  // deployment's own default, not from blanks.
+  const setDefaultRetry = (isDefaultRetry: boolean) =>
+    set(
+      isDefaultRetry || !defaults
+        ? { isDefaultRetry }
+        : { isDefaultRetry, ...retryFields(defaults.retryPolicy) },
+    )
   const queueOptions = [
     { value: '', label: t('campaign.form.noQueue') },
     ...queues.map((q) => ({ value: q.id, label: q.displayName })),
@@ -107,6 +147,8 @@ export function CampaignFormView({
   const zones = timeZoneNames()
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    // What the settings already refuse is not sent; the rest is the server's to judge.
+    if (hasProblems(problems)) return
     onSubmit()
   }
 
@@ -206,7 +248,7 @@ export function CampaignFormView({
 
         <Field
           label={t('campaign.form.days')}
-          error={err('callingWindow')}
+          error={rangeError ?? err('callingWindow')}
           hint={lockedHint('callingWindow')}
         >
           <span className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1">
@@ -272,6 +314,11 @@ export function CampaignFormView({
             </Button>
           )}
           <p className="text-xs text-muted-foreground">{t('campaign.form.rangesHint')}</p>
+          {hours && (
+            <p className="text-xs text-muted-foreground">
+              {t('campaign.form.outboundHoursHint', { hours })}
+            </p>
+          )}
         </div>
       </section>
 
@@ -280,30 +327,44 @@ export function CampaignFormView({
         <div className="grid grid-cols-2 gap-3">
           <Field
             label={t('campaign.form.maxConcurrent')}
-            error={err('maxConcurrent')}
-            hint={lockedHint('maxConcurrent') ?? t('campaign.form.maxConcurrentHint')}
+            error={limitError('maxConcurrent') ?? err('maxConcurrent')}
+            hint={
+              lockedHint('maxConcurrent') ??
+              (limits
+                ? `${t('campaign.form.maxConcurrentHint')} ${t('campaign.form.limitsHint', limits.maxConcurrent)}`
+                : t('campaign.form.maxConcurrentHint'))
+            }
           >
             <Input
               type="number"
-              min={1}
-              max={100000}
+              min={limits?.maxConcurrent.min}
+              max={limits?.maxConcurrent.max}
               disabled={!can('maxConcurrent')}
-              placeholder={t('campaign.form.deploymentDefault')}
+              placeholder={
+                defaults ? String(defaults.maxConcurrent) : t('campaign.form.deploymentDefault')
+              }
               value={value.maxConcurrent}
               onChange={(e) => set({ maxConcurrent: e.target.value })}
             />
           </Field>
           <Field
             label={t('campaign.form.ringTimeoutSec')}
-            error={err('ringTimeoutSec')}
-            hint={lockedHint('ringTimeoutSec') ?? t('campaign.form.ringTimeoutHint')}
+            error={limitError('ringTimeoutSec') ?? err('ringTimeoutSec')}
+            hint={
+              lockedHint('ringTimeoutSec') ??
+              (limits
+                ? t('campaign.form.limitsHint', limits.ringTimeoutSec)
+                : t('campaign.form.ringTimeoutHint'))
+            }
           >
             <Input
               type="number"
-              min={5}
-              max={59}
+              min={limits?.ringTimeoutSec.min}
+              max={limits?.ringTimeoutSec.max}
               disabled={!can('ringTimeoutSec')}
-              placeholder={t('campaign.form.deploymentDefault')}
+              placeholder={
+                defaults ? String(defaults.ringTimeoutSec) : t('campaign.form.deploymentDefault')
+              }
               value={value.ringTimeoutSec}
               onChange={(e) => set({ ringTimeoutSec: e.target.value })}
             />
@@ -318,7 +379,9 @@ export function CampaignFormView({
             <input
               type="checkbox"
               checked={value.isDefaultRetry}
-              onChange={(e) => set({ isDefaultRetry: e.target.checked })}
+              // Editing starts from the deployment's policy, so it waits for the settings.
+              disabled={!defaults && value.isDefaultRetry}
+              onChange={(e) => setDefaultRetry(e.target.checked)}
             />
             {t('campaign.form.useDefaultRetry')}
           </label>

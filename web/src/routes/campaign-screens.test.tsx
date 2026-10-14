@@ -70,6 +70,7 @@ function didFixture(over: Partial<DID> = {}): DID {
     allowOutbound: true,
     isDefaultOutbound: false,
     maxOutboundChannels: 20,
+    isCampaignReady: true,
     ...over,
   }
 }

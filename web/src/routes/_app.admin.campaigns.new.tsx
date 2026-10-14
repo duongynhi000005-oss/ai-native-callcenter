@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { CampaignFormView } from '@/components/campaign-form'
 import { PageHeader } from '@/components/page-header'
 import { useDIDs, useQueues } from '@/lib/catalog'
-import { blankForm, createBodyOf, defaultTimeZone, useCampaignMutations } from '@/lib/campaigns'
+import { blankForm, createBodyOf, defaultTimeZone, useCampaignMutations, useCampaignSettings } from '@/lib/campaigns'
 import { requireRole } from '@/lib/guards'
 
 /** A new campaign is a DRAFT: nothing is dialled until it is started. */
@@ -19,6 +19,7 @@ function NewCampaignPage() {
   const navigate = useNavigate()
   const dids = useDIDs()
   const queues = useQueues()
+  const settings = useCampaignSettings()
   const { create } = useCampaignMutations()
   const [form, setForm] = useState(() => blankForm(defaultTimeZone()))
 
@@ -28,6 +29,7 @@ function NewCampaignPage() {
       <CampaignFormView
         value={form}
         onChange={setForm}
+        settings={settings.data}
         dids={dids.data?.items ?? []}
         queues={queues.data?.items ?? []}
         error={create.error}

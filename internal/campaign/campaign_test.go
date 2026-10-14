@@ -44,6 +44,15 @@ func (r *fakeRepo) DIDFlow(_ context.Context, id uuid.UUID) (DIDFlow, error) {
 	}
 	return d, nil
 }
+func (r *fakeRepo) DIDFlows(_ context.Context, ids []uuid.UUID) ([]DIDFlow, error) {
+	var out []DIDFlow
+	for _, id := range ids {
+		if d, ok := r.dids[id]; ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
 func (r *fakeRepo) Create(_ context.Context, c Campaign) (Campaign, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

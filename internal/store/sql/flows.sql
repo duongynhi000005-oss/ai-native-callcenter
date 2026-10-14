@@ -33,6 +33,14 @@ FROM flows f
 JOIN flow_revisions r ON r.id = f.published_revision_id
 WHERE f.id = $1;
 
+-- The published spec of each of many flows at once; a flow with no published
+-- revision is absent.
+-- name: ListPublishedSpecs :many
+SELECT f.id, r.spec
+FROM flows f
+JOIN flow_revisions r ON r.id = f.published_revision_id
+WHERE f.id = ANY($1::uuid[]);
+
 -- name: GetFlowBySlug :one
 SELECT * FROM flows WHERE slug = $1;
 

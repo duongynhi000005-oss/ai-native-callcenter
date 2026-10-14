@@ -311,6 +311,40 @@ func (q *Queries) ListFlows(ctx context.Context) ([]Flow, error) {
 	return items, nil
 }
 
+const listPublishedSpecs = `-- name: ListPublishedSpecs :many
+SELECT f.id, r.spec
+FROM flows f
+JOIN flow_revisions r ON r.id = f.published_revision_id
+WHERE f.id = ANY($1::uuid[])
+`
+
+type ListPublishedSpecsRow struct {
+	ID   uuid.UUID `json:"id"`
+	Spec []byte    `json:"spec"`
+}
+
+// The published spec of each of many flows at once; a flow with no published
+// revision is absent.
+func (q *Queries) ListPublishedSpecs(ctx context.Context, dollar_1 []uuid.UUID) ([]ListPublishedSpecsRow, error) {
+	rows, err := q.db.Query(ctx, listPublishedSpecs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPublishedSpecsRow{}
+	for rows.Next() {
+		var i ListPublishedSpecsRow
+		if err := rows.Scan(&i.ID, &i.Spec); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setPublishedRevision = `-- name: SetPublishedRevision :exec
 UPDATE flows
 SET published_revision_id = $2, published_at = now(), updated_at = now()

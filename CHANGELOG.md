@@ -50,6 +50,15 @@ carries the one-line installer's files.
   `<tool>.args.<k>`, and a call placed with business data starts with it as
   `userData.<k>`. The seed `lead_qualification` flow records interest, budget
   and timeline this way. Authoring guide: `docs/flow-authoring.md` §2.8 (#13).
+- `GET /campaigns/settings` (scope `campaigns:read`): the deployment's outer
+  calling hours (`AICC_OUTBOUND_HOURS`), the defaults a create applies
+  (`maxConcurrent`, `ringTimeoutSec`, the retry policy) and the limits the
+  server enforces, built from the same values it validates against. `DID`
+  gains a read-only `isCampaignReady`: enabled, allows outbound, and a
+  published flow that cannot transfer, the same rule `createCampaign` applies.
+  Creating a campaign now publishes one `CAMPAIGN_UPDATED` (status `DRAFT`),
+  shortly after the `201`. The campaign form reads all three, and pre-validates
+  the calling window and numeric limits before sending (#189).
 
 ### Changed
 

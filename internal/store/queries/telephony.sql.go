@@ -290,6 +290,44 @@ func (q *Queries) GetDIDByNumber(ctx context.Context, number string) (Did, error
 	return i, err
 }
 
+const getDIDsByIDs = `-- name: GetDIDsByIDs :many
+SELECT id, number, language, flow_id, fallback_queue_id, is_recording_enabled, description, is_enabled, created_at, allow_inbound, allow_outbound, is_default_outbound, max_outbound_channels FROM dids WHERE id = ANY($1::uuid[])
+`
+
+func (q *Queries) GetDIDsByIDs(ctx context.Context, dollar_1 []uuid.UUID) ([]Did, error) {
+	rows, err := q.db.Query(ctx, getDIDsByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Did{}
+	for rows.Next() {
+		var i Did
+		if err := rows.Scan(
+			&i.ID,
+			&i.Number,
+			&i.Language,
+			&i.FlowID,
+			&i.FallbackQueueID,
+			&i.IsRecordingEnabled,
+			&i.Description,
+			&i.IsEnabled,
+			&i.CreatedAt,
+			&i.AllowInbound,
+			&i.AllowOutbound,
+			&i.IsDefaultOutbound,
+			&i.MaxOutboundChannels,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getExtension = `-- name: GetExtension :one
 SELECT id, number, password, display_name, is_enabled, created_at, updated_at FROM extensions WHERE id = $1
 `

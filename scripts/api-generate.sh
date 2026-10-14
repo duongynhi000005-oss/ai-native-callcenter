@@ -24,7 +24,8 @@ mv "$tmp" internal/api/api.gen.go
 gofmt -w internal/api/api.gen.go
 
 mkdir -p web/src/generated
-web/node_modules/.bin/openapi-typescript docs/openapi.json -o web/src/generated/api.ts
+# --default-non-nullable false: a property with a default stays optional in a request body (the server fills it in); the spec's own required list is the only word on what a body must carry.
+web/node_modules/.bin/openapi-typescript docs/openapi.json --default-non-nullable false -o web/src/generated/api.ts
 
 # The scope vocabulary. Neither generator above emits it — oapi-codegen and
 # openapi-typescript both ignore `security` and the root `x-scopes` extension —

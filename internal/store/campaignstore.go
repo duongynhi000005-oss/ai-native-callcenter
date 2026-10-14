@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -54,6 +55,50 @@ func (c *CampaignStore) DIDFlow(ctx context.Context, didID uuid.UUID) (campaign.
 	}
 	if out.Spec, err = flow.Load(raw); err != nil {
 		return campaign.DIDFlow{}, fmt.Errorf("published flow %s: %w", *did.FlowID, err)
+	}
+	return out, nil
+}
+
+// DIDFlows looks many DIDs up with their published flows, in two queries.
+func (c *CampaignStore) DIDFlows(ctx context.Context, didIDs []uuid.UUID) ([]campaign.DIDFlow, error) {
+	if len(didIDs) == 0 {
+		return nil, nil
+	}
+	dids, err := c.q.GetDIDsByIDs(ctx, didIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get dids: %w", err)
+	}
+	var flowIDs []uuid.UUID
+	for _, d := range dids {
+		if d.FlowID != nil {
+			flowIDs = append(flowIDs, *d.FlowID)
+		}
+	}
+	specs := map[uuid.UUID]*flow.Spec{}
+	if len(flowIDs) > 0 {
+		rows, err := c.q.ListPublishedSpecs(ctx, flowIDs)
+		if err != nil {
+			return nil, fmt.Errorf("get published flows: %w", err)
+		}
+		for _, r := range rows {
+			spec, err := flow.Load(r.Spec)
+			if err != nil {
+				// One unreadable revision must not hide every number from a
+				// list; its numbers count as having no usable flow. A create
+				// on such a number still fails loudly (DIDFlow).
+				slog.Warn("published flow cannot be loaded; its numbers are not campaign-ready", "flowId", r.ID, "error", err)
+				continue
+			}
+			specs[r.ID] = spec
+		}
+	}
+	out := make([]campaign.DIDFlow, 0, len(dids))
+	for _, d := range dids {
+		f := campaign.DIDFlow{ID: d.ID, Number: d.Number, IsEnabled: d.IsEnabled, AllowOutbound: d.AllowOutbound}
+		if d.FlowID != nil {
+			f.Spec = specs[*d.FlowID]
+		}
+		out = append(out, f)
 	}
 	return out, nil
 }

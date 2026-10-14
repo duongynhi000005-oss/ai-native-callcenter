@@ -148,6 +148,9 @@ func (s *Server) UnstaffQueue(w http.ResponseWriter, r *http.Request, queueID, a
 
 func (s *Server) ListDIDs(w http.ResponseWriter, r *http.Request) {
 	items, err := s.catalog.DIDs(r.Context())
+	if err == nil {
+		err = s.markCampaignReady(r.Context(), items)
+	}
 	s.writeList(w, r, items, err)
 }
 
@@ -157,6 +160,7 @@ func (s *Server) CreateDID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.catalog.CreateDID(r.Context(), in)
+	out, err = s.withCampaignReady(r.Context(), out, err)
 	s.writeCatalog(w, r, out, err, http.StatusCreated)
 }
 
@@ -167,7 +171,20 @@ func (s *Server) UpdateDID(w http.ResponseWriter, r *http.Request, id uuid.UUID)
 	}
 	in.ID = id
 	out, err := s.catalog.UpdateDID(r.Context(), in)
+	out, err = s.withCampaignReady(r.Context(), out, err)
 	s.writeCatalog(w, r, out, err, http.StatusOK)
+}
+
+// withCampaignReady completes a number a write returned.
+func (s *Server) withCampaignReady(ctx context.Context, d catalog.DID, err error) (catalog.DID, error) {
+	if err != nil {
+		return d, err
+	}
+	one := []catalog.DID{d}
+	if err := s.markCampaignReady(ctx, one); err != nil {
+		return d, err
+	}
+	return one[0], nil
 }
 
 func (s *Server) DeleteDID(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
