@@ -8,7 +8,9 @@
 // the point of them is to be *real* files — a hand-written ZIP whose parts are
 // the OOXML a spreadsheet writes — so the reader is tested against the format
 // and not against a library's idea of it. `openpyxl` is used as an independent
-// check that the bytes are genuine (see the end of this file).
+// check that the bytes are genuine (see the end of this file); it runs through
+// `uv`, which fetches it into a throwaway environment, so no Python package has
+// to be installed. `SKIP_OPENPYXL=1` leaves the check out.
 //
 // Nothing here is imported by the app or by a test: the tests read the files.
 
@@ -396,7 +398,9 @@ write('empty-first.xlsx', build([emptySheet, contactsXlsx]))
 write('broken.xlsx', 'this is not a workbook\n')
 
 // `openpyxl` is an independent reader. If it opens every fixture and agrees
-// about the cells, the hand-written XML is the format it claims to be.
+// about the cells, the hand-written XML is the format it claims to be. `uv run`
+// supplies it and a Python of its own, so neither the interpreter's path nor a
+// system-wide package depends on the machine.
 if (process.env.SKIP_OPENPYXL !== '1') {
   const { execFileSync } = await import('node:child_process')
   const check = `
@@ -409,7 +413,11 @@ for name in ['contacts.xlsx', 'edge-cases.xlsx', 'offset.xlsx', 'two-sheets.xlsx
             print('   ', row)
 `
   try {
-    say(execFileSync('/usr/local/bin/python3', ['-c', check, outDir], { encoding: 'utf8' }).trimEnd())
+    say(
+      execFileSync('uv', ['run', '--quiet', '--no-project', '--with', 'openpyxl', 'python', '-c', check, outDir], {
+        encoding: 'utf8',
+      }).trimEnd(),
+    )
   } catch (error) {
     say('openpyxl could not read the fixtures:')
     say(String(error.stdout || error.message))
