@@ -12,7 +12,7 @@
 // Fixtures are deliberately the reference ones, so a walkthrough has a
 // determinate right answer: RMA1001 is in repair, 92223333 is 8 days overdue,
 // 18688886666 (the dev trunk's external caller) is 16 days overdue, 10086002
-// is inside its contract and cannot change plan. Somebody reading the
+// is inside its contract and must go to an agent. Somebody reading the
 // walkthrough can tell "the bot said the wrong thing" from "the bot said what
 // the data says".
 //
@@ -52,6 +52,8 @@ type store struct {
 	appointments map[string]*appointment
 	apptSeq      int
 	orderSeq     int
+	// tickets maps a plan-change ticket to how many times it was checked.
+	tickets map[string]int
 	// promises and leads are written and never read: the flows only need the
 	// write to succeed. They are kept so a walkthrough can see arrivals in the
 	// log rather than take the response on trust.
@@ -82,6 +84,7 @@ func newStore() *store {
 		},
 		apptSeq:  2000,
 		orderSeq: 12000,
+		tickets:  map[string]int{},
 	}
 }
 
@@ -101,10 +104,11 @@ func New(logf func(format string, args ...any)) http.Handler {
 		"/api/appt/book":       s.apptBook,
 		"/api/appt/reschedule": s.apptReschedule,
 		"/api/appt/confirm":    s.apptConfirm,
-		"/api/bb/account":      s.bbAccount,
-		"/api/bb/verify":       s.bbVerify,
-		"/api/bb/plans":        s.bbPlans,
-		"/api/bb/change":       s.bbChange,
+		"/api/plan/check":      s.planCheck,
+		"/api/plan/verify":     s.planVerify,
+		"/api/plan/submit":     s.planSubmit,
+		"/api/plan/status":     s.planStatus,
+		"/api/kb/search":       s.kbSearch,
 		"/api/bill/overdue":    s.billOverdue,
 		"/api/bill/promise":    s.billPromise,
 		"/api/bill/dispute":    s.billDispute,
@@ -244,48 +248,189 @@ func (s *store) apptConfirm(b map[string]any) (any, string) {
 }
 
 // ------------------------------------------------ Broadband plan changes
+//
+// The plan_change flow's backend. plan_check is the decision tool of
+// docs/flow-authoring.md section 4.1: the business rule lives here, and the
+// flow only branches on the decision. Every text field is answered in the
+// request's lang ("zh" or, for anything else, "en").
+//
+// Service numbers:
+//
+//	10086001  OK_TO_CHANGE    phone ends 3333; plan 3 is refused at submit
+//	10086002  NEED_HUMAN      phone ends 7777; in contract (early-termination fee)
+//	10086003  NEED_ID_VERIFY  phone ends 5555; verify, then plan 1-3 may change
+//	10086004  NEED_HUMAN      phone ends 9999; account in arrears
+//	other     NOT_FOUND
 
-func (s *store) bbAccount(b map[string]any) (any, string) {
-	switch str(b["serviceNo"]) {
-	case "10086001":
-		return map[string]any{"found": "1", "name": "张女士",
-			"current_plan": "100M 光纤，每月 68 元", "in_contract": "0"}, ""
-	case "10086002":
-		// In contract: the flow is expected to refuse the change and offer an
-		// agent, which is the branch worth walking.
-		return map[string]any{"found": "1", "name": "刘先生",
-			"current_plan": "300M 光纤，每月 98 元（合约期内）", "in_contract": "1"}, ""
-	}
-	return map[string]any{"found": "0", "name": "", "current_plan": "", "in_contract": "0"}, ""
+type planAccount struct {
+	decision, reason string
+	currentPlan      [2]string // en, zh
+	phoneLast4       string
+	// refusedPlan is a plan id plan_submit refuses for this account (0: none).
+	refusedPlan int
 }
 
-func (s *store) bbVerify(b map[string]any) (any, string) {
-	last4 := map[string]string{"10086001": "3333", "10086002": "7777"}[str(b["serviceNo"])]
+var planAccounts = map[string]planAccount{
+	"10086001": {decision: "OK_TO_CHANGE", reason: "ELIGIBLE", phoneLast4: "3333", refusedPlan: 3,
+		currentPlan: [2]string{"100M fibre, 68 yuan a month", "100M 光纤，每月 68 元"}},
+	"10086002": {decision: "NEED_HUMAN", reason: "IN_CONTRACT_EARLY_TERMINATION_FEE", phoneLast4: "7777",
+		currentPlan: [2]string{"300M fibre, 98 yuan a month, under contract", "300M 光纤，每月 98 元（合约期内）"}},
+	"10086003": {decision: "NEED_ID_VERIFY", reason: "CHANGE_REQUIRES_ID_CHECK", phoneLast4: "5555",
+		currentPlan: [2]string{"200M fibre, 78 yuan a month", "200M 光纤，每月 78 元"}},
+	"10086004": {decision: "NEED_HUMAN", reason: "ARREARS", phoneLast4: "9999",
+		currentPlan: [2]string{"100M fibre, 68 yuan a month, 2 months overdue", "100M 光纤，每月 68 元（已欠费2个月）"}},
+}
+
+// planText picks the wording for the request's language.
+func planText(lang, en, zh string) string {
+	if strings.EqualFold(strings.TrimSpace(lang), "zh") {
+		return zh
+	}
+	return en
+}
+
+func planOptions(lang string) string {
+	return planText(lang,
+		"Plan 1, 300M fibre, 88 yuan a month. Plan 2, 500M fibre, 108 yuan a month. "+
+			"Plan 3, gigabit fibre, 158 yuan a month.",
+		"套餐一，300M 光纤，每月 88 元；套餐二，500M 光纤，每月 108 元；套餐三，千兆光纤，每月 158 元。")
+}
+
+// planCheck answers with a decision on a success envelope: "the backend
+// decided no" is a field, not a failure, so the flow can read it.
+func (s *store) planCheck(b map[string]any) (any, string) {
+	lang := str(b["lang"])
+	acct, ok := planAccounts[str(b["serviceNo"])]
+	if !ok {
+		return map[string]any{"decision": "NOT_FOUND", "reason": "UNKNOWN_SERVICE_NUMBER",
+			"spoken":  planText(lang, "That service number was not found.", "没有查到这个业务号码。"),
+			"options": "", "current_plan": ""}, ""
+	}
+	out := map[string]any{"decision": acct.decision, "reason": acct.reason,
+		"current_plan": planText(lang, acct.currentPlan[0], acct.currentPlan[1]), "options": ""}
+	switch acct.decision {
+	case "OK_TO_CHANGE":
+		out["spoken"] = planText(lang, "This account can change plan now.", "该账户可以直接变更套餐。")
+		out["options"] = planOptions(lang)
+	case "NEED_ID_VERIFY":
+		out["spoken"] = planText(lang,
+			"This change needs a quick identity check first, using the registered phone number.",
+			"办理这项变更前需要先核验身份，核对登记的电话号码。")
+		out["options"] = planOptions(lang)
+	default:
+		if acct.reason == "ARREARS" {
+			out["spoken"] = planText(lang, "The account has an overdue balance, so an agent must handle it.",
+				"账户有欠费，需要人工客服处理。")
+		} else {
+			out["spoken"] = planText(lang,
+				"The account is under contract and an early-termination fee applies, so an agent must handle it.",
+				"账户在合约期内，变更会产生违约金，需要人工客服处理。")
+		}
+	}
+	return out, ""
+}
+
+func (s *store) planVerify(b map[string]any) (any, string) {
+	acct, ok := planAccounts[str(b["serviceNo"])]
 	match := "0"
-	if last4 != "" && last4 == str(b["phoneLast4"]) {
+	if ok && acct.phoneLast4 == str(b["phoneLast4"]) {
 		match = "1"
 	}
 	return map[string]any{"match": match}, ""
 }
 
-func (s *store) bbPlans(map[string]any) (any, string) {
-	return map[string]any{
-		"spoken": "套餐一，300M 光纤，每月 88 元；套餐二，500M 光纤，每月 108 元；" +
-			"套餐三，千兆光纤，每月 158 元",
-		"plan1": "300M 88元", "plan2": "500M 108元", "plan3": "1000M 158元",
-	}, ""
-}
-
-func (s *store) bbChange(b map[string]any) (any, string) {
-	plan := toInt(b["planId"])
-	if str(b["serviceNo"]) == "" || plan < 1 || plan > 3 {
+// planSubmit returns a ticket at once, as a slow operation must (flow-authoring
+// section 4.3). The work "continues in the background": planStatus reports it.
+func (s *store) planSubmit(b map[string]any) (any, string) {
+	lang := str(b["lang"])
+	no, plan := str(b["serviceNo"]), toInt(b["planId"])
+	acct, ok := planAccounts[no]
+	if !ok || plan < 1 || plan > 3 {
 		return nil, "serviceNo/planId required"
+	}
+	if acct.decision == "NEED_HUMAN" {
+		return nil, "this account cannot change plan by self-service"
+	}
+	if plan == acct.refusedPlan {
+		return nil, "this plan is not available at the installation address"
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.orderSeq++
-	return map[string]any{"order_no": fmt.Sprintf("BB-%d", s.orderSeq),
-		"effective": "下一个账期生效"}, ""
+	ticket := fmt.Sprintf("PC-%d", s.orderSeq)
+	s.tickets[ticket] = 0
+	return map[string]any{"ticket": ticket, "state": "PROCESSING",
+		"effective": planText(lang, "effective from the next billing cycle", "下一个账期生效")}, ""
+}
+
+// planStatus is PROCESSING on the first check of a ticket and DONE on every
+// later one, so a walkthrough sees both without waiting.
+func (s *store) planStatus(b map[string]any) (any, string) {
+	lang := str(b["lang"])
+	ticket := str(b["ticket"])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	checks, ok := s.tickets[ticket]
+	if !ok {
+		return nil, "ticket not found"
+	}
+	s.tickets[ticket] = checks + 1
+	if checks == 0 {
+		return map[string]any{"state": "PROCESSING",
+			"eta": planText(lang, "about 10 minutes", "大约10分钟")}, ""
+	}
+	return map[string]any{"state": "DONE", "eta": ""}, ""
+}
+
+// ----------------------------------------------------------- Knowledge base
+
+type kbEntry struct {
+	keywords []string
+	en, zh   string
+}
+
+// The toy retrieval service behind kb_search. A real one lives outside this
+// repository (flow-authoring section 4.2); this one matches keywords, which is
+// enough to walk the found and not-found branches. The first entry with a
+// matching keyword wins, so order is specificity.
+var kbEntries = []kbEntry{
+	{[]string{"early termination", "termination fee", "违约金", "提前解约", "解约"},
+		"Changing plan inside the contract term costs an early-termination fee of 200 yuan, so an agent handles it.",
+		"合约期内变更套餐需支付200元违约金，由人工客服办理。"},
+	{[]string{"installation", "install", "安装费", "安装", "装机"},
+		"The installation fee is 100 yuan for a new line. A plan change on an existing line costs nothing.",
+		"新装宽带安装费100元；已有线路变更套餐不收费。"},
+	{[]string{"take effect", "effective", "when will", "生效", "什么时候"},
+		"A plan change takes effect from the next billing cycle.",
+		"套餐变更从下一个账期开始生效。"},
+	{[]string{"contract", "term", "合约", "合同", "期限"},
+		"Contracts run 12 months. A plan change outside a contract carries no fee.",
+		"合约期为12个月；合约期外变更套餐不收费。"},
+	{[]string{"gigabit", "1000m", "千兆"},
+		"Gigabit fibre is 158 yuan a month, up to 1000M download.",
+		"千兆光纤每月158元，下行最高1000M。"},
+	{[]string{"500m", "plan 2", "套餐二"},
+		"The 500M plan is 108 yuan a month, up to 500M download.",
+		"500M 套餐每月108元，下行最高500M。"},
+	{[]string{"300m", "plan 1", "套餐一"},
+		"The 300M plan is 88 yuan a month, up to 300M download.",
+		"300M 套餐每月88元，下行最高300M。"},
+	{[]string{"price", "cost", "how much", "speed", "价格", "多少钱", "资费", "网速", "速度"},
+		"Plans: 300M at 88 yuan, 500M at 108 yuan and gigabit at 158 yuan a month.",
+		"套餐：300M 每月88元，500M 每月108元，千兆每月158元。"},
+}
+
+func (s *store) kbSearch(b map[string]any) (any, string) {
+	query := strings.ToLower(str(b["query"]))
+	lang := str(b["lang"])
+	for _, e := range kbEntries {
+		for _, k := range e.keywords {
+			if strings.Contains(query, k) {
+				return map[string]any{"found": "1", "answer": planText(lang, e.en, e.zh)}, ""
+			}
+		}
+	}
+	return map[string]any{"found": "0", "answer": ""}, ""
 }
 
 // ------------------------------------- Bill reminders (early collections)

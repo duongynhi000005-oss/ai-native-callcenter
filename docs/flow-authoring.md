@@ -4,7 +4,7 @@ A guide for writing a flow that stays small and readable when the business behin
 
 Every field, built-in and behaviour named here exists in the code today. Where something a business may want is not supported, the guide says so and links the issue. It does not describe designs that are not built.
 
-Related reading: the field reference is `internal/flow/spec.go`; the engine design and the live findings that amended it are `docs/design/02-ai-voice.md` §6 and §7; the seeded flows in `internal/seed/flows/` are working examples; the mock backend they call is `cmd/aicc-mockbackend`.
+Related reading: the field reference is `internal/flow/spec.go`; the engine design and the live findings that amended it are `docs/design/02-ai-voice.md` §6 and §7; the seeded flows in `internal/seed/flows/` are working examples; the mock backend they call is `cmd/aicc-mockbackend`. The worked example (7) is the seeded `plan_change` flow.
 
 ## 1. What a flow is, and what it is not
 
@@ -229,7 +229,7 @@ Guidance:
 - **Return the decision on a success envelope.** A backend that answers `NEED_HUMAN` as a failure (`successWhen` not holding) loses every mapped field, because a refusal maps none. Use the failure path for "the backend could not decide", and a field for "the backend decided no".
 - **Use a small closed vocabulary** of decision values (`OK_TO_CHANGE`, `NEED_ID_VERIFY`, `NEED_HUMAN`) and one transition per value. A phase with a transition for every value the backend can return, plus a fallback rule with a higher `priority` number, cannot dead-end silently.
 - **Let the backend also return what the model should say**, in a short spoken-ready field (`spoken`, `reason`), mapped into the result. The model reads it from the tool result, so the wording of a rule lives next to the rule.
-- **Keep the model out of the arithmetic.** The seeded `plan_change` flow tells the model in the `offer` instruction to check `in_contract` and transfer. That works, but it is a business rule held in prompt text, and it is the shape this pattern replaces: a `decision` field and one transition would make it deterministic.
+- **Keep the model out of the arithmetic.** A rule such as "if `in_contract` is 1, transfer" in an instruction is a business rule held in prompt text, and it is the shape this pattern replaces: a `decision` field and one transition make it deterministic. The seeded `plan_change` flow used to carry exactly that rule and now reads `NEED_HUMAN` from `plan_check` instead (7).
 
 ### 4.2 Knowledge through a tool
 
@@ -270,7 +270,7 @@ Guidance:
 - **Return `found` and say what to do when it is empty** in the phase instruction (offer a person or a message), so a miss is a branch and not an invention.
 - **Allow the tool in the phases where questions arise** and no wider. A search tool in a phase does not move the call: with no transition for it, the call stays put and the conversation goes on.
 - **Do not map large fields into slots on purpose.** Mapped fields are slots, and a slot named in an instruction is re-pinned into the standing instructions.
-- A neutral retrieval contract and ready templates for particular stores are a separate piece of work, not built: see 7.
+- A neutral retrieval contract and ready templates for particular stores are a separate piece of work, not built: see 6.
 
 ### 4.3 Long operations
 
@@ -340,7 +340,7 @@ Whether a step needs a person is a business decision, so the backend makes it, n
 }
 ```
 
-`tools: []` is enough because `transfer_to_agent` is in `alwaysAllowedTools` in the seeded flows. The global transition on a successful `transfer_to_agent` then moves the call to a terminal phase whose `announce` is the hand-over line (the seeded `finish_transfer`). The same phase is the right `fallbackTarget`: a model that loops, or a tool that fails repeatedly, ends in a person. The seeded flows do this by counting calls (`bb_verify.calls GTE 2`, priority 1).
+`tools: []` is enough because `transfer_to_agent` is in `alwaysAllowedTools` in the seeded flows. The global transition on a successful `transfer_to_agent` then moves the call to a terminal phase whose `announce` is the hand-over line (the seeded `finish_transfer`). The same phase is the right `fallbackTarget`: a model that loops, or a tool that fails repeatedly, ends in a person. The seeded flows do this by counting calls (`plan_verify.calls GTE 2`, priority 1).
 
 Do not let a prompt rule such as "never change a plan over 200" be the only guard. The model can be talked past a prompt; it cannot call a tool the phase does not allow, and it cannot make the backend return a different decision.
 
@@ -360,7 +360,7 @@ A deployment whose provider cannot be cued by text (doubao) refuses to **publish
 
 ### 5.3 Closing phases and the two guards
 
-Rule for a closing phase (`docs/design/02-ai-voice.md` §6): after "anything else?", a decline ("no", "that's all") means call `hangup` at once and never ask a second time; a follow-up or a new request is handled normally; a request to repeat is honoured. Write it into the phase instruction, as `plan_change`'s `done` does.
+Rule for a closing phase (`docs/design/02-ai-voice.md` §6): after "anything else?", a decline ("no", "that's all") means call `hangup` at once and never ask a second time; a follow-up or a new request is handled normally; a request to repeat is honoured. Write it into the phase instruction, as `plan_change`'s `submitted` does. Say what is *not* a decline as well: an acknowledgement or filler ("okay", "um", "嗯", "好的") or an utterance the model did not catch. On a live qwen call a caller's "嗯" before a follow-up question, cut off as a turn of its own by the server VAD, was taken as a decline and the call was hung up; one sentence in the instruction ("only a clear decline ends the call; a filler or something you did not catch is not one, ask what else they need") fixed it.
 
 A model-spoken goodbye followed by `hangup` is unreliable ("say the closing line, then call hangup"). Some models, qwen among them, speak the line, end the turn without the tool call and leave the call open until dead air (issue [#147](https://github.com/rasonyang/ai-native-callcenter/issues/147)). Two shapes work:
 
@@ -403,288 +403,118 @@ Say these to the business rather than working around them in the prompt.
 
 ## 7. A worked example
 
-This is an illustrative flow in the seeded flows' style (a broadband plan change). It is not one of the seeded flows, and it calls endpoints (`/api/plan/*`, `/api/kb/search`) that `cmd/aicc-mockbackend` does not serve. It exists to show the patterns together: a decision tool, a knowledge tool, submit-and-check, a backend-decided transfer, and the closing rule.
+The worked example is a real flow: `internal/seed/flows/plan_change.json`, a broadband plan change (DIDs 95021 English and 95022 Chinese). It is served by the mock backend (`go run ./cmd/aicc-mockbackend`, handlers in `internal/mockbackend/mockbackend.go`), walked by `internal/seed/scenarios/plan_change.json`, and replayable with no database or model:
 
-The call flow: ask for the service number; `plan_check` decides (`OK_TO_CHANGE` goes to confirmation, `NEED_ID_VERIFY` goes to verification, `NEED_HUMAN` goes to the hand-over). Policy questions are answered through `kb_search` in the phases where they come up. A submitted change returns a ticket at once and `plan_status` reports its progress.
+```sh
+aicc flowsim -flow internal/seed/flows/plan_change.json -scenario internal/seed/scenarios/plan_change.json
+```
+
+It uses the patterns of section 4 together: a decision tool (4.1), a knowledge tool (4.2), submit-and-check (4.3), a backend-decided hand-over (4.4) and the closing rule (5.3). Read the file for the full text; this section shows the parts that carry the design.
+
+### 7.1 The call
+
+Seven phases:
+
+| Phase | Job | Leaves on |
+| --- | --- | --- |
+| `identity` (initial) | Announce, take the service number, call `plan_check`. `kb_search` allowed. | `OK_TO_CHANGE` to `confirm`; `NEED_ID_VERIFY` to `verify`; `NEED_HUMAN` to `need_transfer`; a third `plan_check` that decided none of those (an unknown number, `NOT_FOUND`) to `need_transfer`. A `NOT_FOUND` earlier stays here and the model asks again. |
+| `verify` | Explain the check, ask the last 4 digits of the registered phone, call `plan_verify`. | `match` of `1` to `confirm`; a second call that did not match to `need_transfer`. |
+| `confirm` | Read the options, restate the choice, get a yes, call `plan_submit`. `kb_search` allowed. | A submit that worked to `submitted`; a refused or failed one to `need_transfer`. |
+| `submitted` | Read the ticket, answer `plan_status`, ask "anything else?". | Global `hangup` rule to `finish`. |
+| `need_transfer` | Apologise, call `transfer_to_agent` with the decision and reason in the summary. `take_message` allowed for a closed queue. | Global rule on a successful transfer to `finish_transfer`. |
+| `finish_transfer`, `finish` | Terminal, each with an `announce`. | |
+
+The old version of this flow had a `bb_account` lookup, a `bb_verify` for every caller, an `offer` phase and a prompt rule "if `in_contract` is 1, transfer". The business rules are now the backend's, so there is one decision tool and one transition per decision value.
+
+### 7.2 The decision tool and what the flow does with it
+
+`plan_check` answers on a success envelope, with the decision, the reason, a sentence the model can say, the plan options as a field of their own, and the current plan. The backend answers in the call's language (`lang` in the body), so no wording is duplicated in the flow:
 
 ```json
-{
-  "id": "plan_change_decision_example",
-  "specVersion": "v2",
-  "entry": "plan_change",
-  "initialNode": "welcome",
-  "global": {
-    "persona": {
-      "en": "You are the voice assistant of the NovaNet Broadband hotline, handling plan changes.",
-      "zh": "你是星联宽带客服热线的语音助手，为用户办理宽带套餐变更。"
-    },
-    "rules": {
-      "en": [
-        "This is a spoken phone conversation: one or two short sentences per reply, no lists or written formatting.",
-        "Plan names, prices, order and ticket numbers must come from tool results. Never invent them.",
-        "Before submitting a change, restate it and get the caller's explicit confirmation.",
-        "When the caller clearly wants to end the call, call hangup immediately, then say goodbye."
-      ],
-      "zh": [
-        "这是电话语音对话：每次只说一两句短句，不用列表或书面格式。",
-        "套餐名称、价格、单号和工单号必须来自工具返回，严禁编造。",
-        "提交变更前必须复述内容并获得用户明确确认。",
-        "用户明确表达要结束通话，立即调用 hangup，工具返回后再道别。"
-      ]
-    },
-    "fallbackTarget": "need_transfer",
-    "closingTarget": "finish",
-    "maxTurns": 30,
-    "maxTurnsWithoutTool": 10,
-    "alwaysAllowedTools": ["transfer_to_agent", "hangup"],
-    "transitions": [
-      {
-        "on": "TOOL_RESULT",
-        "tool": "transfer_to_agent",
-        "condition": { "slot": "result.ok", "op": "EQ", "value": "1" },
-        "target": "finish_transfer"
-      },
-      { "on": "TOOL_RESULT", "tool": "hangup", "target": "finish" }
-    ]
-  },
-  "nodes": {
-    "welcome": {
-      "announce": {
-        "en": "Welcome to the NovaNet Broadband hotline. Please tell me your 8-digit service number.",
-        "zh": "星联宽带客服热线，语音助手为您服务。请报出您的8位宽带业务号码。"
-      },
-      "instruction": {
-        "en": "When the caller gives the service number, call plan_check with it. For questions about prices or terms, call kb_search first.",
-        "zh": "用户报出业务号码后，调用 plan_check。涉及价格或条款的问题，先调用 kb_search。"
-      },
-      "tools": ["plan_check", "kb_search"],
-      "transitions": [
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_check",
-          "condition": { "slot": "result.decision", "op": "EQ", "value": "OK_TO_CHANGE" },
-          "target": "confirm"
-        },
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_check",
-          "condition": { "slot": "result.decision", "op": "EQ", "value": "NEED_ID_VERIFY" },
-          "target": "verify"
-        },
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_check",
-          "condition": { "slot": "result.decision", "op": "EQ", "value": "NEED_HUMAN" },
-          "target": "need_transfer"
-        },
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_check",
-          "condition": { "slot": "plan_check.calls", "op": "GTE", "value": 3 },
-          "target": "need_transfer",
-          "priority": 1
-        }
-      ]
-    },
-    "verify": {
-      "instruction": {
-        "en": "{slots.plan_check.spoken} Ask for the last 4 digits of the registered phone and call plan_verify with the service number. Two mismatches transfer to an agent.",
-        "zh": "{slots.plan_check.spoken} 请用户提供登记电话后4位，调用 plan_verify 核验。连续两次不符会转人工。"
-      },
-      "tools": ["plan_verify"],
-      "transitions": [
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_verify",
-          "condition": { "slot": "result.match", "op": "EQ", "value": "1" },
-          "target": "confirm"
-        },
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_verify",
-          "condition": { "slot": "plan_verify.calls", "op": "GTE", "value": 2 },
-          "target": "need_transfer",
-          "priority": 1
-        }
-      ]
-    },
-    "confirm": {
-      "instruction": {
-        "en": "The change is allowed. Say what the caller can choose: {slots.plan_check.spoken} Restate the chosen plan, get an explicit yes, then call plan_submit. For questions about terms, call kb_search.",
-        "zh": "允许办理。可选内容：{slots.plan_check.spoken} 复述所选套餐，得到明确的“是”后调用 plan_submit。条款类问题先调用 kb_search。"
-      },
-      "tools": ["plan_submit", "kb_search", "take_message"],
-      "transitions": [
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_submit",
-          "condition": { "slot": "result.ok", "op": "EQ", "value": "1" },
-          "target": "submitted"
-        },
-        {
-          "on": "TOOL_RESULT",
-          "tool": "plan_submit",
-          "condition": { "slot": "result.ok", "op": "EQ", "value": "0" },
-          "target": "need_transfer",
-          "priority": 1
-        }
-      ]
-    },
-    "submitted": {
-      "instruction": {
-        "en": "The change was received as ticket {slots.plan_submit.ticket} and is being processed, not finished. Read the ticket number digit by digit and say it takes a little while. If the caller asks how it is going, call plan_status. Then ask if there is anything else. If the caller declines, call hangup immediately and do not ask again. If they ask you to repeat something, repeat it. If they have another request, handle it as usual.",
-        "zh": "变更已受理，工单号 {slots.plan_submit.ticket}，正在处理，尚未完成。逐位读出工单号并说明需要一些时间。用户问进度时调用 plan_status。然后问还需要其它服务吗。对方说“没有了”“不用了”就立即调用 hangup，不要再问。对方请你重复就重复；还有别的需求就照常处理。"
-      },
-      "tools": ["plan_status", "kb_search"]
-    },
-    "need_transfer": {
-      "instruction": {
-        "en": "This cannot proceed via self-service. Apologise briefly, then immediately call transfer_to_agent. Put the decision and the reason in the summary.",
-        "zh": "当前业务无法自助办理：向用户简短道歉，立即调用 transfer_to_agent，并把判定结果和原因写进 summary。"
-      },
-      "tools": []
-    },
-    "finish_transfer": {
-      "announce": {
-        "en": "Certainly. I am putting you through to an agent now. Please stay on the line.",
-        "zh": "好的，正在为您转接人工客服，请不要挂机，稍等片刻。"
-      },
-      "instruction": {
-        "en": "The caller is connected right after this line. Ask no further questions and do not say goodbye.",
-        "zh": "说完这句就会接通，不要再问问题，也不要说再见。"
-      },
-      "tools": [],
-      "isTerminal": true
-    },
-    "finish": {
-      "announce": {
-        "en": "Thank you for calling. Goodbye.",
-        "zh": "感谢来电，再见。"
-      },
-      "instruction": {
-        "en": "The line hangs up once this has been said. Ask no further questions.",
-        "zh": "说完这句线路会自动挂断，不要再问问题。"
-      },
-      "tools": [],
-      "isTerminal": true
-    }
-  },
-  "tools": {
-    "plan_check": {
-      "description": {
-        "en": "Decide whether this account may change plan. Returns a decision: OK_TO_CHANGE, NEED_ID_VERIFY or NEED_HUMAN, plus a short spoken explanation.",
-        "zh": "判定该账户能否变更套餐。返回 OK_TO_CHANGE、NEED_ID_VERIFY 或 NEED_HUMAN，以及一句口语化说明。"
-      },
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "service_no": { "type": "string", "description": "8-digit service number" }
-        },
-        "required": ["service_no"]
-      },
-      "http": {
-        "path": "/api/plan/check",
-        "body": { "serviceNo": "{args.service_no}", "caller": "{slots.caller}" },
-        "successWhen": { "path": "retCode", "equals": "000000" },
-        "errorFrom": "retMsg",
-        "result": {
-          "decision": "data.decision",
-          "reason": "data.reason",
-          "spoken": "data.spoken"
-        }
-      }
-    },
-    "plan_verify": {
-      "description": {
-        "en": "Verify the last 4 digits of the registered phone.",
-        "zh": "核验登记电话后4位。"
-      },
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "service_no": { "type": "string" },
-          "phone_last4": { "type": "string" }
-        },
-        "required": ["service_no", "phone_last4"]
-      },
-      "http": {
-        "path": "/api/plan/verify",
-        "body": { "serviceNo": "{args.service_no}", "phoneLast4": "{args.phone_last4}" },
-        "successWhen": { "path": "retCode", "equals": "000000" },
-        "errorFrom": "retMsg",
-        "result": { "match": "data.match" }
-      }
-    },
-    "kb_search": {
-      "description": {
-        "en": "Search the plan and policy knowledge base. Call it for any question about prices, terms, fees or policy before answering; never answer such questions from memory.",
-        "zh": "检索套餐与政策知识库。凡涉及价格、条款、费用或政策的问题，先调用本工具再回答，不要凭记忆作答。"
-      },
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "query": { "type": "string", "description": "The caller's question, in a few words" }
-        },
-        "required": ["query"]
-      },
-      "http": {
-        "path": "/api/kb/search",
-        "body": { "query": "{args.query}", "lang": "{slots.lang}" },
-        "successWhen": { "path": "retCode", "equals": "000000" },
-        "errorFrom": "retMsg",
-        "result": { "answer": "data.answer", "found": "data.found" }
-      }
-    },
-    "plan_submit": {
-      "description": {
-        "en": "Submit the confirmed plan change. Returns a ticket immediately; processing continues in the background. Only call after the caller explicitly confirms.",
-        "zh": "提交已确认的套餐变更，立即返回工单号，后台继续处理。仅在用户明确确认后调用。"
-      },
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "service_no": { "type": "string" },
-          "plan_id": { "type": "string", "enum": ["1", "2", "3"] }
-        },
-        "required": ["service_no", "plan_id"]
-      },
-      "http": {
-        "path": "/api/plan/submit",
-        "body": { "serviceNo": "{args.service_no}", "planId": "{args.plan_id}" },
-        "successWhen": { "path": "retCode", "equals": "000000" },
-        "errorFrom": "retMsg",
-        "result": { "ticket": "data.ticket", "state": "data.state" }
-      }
-    },
-    "plan_status": {
-      "description": {
-        "en": "Check the progress of a submitted plan change by its ticket.",
-        "zh": "按工单号查询已提交变更的处理进度。"
-      },
-      "parameters": {
-        "type": "object",
-        "properties": { "ticket": { "type": "string" } },
-        "required": ["ticket"]
-      },
-      "http": {
-        "path": "/api/plan/status",
-        "body": { "ticket": "{args.ticket}" },
-        "successWhen": { "path": "retCode", "equals": "000000" },
-        "errorFrom": "retMsg",
-        "result": { "state": "data.state", "eta": "data.eta" }
-      }
+"plan_check": {
+  "http": {
+    "path": "/api/plan/check",
+    "body": { "serviceNo": "{args.service_no}", "caller": "{slots.caller}", "lang": "{slots.lang}" },
+    "successWhen": { "path": "retCode", "equals": "000000" },
+    "errorFrom": "retMsg",
+    "result": {
+      "decision": "data.decision", "reason": "data.reason", "spoken": "data.spoken",
+      "options": "data.options", "current_plan": "data.current_plan"
     }
   }
 }
 ```
 
-What to notice:
+The entry phase branches on it. The last rule is the guard behind the decisions: rules are tried in ascending `priority`, so it only fires when no decision rule did, which for an unknown number means the third failed attempt:
 
-- **No rule is in the flow.** The thresholds behind `NEED_HUMAN` live in the backend. The `welcome` phase has four transitions and a three-valued vocabulary; the fourth (`plan_check.calls GTE 3`, priority 1) is the guard for a number that keeps failing.
-- **`plan_check.spoken` is rendered into later instructions.** `{slots.plan_check.spoken}` works because `<tool>.<field>` slots persist after the next tool runs, where `result.*` would not.
-- **A refusal is a branch.** A refused `plan_submit` (`result.ok` is `"0"`) goes to the hand-over rather than leaving the model to improvise.
-- **The standing prompt is short.** The tariffs are not in it.
-- **The closing rule is in `submitted`**, with `closingTarget` and `maxTurnsWithoutTool` behind it.
+```json
+"identity": {
+  "tools": ["plan_check", "kb_search"],
+  "transitions": [
+    { "on": "TOOL_RESULT", "tool": "plan_check", "condition": { "slot": "result.decision", "op": "EQ", "value": "OK_TO_CHANGE" },   "target": "confirm" },
+    { "on": "TOOL_RESULT", "tool": "plan_check", "condition": { "slot": "result.decision", "op": "EQ", "value": "NEED_ID_VERIFY" }, "target": "verify" },
+    { "on": "TOOL_RESULT", "tool": "plan_check", "condition": { "slot": "result.decision", "op": "EQ", "value": "NEED_HUMAN" },      "target": "need_transfer" },
+    { "on": "TOOL_RESULT", "tool": "plan_check", "condition": { "slot": "plan_check.calls", "op": "GTE", "value": 3 }, "target": "need_transfer", "priority": 1 }
+  ]
+}
+```
+
+`NOT_FOUND` has no rule of its own on purpose: the call stays in `identity` and the instruction tells the model to ask for the number again.
+
+`confirm` and `verify` render what the backend said into their instructions:
+
+```json
+"verify":  { "instruction": { "en": "An identity check is needed first. Tell the caller: {slots.plan_check.spoken} Ask for the last 4 digits ..." } },
+"confirm": { "instruction": { "en": "The change is allowed. Current plan: {slots.plan_check.current_plan}. Available plans: {slots.plan_check.options} Let the caller pick plan 1, 2 or 3 ..." } }
+```
+
+`spoken` and `options` are separate fields because they say different things. An earlier draft of this example rendered `spoken` as "what the caller can choose"; for `NEED_ID_VERIFY` that field holds the explanation of the identity check, so the caller was told about the check where the plans belonged. One field, one meaning.
+
+### 7.3 Knowledge, long operations and the hand-over
+
+`kb_search` is allowed in `identity`, `confirm` and `submitted`, the phases where a caller asks about fees and terms, and the phase instructions say when to call it and what a miss means: with `found` of `0`, say you do not have that information and offer an agent; never answer from memory. The tariffs, fees and policy text are not in `persona` or `rules`; the mock backend holds a handful of bilingual entries (`kbEntries` in `internal/mockbackend/mockbackend.go`), a real deployment puts a retrieval service behind the same path.
+
+`plan_submit` returns a ticket at once and a state of `PROCESSING`; `plan_status` reports the progress. `submitted` renders `{slots.plan_submit.ticket}` and `{slots.plan_submit.effective}`, and tells the model to call `plan_status` only when the caller asks. A refused submit (`result.ok` of `"0"`) goes to `need_transfer`:
+
+```json
+"confirm": {
+  "tools": ["plan_submit", "kb_search"],
+  "transitions": [
+    { "on": "TOOL_RESULT", "tool": "plan_submit", "condition": { "slot": "result.ok", "op": "EQ", "value": "1" }, "target": "submitted" },
+    { "on": "TOOL_RESULT", "tool": "plan_submit", "condition": { "slot": "result.ok", "op": "EQ", "value": "0" }, "target": "need_transfer", "priority": 1 }
+  ]
+}
+```
+
+The hand-over phase is also `fallbackTarget`. Its instruction renders `{slots.plan_check.decision}` and `{slots.plan_check.reason}` and tells the model to put them in the `summary` of `transfer_to_agent`, because the engine's slots are not attached to a transfer on their own (2.7). The slots are the last `plan_check` result, so a caller who failed the phone check arrives with `NEED_ID_VERIFY` and the reason for the check, and the instruction also asks the model to say whether the check failed or a submit was refused.
+
+`need_transfer` allows `take_message`. That built-in records an open callback for an agent to work later; it neither moves the phase nor ends the call. It is there for one case: a closed queue refuses the transfer (2.7) and the model offers a message, which needs the tool in the phase. The instruction ends that path with `hangup`.
+
+### 7.4 The closing
+
+`submitted` is the "anything else?" phase: a decline means call `hangup` first, with no goodbye of the model's own, and a global rule on `hangup` moves the call to `finish`, a terminal phase whose `announce` says goodbye. `closingTarget` is `finish` and `maxTurnsWithoutTool` is 10, behind it (5.3).
+
+### 7.5 The mock backend's fixtures
+
+| Service number | `plan_check` decision | Last 4 of phone | Notes |
+| --- | --- | --- | --- |
+| `10086001` | `OK_TO_CHANGE` | `3333` | Plan 3 is refused at submit (not available at the address). |
+| `10086002` | `NEED_HUMAN`, `IN_CONTRACT_EARLY_TERMINATION_FEE` | `7777` | Inside the contract term. |
+| `10086003` | `NEED_ID_VERIFY` | `5555` | Verify, then any plan. |
+| `10086004` | `NEED_HUMAN`, `ARREARS` | `9999` | Overdue balance. |
+| anything else | `NOT_FOUND` | | The flow asks again; the third failed check hands over. |
+
+A ticket's first `plan_status` is `PROCESSING` with an `eta`; every later one is `DONE`. `kb_search` matches keywords (plan prices and speeds, installation fee, early-termination fee, when a change takes effect, contract term) and answers in the request's `lang`; anything else is `found` of `0`.
+
+### 7.6 What to notice
+
+- **No business rule is in the flow.** The thresholds behind `NEED_HUMAN` and `NEED_ID_VERIFY` live in the backend. The flow has one transition per decision value and a guard.
+- **`<tool>.<field>` slots persist**, `result.*` does not. `{slots.plan_check.options}` still renders in `confirm` after `plan_verify` has run, because `plan_check.options` stays until `plan_check` runs again.
+- **A refusal is a branch.** A refused `plan_submit` goes to the hand-over rather than leaving the model to improvise.
+- **The standing prompt is short.** No tariff is in it; every price the bot says came from a tool result.
+- **A number arrives in pieces.** Callers pause while reading a number, and the server VAD ends a turn at each pause, so the model sees "100" and then "86003". The `identity` instruction says the number has 8 digits, to join consecutive pieces and to call `plan_check` only with all 8; without it the model looked up the fragment, got `NOT_FOUND` and spent one of the three checks the guard allows.
+- **A progress question is asked again.** `submitted` tells the model to call `plan_status` on every progress question and never reuse an earlier answer; a status is a fact that changes, and a model that has one in its history will otherwise repeat it.
+- **Every `{slots.x}` in the file is checked at load** (2.8), and the scenarios assert the rendered instruction (`instructionContains`), so a slot that stops being filled fails the test.
 
 ## 8. Verifying a flow
 
