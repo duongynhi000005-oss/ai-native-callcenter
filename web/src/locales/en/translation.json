@@ -122,6 +122,7 @@
     "USER_DATA_TOO_LARGE": "The call has no room for this business data: at most {{maxKeys}} keys, {{maxValueBytes}} bytes each. Nothing was written.",
     "NUMBER_ON_DNC": "That number is on the do-not-call list. No call was placed.",
     "DID_CHANNELS_EXHAUSTED": "That DID has reached its outbound line limit. No call was placed.",
+    "DID_NOT_OUTBOUND": "That number is not allowed to dial out, so it cannot be the caller id. Allow outbound on the number first. No call was placed.",
     "CAMPAIGN_FLOW_HAS_TRANSFER": "The flow behind this number can hand the caller to a person, and a campaign call has no way to one. Remove the transfer from the flow, or choose another number.",
     "CAMPAIGN_DID_NOT_OUTBOUND": "The number this campaign dials from does not allow outbound calls. Allow outbound on the number, or choose another number.",
     "CAMPAIGN_RING_TIMEOUT_TOO_LONG": "The ring timeout must be shorter than the 60 seconds a call may take to be answered.",

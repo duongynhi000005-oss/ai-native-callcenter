@@ -298,8 +298,8 @@ func newRecoveryRig(t *testing.T) *recoveryRig {
 
 	flowID := uuid.New()
 	dids := fakeDIDs{
-		{Number: "95099", Language: "en", FlowID: &flowID, IsEnabled: true, AllowInbound: true},
-		{Number: "95088", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true},
+		{Number: "95099", Language: "en", FlowID: &flowID, IsEnabled: true, AllowInbound: true, AllowOutbound: true},
+		{Number: "95088", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true, AllowOutbound: true},
 		{Number: "95011", Language: "en", IsEnabled: true, AllowOutbound: true, IsDefaultOutbound: true},
 	}
 	svc := New(Config{EndpointFormat: "sofia/gateway/pstn_gateway/%s"}, adapter, dids,

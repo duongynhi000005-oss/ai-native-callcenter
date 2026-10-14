@@ -3,6 +3,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -131,5 +132,41 @@ func TestTheNumberAndLanguageAreCheckedAsTheAPIChecksThem(t *testing.T) {
 	}
 	if plan.Create.Language != "en" {
 		t.Errorf("language = %q, want the English default", plan.Create.Language)
+	}
+}
+
+// The operator is told which direction flowadd opened, because a number it
+// creates cannot be the caller id of an AI outbound call (#179).
+func TestFlowaddSaysWhichDirectionsTheNumberHas(t *testing.T) {
+	t.Parallel()
+	flowID := uuid.Must(uuid.NewV7())
+
+	created, err := planDIDBinding("95001", "en", flowID, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	out := didReport(created, "95001", "support")
+	for _, want := range []string{"created", "inbound only", "allowOutbound=false", "allowOutbound=true", "PUT /dids/{didId}", "updateDID"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("new-number output lacks %q:\n%s", want, out)
+		}
+	}
+
+	existing := queries.Did{
+		ID: uuid.Must(uuid.NewV7()), Number: "95011", Language: "en",
+		IsEnabled: true, AllowInbound: true, AllowOutbound: true,
+	}
+	kept, err := planDIDBinding("95011", "en", flowID, &existing)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	out = didReport(kept, "95011", "support")
+	for _, want := range []string{"now answers with support", "keeps its flags", "allowInbound=true", "allowOutbound=true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("existing-number output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "inbound only") {
+		t.Errorf("existing outbound-capable number reported as inbound only:\n%s", out)
 	}
 }

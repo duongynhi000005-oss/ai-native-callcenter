@@ -85,6 +85,10 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- `POST /calls` with kind `AI_OUTBOUND` no longer presents a number that does
+  not allow outbound calls as the caller id: it answers `422 DID_NOT_OUTBOUND`
+  and places nothing. `aicc flowadd -did` now says that the number it creates is
+  inbound only and how to open it for outbound (#179).
 - AI calls: a bot no longer says its closing line and then leaves the call
   open until the dead-air timer. The seeded closing phases that asked the model
   to speak a goodbye and then call `hangup` (`lead_qualification`,

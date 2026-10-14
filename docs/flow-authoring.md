@@ -688,7 +688,7 @@ What to notice:
 
 ## 8. Verifying a flow
 
-- **Load.** `aicc flowadd -file <flow>.json -did <number>` loads and publishes (the same slug updates and republishes). The same validation runs on `POST /flows` and `PUT /flows/{flowId}` (a spec the loader rejects is refused with 422 listing every problem). Publishing can additionally refuse with `TERMINAL_ANNOUNCE_REQUIRED` (5.2).
+- **Load.** `aicc flowadd -file <flow>.json -did <number>` loads and publishes (the same slug updates and republishes). With `-did`, a number that does not exist is created **inbound only** (`allowInbound=true`, `allowOutbound=false`), and the command prints that; it cannot be the caller id of an AI outbound call (`POST /calls` with `AI_OUTBOUND` answers `422 DID_NOT_OUTBOUND`) until `allowOutbound` is set on it with `PUT /dids/{didId}` (`updateDID`). A number that already exists keeps all its flags and only its flow changes; the command prints the flags it kept. The same validation runs on `POST /flows` and `PUT /flows/{flowId}` (a spec the loader rejects is refused with 422 listing every problem). Publishing can additionally refuse with `TERMINAL_ANNOUNCE_REQUIRED` (5.2).
 - **Backend.** Run `go run ./cmd/aicc-mockbackend` and point `AICC_BOT_BACKEND_BASE` at it to walk the seeded flows against deterministic fixtures (`docs/dev-stack.md`). For a new flow, write the equivalent handlers for your endpoints. Test the failure paths on purpose: a tool that times out, a `found: 0`, an unknown decision value.
 - **Scenarios (the flow simulator).** `aicc flowsim` replays a scripted call against your flow on the real `flow.Engine` and `flow.Runtime`, with the flow's real HTTP tools served by the mock backend, and needs no database, switch or model:
 

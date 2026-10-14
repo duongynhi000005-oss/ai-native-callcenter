@@ -558,6 +558,7 @@ const (
 	ErrorCodeCONFLICT                       ErrorCode = "CONFLICT"
 	ErrorCodeDEVICENOTREGISTERED            ErrorCode = "DEVICE_NOT_REGISTERED"
 	ErrorCodeDIDCHANNELSEXHAUSTED           ErrorCode = "DID_CHANNELS_EXHAUSTED"
+	ErrorCodeDIDNOTOUTBOUND                 ErrorCode = "DID_NOT_OUTBOUND"
 	ErrorCodeEXTENSIONASSIGNEDTOAGENT       ErrorCode = "EXTENSION_ASSIGNED_TO_AGENT"
 	ErrorCodeEXTENSIONINUSE                 ErrorCode = "EXTENSION_IN_USE"
 	ErrorCodeEXTENSIONPOOLEXHAUSTED         ErrorCode = "EXTENSION_POOL_EXHAUSTED"
@@ -614,6 +615,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeDEVICENOTREGISTERED:
 		return true
 	case ErrorCodeDIDCHANNELSEXHAUSTED:
+		return true
+	case ErrorCodeDIDNOTOUTBOUND:
 		return true
 	case ErrorCodeEXTENSIONASSIGNEDTOAGENT:
 		return true

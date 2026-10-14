@@ -112,12 +112,12 @@ func runFlowAdd(args []string) error {
 			if _, err := st.Queries.CreateDID(ctx, *plan.Create); err != nil {
 				return fmt.Errorf("create number %s: %w", *didNumber, err)
 			}
-			fmt.Printf("number %s created, answers with %s\n", *didNumber, specID(data))
+			fmt.Print(didReport(plan, *didNumber, specID(data)))
 		default:
 			if _, err := st.Queries.UpdateDID(ctx, *plan.Update); err != nil {
 				return fmt.Errorf("assign flow to %s: %w", *didNumber, err)
 			}
-			fmt.Printf("number %s now answers with %s\n", *didNumber, specID(data))
+			fmt.Print(didReport(plan, *didNumber, specID(data)))
 		}
 	}
 	return nil
@@ -188,6 +188,24 @@ func planDIDBinding(number, language string, flowID uuid.UUID, existing *queries
 		AllowOutbound:      existing.AllowOutbound,
 		IsDefaultOutbound:  existing.IsDefaultOutbound,
 	}}, nil
+}
+
+// didReport is what flowadd prints about the number. It always says which
+// directions the number is open in, because a number flowadd creates takes
+// calls but cannot be the caller id of an AI outbound call, and an operator who
+// is not told finds out from a 422 DID_NOT_OUTBOUND later.
+func didReport(plan didBinding, number, flowSlug string) string {
+	if plan.Create != nil {
+		return fmt.Sprintf("number %s created, answers with %s\n"+
+			"number %s is inbound only (allowInbound=true, allowOutbound=false); to place AI outbound calls "+
+			"from it, set allowOutbound=true on the number with PUT /dids/{didId} (updateDID)\n",
+			number, flowSlug, number)
+	}
+	u := plan.Update
+	return fmt.Sprintf("number %s now answers with %s\n"+
+		"number %s keeps its flags (allowInbound=%t, allowOutbound=%t); to change them, "+
+		"use PUT /dids/{didId} (updateDID)\n",
+		number, flowSlug, number, u.AllowInbound, u.AllowOutbound)
 }
 
 // digitsOnly is catalog's rule for a dialable number: at least one digit, and

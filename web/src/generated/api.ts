@@ -368,6 +368,8 @@ export interface paths {
          *
          *     A destination on the do-not-call list is refused with 422 NUMBER_ON_DNC, for both kinds: no call is placed and no CDR is written (the CDR is the ledger of calls placed). The destination is compared as canonical E.164, completed with AICC_DEFAULT_COUNTRY_CODE when it is national; with that unset, a national number cannot be matched and is not checked, while a number written with + or 00 always is.
          *
+         *     An AI_OUTBOUND request whose did is inbound-only (allowOutbound false on the DID) is refused with 422 DID_NOT_OUTBOUND: the number is never presented as caller id, no call is placed and no CDR is written. Set allowOutbound on the DID with updateDID (PUT /dids/{didId}) to allow it.
+         *
          *     A call whose DID is at its outbound line limit (maxOutboundChannels on the DID) is refused with 409 DID_CHANNELS_EXHAUSTED, for both kinds: no call is placed and no CDR is written. For AGENT_OUTBOUND the DID is the number the call goes out from (the default outbound number).
          */
         post: operations["createCall"];
@@ -1790,7 +1792,7 @@ export interface components {
          * @description Machine-readable, translatable failure identifier. The frontend renders errors.<CODE>; the backend never localizes.
          * @enum {string}
          */
-        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "DID_CHANNELS_EXHAUSTED" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
+        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "DID_CHANNELS_EXHAUSTED" | "DID_NOT_OUTBOUND" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
         /** @description The single error envelope body: an error code plus interpolation params. Message is diagnostic English, never shown to end users. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -3657,7 +3659,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description The body parsed but a field is missing or invalid. Code VALIDATION_FAILED; params.field names the offender when known. Publishing a flow may also answer TERMINAL_ANNOUNCE_REQUIRED, with params.nodes listing the phases at fault. Campaign writes and starts may also answer CAMPAIGN_FLOW_HAS_TRANSFER, CAMPAIGN_DID_NOT_OUTBOUND, CAMPAIGN_RING_TIMEOUT_TOO_LONG or CAMPAIGN_WINDOW_OUTSIDE_LIMIT, each with params.field naming the offender. */
+        /** @description The body parsed but a field is missing or invalid. Code VALIDATION_FAILED; params.field names the offender when known. Publishing a flow may also answer TERMINAL_ANNOUNCE_REQUIRED, with params.nodes listing the phases at fault. Placing an AI_OUTBOUND call from an inbound-only DID answers DID_NOT_OUTBOUND. Campaign writes and starts may also answer CAMPAIGN_FLOW_HAS_TRANSFER, CAMPAIGN_DID_NOT_OUTBOUND, CAMPAIGN_RING_TIMEOUT_TOO_LONG or CAMPAIGN_WINDOW_OUTSIDE_LIMIT, each with params.field naming the offender. */
         UnprocessableEntity: {
             headers: {
                 [name: string]: unknown;

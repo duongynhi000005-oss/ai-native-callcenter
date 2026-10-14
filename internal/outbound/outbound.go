@@ -299,7 +299,11 @@ var (
 	ErrNoDefaultOutbound = fmt.Errorf("outbound: no number is marked as the default outbound one")
 	ErrUnknownDID        = fmt.Errorf("outbound: no such DID")
 	ErrFlowless          = fmt.Errorf("outbound: the DID has no published flow")
-	ErrAlreadyPlaced     = fmt.Errorf("outbound: this call was already placed")
+	// ErrDIDNotOutbound means the DID named as the caller id is inbound-only
+	// (allowOutbound false). Refused before anything is recorded or sent: a
+	// number the operator never opened for outbound is not one to present.
+	ErrDIDNotOutbound = fmt.Errorf("outbound: the DID does not allow outbound calls")
+	ErrAlreadyPlaced  = fmt.Errorf("outbound: this call was already placed")
 	// ErrNumberOnDNC means the destination is on the do-not-call list. The
 	// call is refused before anything is recorded or sent: the CDR is the
 	// ledger of calls placed, and this one was not.
@@ -739,6 +743,12 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 	did, err := s.findDID(ctx, req.DIDNumber)
 	if err != nil {
 		return Placement{}, err
+	}
+	// Here and not in findDID: recovery (adopt.go) rebuilds the bridge for a
+	// leg that was already placed and must still find an inbound-only number
+	// whose flag was cleared after the call went out.
+	if !did.AllowOutbound {
+		return Placement{}, ErrDIDNotOutbound
 	}
 	language := req.Language
 	if language == "" {
