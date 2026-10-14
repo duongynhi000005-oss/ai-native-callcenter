@@ -393,6 +393,60 @@ describe('the contact import', () => {
     expect(screen.getByLabelText('What column 姓名 is')).toHaveValue('ignore')
   }, WORKBOOK_TIMEOUT)
 
+  it('opens on the first sheet with something to map and keeps the picker for the empty one', async () => {
+    const { user } = open()
+    await user.upload(screen.getByLabelText('CSV or Excel file'), workbookFile('empty-first.xlsx'))
+
+    // The first sheet is blank, so the dialog opens on the second.
+    expect(await screen.findByText('empty-first.xlsx: 3 rows, 4 columns')).toBeInTheDocument()
+    expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
+    const picker = screen.getByLabelText('Sheet to import')
+    expect(picker).toHaveValue('1')
+
+    // Choosing the empty sheet says so, and the picker stays to get back.
+    await user.selectOptions(picker, '0')
+    expect(await screen.findByText('The file has no rows.')).toBeInTheDocument()
+    expect(screen.queryByLabelText(/^What column/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Sheet to import')).toHaveValue('0')
+
+    await user.selectOptions(screen.getByLabelText('Sheet to import'), '1')
+    expect(await screen.findByText('empty-first.xlsx: 3 rows, 4 columns')).toBeInTheDocument()
+    expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
+  }, WORKBOOK_TIMEOUT)
+
+  it('shows the file picked last when an earlier read finishes after it', async () => {
+    // Hold the first file's read open; the second one is read at once.
+    const held: Array<() => void> = []
+    const real = FileReader.prototype.readAsText
+    const spy = vi.spyOn(FileReader.prototype, 'readAsText').mockImplementation(function (
+      this: FileReader,
+      blob: Blob,
+      encoding?: string,
+    ) {
+      if ((blob as File).name !== 'slow.csv') return real.call(this, blob, encoding)
+      held.push(() => {
+        Object.defineProperty(this, 'result', { value: '手机号\n13000000000\n13000000001\n13000000002\n' })
+        this.dispatchEvent(new Event('load'))
+      })
+    })
+    try {
+      const { user } = open()
+      const input = screen.getByLabelText('CSV or Excel file')
+      await user.upload(input, csvFile('手机号\n13800138000\n', 'slow.csv'))
+      await user.upload(input, csvFile('手机号\n13900139000\n13900139001\n', 'fast.csv'))
+      expect(await screen.findByText('fast.csv: 2 rows, 1 columns')).toBeInTheDocument()
+
+      // The slower read lands now, and has to be ignored.
+      expect(held).toHaveLength(1)
+      act(() => held[0]())
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(screen.getByText('fast.csv: 2 rows, 1 columns')).toBeInTheDocument()
+      expect(screen.queryByText(/^slow\.csv:/)).not.toBeInTheDocument()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('says so when the file cannot be read as a workbook', async () => {
     const { user } = open()
     await user.upload(screen.getByLabelText('CSV or Excel file'), workbookFile('broken.xlsx'))

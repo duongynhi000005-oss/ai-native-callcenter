@@ -98,7 +98,14 @@ export function CampaignImportDialog({
   const records = useMemo(() => (table ? buildRecords(table, roles) : []), [table, roles])
   const badShape = records.filter((r) => r.localCode).length
 
+  // Which read is the current one. Reading a workbook takes long enough for the
+  // operator to choose another file (the input is hidden but still reachable
+  // from the keyboard) or to close the dialog, and a slower read that finishes
+  // late must not put its file back on screen.
+  const readSeq = useRef(0)
+
   const reset = () => {
+    readSeq.current++
     setPicked(null)
     setIsReading(false)
     setUnreadable(false)
@@ -110,22 +117,28 @@ export function CampaignImportDialog({
   const pick = async (file: File | undefined) => {
     if (!file) return
     reset()
+    const mine = readSeq.current
     if (isWorkbook(file)) {
       setIsReading(true)
       try {
         const sheets = await readXlsxWorkbook(file)
-        setPicked({ name: file.name, sheets, sheetAt: 0, badEncoding: false, unterminatedQuote: false })
-        setRoles(guessRoles(sheets[0]?.table.header ?? []))
+        if (readSeq.current !== mine) return
+        // A cover sheet or a blank first tab is common; open on the first
+        // sheet that has something to map. The picker reaches the others.
+        const sheetAt = Math.max(0, sheets.findIndex((sheet) => sheet.table.header.length > 0))
+        setPicked({ name: file.name, sheets, sheetAt, badEncoding: false, unterminatedQuote: false })
+        setRoles(guessRoles(sheets[sheetAt]?.table.header ?? []))
       } catch {
         // A workbook this reader cannot open: a corrupt archive, a renamed
         // `.xls`, or a `.xlsx` whose bytes are something else entirely.
-        setUnreadable(true)
+        if (readSeq.current === mine) setUnreadable(true)
       } finally {
-        setIsReading(false)
+        if (readSeq.current === mine) setIsReading(false)
       }
       return
     }
     const text = await readText(file)
+    if (readSeq.current !== mine) return
     const parsed = parseCsv(text)
     setPicked({
       name: file.name,
@@ -216,6 +229,22 @@ export function CampaignImportDialog({
                 {t('campaign.import.xlsxFailed')}
               </p>
             )}
+            {picked && picked.sheets.length > 1 && !summary && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">{t('campaign.import.sheet')}</span>
+                <div className="w-56">
+                  <Select
+                    ariaLabel={t('campaign.import.sheetOf')}
+                    value={String(picked.sheetAt)}
+                    onChange={(value) => chooseSheet(Number(value))}
+                    options={picked.sheets.map((sheet, index) => ({
+                      value: String(index),
+                      label: sheet.name,
+                    }))}
+                  />
+                </div>
+              </div>
+            )}
             {table && table.header.length === 0 && (
               <p role="alert" className="text-xs" style={{ color: 'var(--state-breach)' }}>
                 {t('campaign.import.empty')}
@@ -234,22 +263,6 @@ export function CampaignImportDialog({
 
             {table && table.header.length > 0 && !summary && (
               <>
-                {picked && picked.sheets.length > 1 && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">{t('campaign.import.sheet')}</span>
-                    <div className="w-56">
-                      <Select
-                        ariaLabel={t('campaign.import.sheetOf')}
-                        value={String(picked.sheetAt)}
-                        onChange={(value) => chooseSheet(Number(value))}
-                        options={picked.sheets.map((sheet, index) => ({
-                          value: String(index),
-                          label: sheet.name,
-                        }))}
-                      />
-                    </div>
-                  </div>
-                )}
                 <div>
                   <h3 className="mb-1 text-sm font-medium">{t('campaign.import.mapping')}</h3>
                   <p className="mb-2 text-xs text-muted-foreground">{t('campaign.import.mappingHint')}</p>

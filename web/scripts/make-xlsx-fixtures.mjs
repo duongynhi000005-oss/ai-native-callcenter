@@ -347,6 +347,14 @@ const secondSheet = {
 }
 
 // ---------------------------------------------------------------------------
+// empty first — a cover or blank tab ahead of the real list.
+//
+// The first sheet has no cells at all, so the importer has nothing to map on
+// it; the operator must still be able to reach the sheet that does.
+
+const emptySheet = { name: '封面', rows: [] }
+
+// ---------------------------------------------------------------------------
 // offset — a sheet whose first two rows have nothing in them.
 //
 // This is the ordinary case for a file someone typed by hand: the header is not
@@ -382,6 +390,7 @@ write('contacts.csv', contactsCsv)
 write('edge-cases.xlsx', build([edgeSheet]))
 write('offset.xlsx', build([offsetSheet]))
 write('two-sheets.xlsx', build([contactsXlsx, secondSheet]))
+write('empty-first.xlsx', build([emptySheet, contactsXlsx]))
 // A `.xlsx` that is not an archive: an operator who renamed a CSV, or a
 // download that was cut short. The dialog has to say so, not throw.
 write('broken.xlsx', 'this is not a workbook\n')
@@ -392,7 +401,7 @@ if (process.env.SKIP_OPENPYXL !== '1') {
   const { execFileSync } = await import('node:child_process')
   const check = `
 import sys, openpyxl
-for name in ['contacts.xlsx', 'edge-cases.xlsx', 'offset.xlsx', 'two-sheets.xlsx']:
+for name in ['contacts.xlsx', 'edge-cases.xlsx', 'offset.xlsx', 'two-sheets.xlsx', 'empty-first.xlsx']:
     book = openpyxl.load_workbook(sys.argv[1] + '/' + name, data_only=True)
     print(name, '->', book.sheetnames)
     for sheet in book.worksheets:
