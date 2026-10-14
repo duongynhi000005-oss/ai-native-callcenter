@@ -104,6 +104,12 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- The browser phone's widget no longer shows on administrators' pages or the
+  sign-in page, where it read "Not connected / Not configured" as if a phone
+  were broken. The page declares that only a page with a phone shows it; agents
+  keep theirs, and a ringing or live call shows it on every tab. Needs
+  web-sip-phone 1.1.1 or later; an older extension shows it everywhere, as
+  before (#204).
 - `POST /calls` with kind `AI_OUTBOUND` no longer presents a number that does
   not allow outbound calls as the caller id: it answers `422 DID_NOT_OUTBOUND`
   and places nothing. `aicc flowadd -did` now says that the number it creates is

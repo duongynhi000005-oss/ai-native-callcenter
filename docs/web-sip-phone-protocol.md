@@ -49,6 +49,33 @@ cancelled by its reply, not a poll.
 
 The marker answers *installed*; only a `state` message answers *working*.
 
+### Widget visibility
+
+The extension draws its widget, a headset button docked in the top-right
+corner, on every page of an allowed site unless the page declares otherwise.
+`web/index.html` declares otherwise:
+
+```html
+<meta name="web-sip-phone" content="widget=page" />
+```
+
+With it, the widget is hidden from the first frame, appears when the page sends
+`hello`, and hides again on `deprovision`. A dialing, ringing, active or held
+call always shows it, whatever the page said, so a call is never left without a
+way to see or end it (a reload mid-call, an administrator's tab while an agent
+tab rings). Only a page with a phone says `hello` (an agent's, `_app.tsx`), so
+an administrator, the sign-in page and a signed-out tab show no widget. Signing
+out sends `deprovision`, which takes it away.
+
+The declaration needs **web-sip-phone 1.1.1 or later**
+([web-sip-phone#26](https://github.com/rasonyang/web-sip-phone/issues/26)). It
+must be in the served HTML: the extension reads it once, at injection, and
+ignores a tag added by script. An older extension ignores the tag and shows the
+widget everywhere, as before, and nothing else changes. An extension updated
+from 1.1.0 in place keeps an already-shown widget up until the page sends
+`deprovision` or is reloaded. The page never hides or removes the extension's
+DOM itself.
+
 ## 3. Messages
 
 ### Page → extension, `source: "aicc"`
@@ -190,6 +217,7 @@ no longer valid.
 | R6 | Registration uses the a1-hash against realm `sipDomain`, taking the realm from what was provisioned rather than deriving it from the WebSocket URL. | The WebSocket host and the SIP domain are the same value in the default deployment and different ones behind a proxy; the hash only verifies against the realm it was computed for. |
 | R7 | No call control arrives over this channel, and none is accepted. | The extension's `design.md` §20. Answer, hangup and hold stay the platform's, driven over ESL, and a page that could dial would be a second authority over the same phone. |
 | R8 | The extension injects its content script into already-open allowed tabs after a site is allowed or the extension is installed or updated, and an invalidated instance (an update, a reload, a disable) removes its presence marker and its host element. | Chrome runs a content script only in pages loaded after the fact, so without it the onboarding card could only be completed by reloading the page. The page watches the marker (§2): it appearing makes the page say `hello`, and it disappearing — or a `hello` unanswered within 2 seconds — takes the extension back to not detected, so steps 1 and 2 tick and untick without a refresh. An invalidated instance that leaves its marker behind is only noticed on the next unanswered `hello`, and one that leaves its host behind leaves a dead widget on the page. Until every installed build does this, the card keeps a Reload button on both steps. |
+| R9 | A page carrying `<meta name="web-sip-phone" content="widget=page">` gets the widget only after its `hello`, until its `deprovision`, and whenever a call is dialing, ringing, active or held (1.1.1 and later, §2). | Without it, an administrator with no phone and the sign-in page show a "Not connected / Not configured" card that reads as a broken phone. The page cannot fix this itself: it does not know its role when the content script injects, and hiding the extension's element would be a workaround for the extension's defect. |
 
 ## 7. Versioning
 
