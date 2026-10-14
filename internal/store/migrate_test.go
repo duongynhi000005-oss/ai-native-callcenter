@@ -1005,3 +1005,44 @@ func luaCanRead(t *testing.T, db *sql.DB) bool {
 	}
 	return ok
 }
+
+// The default outbound number is the caller id of click-to-dial, so it has to
+// be able to dial out. The database refuses the other shape whatever writes it
+// (the API, flowadd or psql); an inbound-only number as the default would put
+// a number nobody opened for outbound on every agent's calls (#179).
+func TestTheDatabaseRefusesAnInboundOnlyDefaultOutboundNumber(t *testing.T) {
+	dsn := scratchDB(t)
+	db := openScratch(t, dsn)
+	gooseFor(t)
+	ctx := context.Background()
+
+	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// A flow, so that the only rule an inbound-only number can break here is
+	// the one under test and not "an inbound number needs something to answer".
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO flows (id, slug, name, draft_spec)
+		 VALUES ('11111111-1111-1111-1111-111111111111', 'f', 'f', '{}')`); err != nil {
+		t.Fatalf("insert flow: %v", err)
+	}
+	const constraint = "dids_default_outbound_dials_out"
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO dids (id, number, language, allow_inbound, allow_outbound, is_default_outbound, flow_id)
+		 VALUES (gen_random_uuid(), '95201', 'en', true, false, true,
+		         '11111111-1111-1111-1111-111111111111')`)
+	if err == nil || !strings.Contains(err.Error(), constraint) {
+		t.Errorf("an inbound-only default outbound number: err = %v, want %s", err, constraint)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO dids (id, number, language, allow_inbound, allow_outbound, is_default_outbound)
+		 VALUES (gen_random_uuid(), '95202', 'en', false, true, true)`); err != nil {
+		t.Fatalf("an outbound number as the default: %v", err)
+	}
+	_, err = db.ExecContext(ctx,
+		`UPDATE dids SET allow_outbound = false, allow_inbound = true,
+		        flow_id = '11111111-1111-1111-1111-111111111111' WHERE number = '95202'`)
+	if err == nil || !strings.Contains(err.Error(), constraint) {
+		t.Errorf("switching the default to inbound only: err = %v, want %s", err, constraint)
+	}
+}

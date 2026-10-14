@@ -53,7 +53,10 @@ const (
 	// CodeDIDChannelsExhausted refuses a call from a DID that is at its
 	// outbound line limit. Nothing was placed and nothing was recorded.
 	CodeDIDChannelsExhausted ErrorCode = "DID_CHANNELS_EXHAUSTED"
-	CodeNotFound             ErrorCode = "NOT_FOUND"
+	// CodeDIDNotOutbound refuses an AI_OUTBOUND call naming a DID whose
+	// allowOutbound is false. Nothing was placed and nothing was recorded.
+	CodeDIDNotOutbound ErrorCode = "DID_NOT_OUTBOUND"
+	CodeNotFound       ErrorCode = "NOT_FOUND"
 
 	// The campaign codes (docs/design/10-campaigns.md section 14).
 	//

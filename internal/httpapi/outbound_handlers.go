@@ -339,6 +339,9 @@ func writeOutboundError(w http.ResponseWriter, err error) {
 			"the switch is still being reconciled; retry shortly", nil)
 	case errors.Is(err, outbound.ErrUnknownDID):
 		writeError(w, http.StatusBadRequest, CodeValidationFailed, "no such DID", nil)
+	case errors.Is(err, outbound.ErrDIDNotOutbound):
+		writeError(w, http.StatusUnprocessableEntity, CodeDIDNotOutbound,
+			"the DID does not allow outbound calls; set allowOutbound on it first", nil)
 	case errors.Is(err, outbound.ErrFlowless):
 		writeError(w, http.StatusConflict, CodeConflict, "the DID has no published flow", nil)
 	default:

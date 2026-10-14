@@ -97,7 +97,7 @@ func newDNCStack(t *testing.T, countryCode string) *dncStack {
 		outbound.Config{EndpointFormat: "sofia/gateway/pstn_gateway/%s", DefaultCountryCode: countryCode},
 		sw,
 		didList{
-			{Number: "95012", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true},
+			{Number: "95012", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true, AllowOutbound: true},
 			{Number: "95011", Language: "en", IsEnabled: true, AllowOutbound: true, IsDefaultOutbound: true},
 		},
 		nil,

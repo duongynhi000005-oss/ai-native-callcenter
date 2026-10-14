@@ -238,7 +238,7 @@ func testServiceWithEndpoint(t *testing.T, sw *fakeSwitch,
 	// One number that answers and one the deployment dials out from: a
 	// click-to-dial is refused without the second, by design (D9).
 	dids := fakeDIDs{
-		{Number: "95012", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true},
+		{Number: "95012", Language: "zh", FlowID: &flowID, IsEnabled: true, AllowInbound: true, AllowOutbound: true},
 		{Number: "95011", Language: "en", IsEnabled: true,
 			AllowOutbound: true, IsDefaultOutbound: true},
 	}
@@ -647,7 +647,7 @@ func TestAClickToDialWithNoDefaultNumberIsRefusedRatherThanGuessed(t *testing.T)
 	flowID := uuid.New()
 	svc := New(Config{EndpointFormat: "sofia/gateway/pstn_gateway/%s"}, sw,
 		fakeDIDs{{Number: "95012", Language: "zh", FlowID: &flowID,
-			IsEnabled: true, AllowInbound: true}},
+			IsEnabled: true, AllowInbound: true, AllowOutbound: true}},
 		nil, nil, nil, slog.New(slog.DiscardHandler))
 
 	_, err := svc.Dial(context.Background(), AgentDialRequest{AgentExtension: "1001", To: "18688886669", CallcenterName: "agent-1001"})
