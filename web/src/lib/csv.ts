@@ -12,17 +12,13 @@
  * list of tens of thousands of rows parses in a few milliseconds.
  */
 
-export interface CsvRecord {
-  /** 1-based line of the file this record starts on, for messages. */
-  line: number
-  cells: string[]
-}
+import type { Table, TableRecord } from './table'
 
-export interface CsvTable {
+/** One record of a text file, on the line of the file it starts on. */
+export type CsvRecord = TableRecord
+
+export interface CsvTable extends Table {
   delimiter: string
-  /** The first non-blank record. */
-  header: string[]
-  rows: CsvRecord[]
   /** True when the file ended inside a quoted field. */
   hasUnterminatedQuote: boolean
 }

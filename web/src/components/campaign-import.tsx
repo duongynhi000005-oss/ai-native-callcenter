@@ -12,8 +12,9 @@ import {
   type ColumnRole, type ImportSummary,
 } from '@/lib/campaign-import'
 import { IMPORT_CHUNK_SIZE, campaignApi } from '@/lib/campaigns'
-import { parseCsv, type CsvTable } from '@/lib/csv'
+import { parseCsv } from '@/lib/csv'
 import { describeError } from '@/lib/errors'
+import { readXlsxWorkbook, type XlsxSheet } from '@/lib/xlsx'
 
 const PREVIEW_ROWS = 5
 const SHOWN_PROBLEMS = 200
@@ -28,6 +29,15 @@ function readText(file: File): Promise<string> {
   })
 }
 
+/**
+ * Whether the file is an Excel workbook rather than one of the text formats.
+ * The extension is what the operator chose; the browser's idea of an `.xlsx`
+ * content type is not reliable enough to decide on.
+ */
+function isWorkbook(file: File): boolean {
+  return /\.xlsx$/i.test(file.name)
+}
+
 /** Hands the operator a file made in the browser. */
 function download(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }))
@@ -39,8 +49,24 @@ function download(name: string, text: string) {
 }
 
 /**
- * Contact import. The file is read and parsed here, the columns are mapped by
- * the operator, and the rows go to the import operation in requests of at most
+ * What the operator chose, parsed. A text file is one sheet; a workbook is one
+ * per worksheet, in the file's own order.
+ */
+interface PickedFile {
+  name: string
+  sheets: XlsxSheet[]
+  /** Which sheet is being mapped. Always the first one for a text file. */
+  sheetAt: number
+  /** The bytes are not UTF-8, so some text may be garbled (text files only). */
+  badEncoding: boolean
+  /** A quote that never closes, so rows after it may be one row (text files only). */
+  unterminatedQuote: boolean
+}
+
+/**
+ * Contact import. The file is read and parsed here — a text file by the CSV
+ * reader, a workbook by the Excel one — the columns are mapped by the
+ * operator, and the rows go to the import operation in requests of at most
  * 5000. What comes back, row by row, is shown with the line each row had in
  * the file, and the refused ones can be downloaded to fix and send again.
  */
@@ -58,36 +84,64 @@ export function CampaignImportDialog({
 }) {
   const { t } = useTranslation()
   const fileInput = useRef<HTMLInputElement>(null)
-  const [fileName, setFileName] = useState('')
-  const [table, setTable] = useState<CsvTable | null>(null)
-  const [hasBadEncoding, setHasBadEncoding] = useState(false)
+  const [picked, setPicked] = useState<PickedFile | null>(null)
+  const [isReading, setIsReading] = useState(false)
+  const [unreadable, setUnreadable] = useState(false)
   const [roles, setRoles] = useState<ColumnRole[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [summary, setSummary] = useState<ImportSummary | null>(null)
 
+  const fileName = picked?.name ?? ''
+  const table = picked ? picked.sheets[picked.sheetAt].table : null
   const problem = mappingProblem(roles)
   const records = useMemo(() => (table ? buildRecords(table, roles) : []), [table, roles])
   const badShape = records.filter((r) => r.localCode).length
 
   const reset = () => {
-    setFileName('')
-    setTable(null)
+    setPicked(null)
+    setIsReading(false)
+    setUnreadable(false)
     setRoles([])
     setSummary(null)
     setProgress(null)
-    setHasBadEncoding(false)
   }
 
   const pick = async (file: File | undefined) => {
     if (!file) return
     reset()
+    if (isWorkbook(file)) {
+      setIsReading(true)
+      try {
+        const sheets = await readXlsxWorkbook(file)
+        setPicked({ name: file.name, sheets, sheetAt: 0, badEncoding: false, unterminatedQuote: false })
+        setRoles(guessRoles(sheets[0]?.table.header ?? []))
+      } catch {
+        // A workbook this reader cannot open: a corrupt archive, a renamed
+        // `.xls`, or a `.xlsx` whose bytes are something else entirely.
+        setUnreadable(true)
+      } finally {
+        setIsReading(false)
+      }
+      return
+    }
     const text = await readText(file)
     const parsed = parseCsv(text)
-    setFileName(file.name)
-    setHasBadEncoding(text.includes('�'))
-    setTable(parsed)
+    setPicked({
+      name: file.name,
+      sheets: [{ name: file.name, table: parsed }],
+      sheetAt: 0,
+      badEncoding: text.includes('�'),
+      unterminatedQuote: parsed.hasUnterminatedQuote,
+    })
     setRoles(guessRoles(parsed.header))
+  }
+
+  /** Another worksheet of the same workbook: its own header, its own guess. */
+  const chooseSheet = (at: number) => {
+    if (!picked) return
+    setPicked({ ...picked, sheetAt: at })
+    setRoles(guessRoles(picked.sheets[at]?.table.header ?? []))
   }
 
   const run = async (from: number, previous: ImportSummary) => {
@@ -129,7 +183,7 @@ export function CampaignImportDialog({
               <input
                 ref={fileInput}
                 type="file"
-                accept=".csv,.tsv,.txt,text/csv"
+                accept=".csv,.tsv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 className="sr-only"
                 aria-label={t('campaign.import.file')}
                 onChange={(e) => void pick(e.target.files?.[0])}
@@ -138,34 +192,41 @@ export function CampaignImportDialog({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={isRunning}
+                disabled={isRunning || isReading}
                 onClick={() => fileInput.current?.click()}
               >
                 <Upload />
                 {t('campaign.import.choose')}
               </Button>
               <span className="text-xs text-muted-foreground">
-                {table
-                  ? t('campaign.import.parsed', {
-                      name: fileName,
-                      count: table.rows.length,
-                      columns: table.header.length,
-                    })
-                  : t('campaign.import.noFile')}
+                {isReading
+                  ? t('campaign.import.reading')
+                  : table
+                    ? t('campaign.import.parsed', {
+                        name: fileName,
+                        count: table.rows.length,
+                        columns: table.header.length,
+                      })
+                    : t('campaign.import.noFile')}
               </span>
             </div>
 
+            {unreadable && (
+              <p role="alert" className="text-xs" style={{ color: 'var(--state-breach)' }}>
+                {t('campaign.import.xlsxFailed')}
+              </p>
+            )}
             {table && table.header.length === 0 && (
               <p role="alert" className="text-xs" style={{ color: 'var(--state-breach)' }}>
                 {t('campaign.import.empty')}
               </p>
             )}
-            {table && hasBadEncoding && (
+            {picked?.badEncoding && (
               <p role="alert" className="text-xs" style={{ color: 'var(--state-ringing)' }}>
                 {t('campaign.import.badEncoding')}
               </p>
             )}
-            {table?.hasUnterminatedQuote && (
+            {picked?.unterminatedQuote && (
               <p role="alert" className="text-xs" style={{ color: 'var(--state-ringing)' }}>
                 {t('campaign.import.unterminatedQuote')}
               </p>
@@ -173,6 +234,22 @@ export function CampaignImportDialog({
 
             {table && table.header.length > 0 && !summary && (
               <>
+                {picked && picked.sheets.length > 1 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{t('campaign.import.sheet')}</span>
+                    <div className="w-56">
+                      <Select
+                        ariaLabel={t('campaign.import.sheetOf')}
+                        value={String(picked.sheetAt)}
+                        onChange={(value) => chooseSheet(Number(value))}
+                        options={picked.sheets.map((sheet, index) => ({
+                          value: String(index),
+                          label: sheet.name,
+                        }))}
+                      />
+                    </div>
+                  </div>
+                )}
                 <div>
                   <h3 className="mb-1 text-sm font-medium">{t('campaign.import.mapping')}</h3>
                   <p className="mb-2 text-xs text-muted-foreground">{t('campaign.import.mappingHint')}</p>

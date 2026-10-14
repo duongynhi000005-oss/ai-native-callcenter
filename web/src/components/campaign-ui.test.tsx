@@ -1,4 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import {
   Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter,
 } from '@tanstack/react-router'
@@ -230,6 +232,25 @@ function csvFile(text: string, name = 'contacts.csv') {
   return new File([text], name, { type: 'text/csv' })
 }
 
+/**
+ * A real workbook, out of the fixtures the unit tests read:
+ * `scripts/make-xlsx-fixtures.mjs` writes them.
+ */
+function workbookFile(name = 'contacts.xlsx') {
+  const bytes = readFileSync(path.join(import.meta.dirname, '..', 'test', 'fixtures', name))
+  return new File([bytes], name, {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+}
+
+/**
+ * Reading a workbook is heavier than reading text: the reader is a chunk of its
+ * own, loaded on first use, and in a run where every test file is going at once
+ * its first transform has taken over five seconds on this machine. The budget
+ * is for that machinery, not for what the tests assert.
+ */
+const WORKBOOK_TIMEOUT = 15_000
+
 describe('the contact import', () => {
   function stubImport(reject: (number: string) => string | undefined = () => undefined) {
     const bodies: Array<{ contacts: Array<{ number: string; timeZone?: string; slots?: Record<string, string> }> }> = []
@@ -273,7 +294,7 @@ describe('the contact import', () => {
       'bad,Li,x\r\n' +
       '13700137000,Zhao\r\n' + // wrong column count
       '13600136000,😀,y\r\n'
-    await user.upload(screen.getByLabelText('CSV file'), csvFile(text))
+    await user.upload(screen.getByLabelText('CSV or Excel file'), csvFile(text))
 
     expect(await screen.findByText('contacts.csv: 4 rows, 3 columns')).toBeInTheDocument()
     expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
@@ -311,7 +332,7 @@ describe('the contact import', () => {
     const { user } = open()
     const lines = ['number,name']
     for (let i = 0; i < 12345; i++) lines.push(`13${String(i).padStart(9, '0')},客户${i}`)
-    await user.upload(screen.getByLabelText('CSV file'), csvFile(lines.join('\n')))
+    await user.upload(screen.getByLabelText('CSV or Excel file'), csvFile(lines.join('\n')))
     await user.click(await screen.findByRole('button', { name: 'Import 12345 rows' }))
     await screen.findByText('12345 imported', undefined, { timeout: 10000 })
     expect(bodies.map((b) => b.contacts.length)).toEqual([5000, 5000, 2345])
@@ -320,7 +341,7 @@ describe('the contact import', () => {
   it('sends only the number when no other column is opted in', async () => {
     const bodies = stubImport()
     const { user } = open()
-    await user.upload(screen.getByLabelText('CSV file'), csvFile('number,name\n1,a\n'))
+    await user.upload(screen.getByLabelText('CSV or Excel file'), csvFile('number,name\n1,a\n'))
     await user.click(await screen.findByRole('button', { name: 'Import 1 row' }))
     await screen.findByText('1 imported')
     expect(bodies[0].contacts).toEqual([{ number: '1' }])
@@ -329,12 +350,59 @@ describe('the contact import', () => {
   it('will not import without a number column', async () => {
     const bodies = stubImport()
     const { user } = open()
-    await user.upload(screen.getByLabelText('CSV file'), csvFile('number,name\n1,a\n'))
+    await user.upload(screen.getByLabelText('CSV or Excel file'), csvFile('number,name\n1,a\n'))
     await user.selectOptions(await screen.findByLabelText('What column number is'), 'ignore')
     expect(screen.getByText('Choose the number column.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Import/ })).toBeDisabled()
     expect(bodies).toHaveLength(0)
   })
+
+  it('imports an Excel workbook through the same mapping, request and report as a CSV', async () => {
+    const bodies = stubImport()
+    const { user, onImported } = open()
+    await user.upload(screen.getByLabelText('CSV or Excel file'), workbookFile())
+
+    expect(await screen.findByText('contacts.xlsx: 3 rows, 4 columns')).toBeInTheDocument()
+    expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
+    await user.selectOptions(screen.getByLabelText('What column 姓名 is'), 'slot')
+    await user.selectOptions(screen.getByLabelText('What column 时区 is'), 'timeZone')
+    await user.click(screen.getByRole('button', { name: 'Import 3 rows' }))
+
+    await screen.findByText('3 imported')
+    // The number column holds numeric cells in the workbook; they still arrive
+    // as the digits the spreadsheet shows.
+    expect(bodies[0].contacts).toEqual([
+      { number: '13800138000', timeZone: 'Asia/Shanghai', slots: { 姓名: '王伟' } },
+      { number: '13900139000', timeZone: 'Asia/Shanghai', slots: { 姓名: '李静' } },
+      { number: '13300133000', timeZone: 'Asia/Shanghai', slots: { 姓名: '陈涛' } },
+    ])
+    expect(onImported).toHaveBeenCalled()
+  }, WORKBOOK_TIMEOUT)
+
+  it('lets the operator choose a sheet when the workbook has more than one', async () => {
+    const { user } = open()
+    await user.upload(screen.getByLabelText('CSV or Excel file'), workbookFile('two-sheets.xlsx'))
+
+    // Until the operator says otherwise, the first sheet is the one being mapped.
+    expect(await screen.findByText('two-sheets.xlsx: 3 rows, 4 columns')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Sheet to import'), '1')
+
+    expect(await screen.findByText('two-sheets.xlsx: 1 row, 2 columns')).toBeInTheDocument()
+    expect(screen.getByLabelText('What column 手机号 is')).toHaveValue('number')
+    // The second sheet is guessed on its own header, not the first one's answer.
+    expect(screen.getByLabelText('What column 姓名 is')).toHaveValue('ignore')
+  }, WORKBOOK_TIMEOUT)
+
+  it('says so when the file cannot be read as a workbook', async () => {
+    const { user } = open()
+    await user.upload(screen.getByLabelText('CSV or Excel file'), workbookFile('broken.xlsx'))
+    expect(
+      await screen.findByText(/could not be read as an Excel workbook/),
+    ).toBeInTheDocument()
+    // No columns to map, and so nothing to import: the dialog stays as it was.
+    expect(screen.queryByLabelText(/^What column/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^broken\.xlsx:/)).not.toBeInTheDocument()
+  }, WORKBOOK_TIMEOUT)
 
   it('stops on a failed request and offers to retry the rest', async () => {
     let calls = 0
@@ -350,7 +418,7 @@ describe('the contact import', () => {
       })
     }))
     const { user } = open()
-    await user.upload(screen.getByLabelText('CSV file'), csvFile('number\n1\n2\n'))
+    await user.upload(screen.getByLabelText('CSV or Excel file'), csvFile('number\n1\n2\n'))
     await user.click(await screen.findByRole('button', { name: 'Import 2 rows' }))
     expect(await screen.findByText(/The import stopped at row 1/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Retry the rest' }))
