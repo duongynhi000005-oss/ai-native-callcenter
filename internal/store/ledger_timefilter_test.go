@@ -177,3 +177,35 @@ func TestTheTimeWindowOfTheListingsIsFromInclusiveToExclusive(t *testing.T) {
 		})
 	}
 }
+
+// BUSY is a status of its own on the listing: the filter separates it from
+// NO_ANSWER, and the reports, which count only ANSWERED, keep every row.
+func TestABusyCallListsApartFromANoAnswerCall(t *testing.T) {
+	ledger, _, _ := workspaceStore(t)
+	ctx := context.Background()
+	start := time.Date(2026, time.March, 10, 9, 0, 0, 0, time.UTC)
+	for i, st := range []string{CDRStatusBusy, CDRStatusBusy, CDRStatusNoAnswer, CDRStatusAnswered} {
+		cause := map[string]string{CDRStatusBusy: "USER_BUSY", CDRStatusNoAnswer: "NO_ANSWER", CDRStatusAnswered: "NORMAL_CLEARING"}[st]
+		if err := ledger.InsertCDR(ctx, CDR{
+			CallID: uuid.New(), StartedAt: start.Add(time.Duration(i) * time.Minute),
+			EndedAt:  start.Add(time.Duration(i)*time.Minute + 20*time.Second),
+			CallType: "OUTBOUND", Status: st, HangupCause: cause, FromNumber: "95099", ToNumber: "1868888666" + fmt.Sprint(i),
+		}); err != nil {
+			t.Fatalf("InsertCDR(%s): %v", st, err)
+		}
+	}
+	for status, want := range map[string]int{CDRStatusBusy: 2, CDRStatusNoAnswer: 1, CDRStatusAnswered: 1, "": 4} {
+		rows, total, err := ledger.ListCDRs(ctx, CDRFilter{Status: status, Limit: 50})
+		if err != nil {
+			t.Fatalf("ListCDRs(%q): %v", status, err)
+		}
+		if int(total) != want || len(rows) != want {
+			t.Errorf("status %q: total %d, rows %d, want %d", status, total, len(rows), want)
+		}
+		for _, r := range rows {
+			if status != "" && r.Status != status {
+				t.Errorf("status %q listing returned a %s row", status, r.Status)
+			}
+		}
+	}
+}

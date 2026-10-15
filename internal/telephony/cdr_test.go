@@ -271,8 +271,12 @@ func TestACallThatNeverSoughtAPersonHasNoMissedReason(t *testing.T) {
 					CreatedAt: at(0), ReleasedAt: atPtr(20), ReleaseCause: tt.cause,
 				}},
 			})
-			if cdr.Status != store.CDRStatusNoAnswer {
-				t.Fatalf("status = %s, want NO_ANSWER", cdr.Status)
+			want := store.CDRStatusNoAnswer
+			if tt.cause == "USER_BUSY" {
+				want = store.CDRStatusBusy
+			}
+			if cdr.Status != want {
+				t.Fatalf("status = %s, want %s", cdr.Status, want)
 			}
 			if cdr.MissedReason != "" {
 				t.Errorf("missedReason = %q, want none — this caller never sought a "+
@@ -1402,4 +1406,151 @@ func awaitCDRs(t *testing.T, ledger *memoryLedger, n int) {
 	if len(ledger.cdrs) != n {
 		t.Fatalf("wrote %d cdrs, want %d", len(ledger.cdrs), n)
 	}
+}
+
+// A callee who is busy or declines releases the leg we dialled with USER_BUSY,
+// and the ledger used to file that with the calls nobody picked up (#180).
+// Only that one cause counts, only for an unanswered outbound call, and only
+// on the leg that went out towards the callee: an agent's own leg
+// auto-answers and says nothing about the far end.
+func TestAnUnansweredOutboundCallToABusyCalleeIsBusy(t *testing.T) {
+	t.Parallel()
+	agentID := uuid.New()
+
+	// platform: the customer's leg is the originator, because we created it.
+	platform := func(cause string, bot bool) Snapshot {
+		s := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(9),
+			Bot: BotShare{DID: "95099"},
+			Parties: []PartySnapshot{{
+				Role: RoleOriginator, Number: "18688886669", ChannelID: "customer",
+				CreatedAt: at(0), ReleasedAt: atPtr(9), ReleaseCause: cause,
+			}},
+		}
+		if bot {
+			// The bot leg was set up but the callee never picked up.
+			s.Parties = append(s.Parties, PartySnapshot{
+				Role: RoleTarget, IsBotLeg: true, ChannelID: "bot", CreatedAt: at(0), ReleasedAt: atPtr(9),
+			})
+		}
+		return s
+	}
+	// agent: the agent's leg auto-answered; the far end is a dialled leg.
+	agent := func(agentCause, farCause string, farAnswered bool) Snapshot {
+		far := PartySnapshot{
+			Role: RoleTarget, Number: "18688886669", ChannelID: "far",
+			CreatedAt: at(2), ReleasedAt: atPtr(12), ReleaseCause: farCause,
+		}
+		if farAnswered {
+			far.AnsweredAt = atPtr(8)
+		}
+		return Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(12),
+			Parties: []PartySnapshot{
+				{Role: RoleOriginator, Number: "1008", AgentID: &agentID, ExtensionNumber: "1008",
+					ChannelID: "agent", AnsweredAt: atPtr(0), ReleasedAt: atPtr(12), ReleaseCause: agentCause},
+				far,
+			},
+		}
+	}
+	inbound := func(cause string) Snapshot {
+		return Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeInbound,
+			Queue:     QueueFacts{JoinedAt: at(0), LeftAt: at(30), Cause: "Timeout"},
+			CreatedAt: at(0), EndedAt: atPtr(30),
+			Parties: []PartySnapshot{
+				{Role: RoleOriginator, Number: "13800138000", ChannelID: "caller",
+					CreatedAt: at(0), ReleasedAt: atPtr(30), ReleaseCause: cause},
+				{Role: RoleTarget, AgentID: &agentID, ChannelID: "agent",
+					CreatedAt: at(10), ReleasedAt: atPtr(25), ReleaseCause: cause},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		snap Snapshot
+		want string
+	}{
+		{"platform call, callee busy", platform("USER_BUSY", false), store.CDRStatusBusy},
+		{"AI outbound, callee busy, bot never answered", platform("USER_BUSY", true), store.CDRStatusBusy},
+		{"platform call, rang out", platform("NO_ANSWER", false), store.CDRStatusNoAnswer},
+		{"platform call, no user response", platform("NO_USER_RESPONSE", false), store.CDRStatusNoAnswer},
+		{"platform call, declined with CALL_REJECTED", platform("CALL_REJECTED", false), store.CDRStatusNoAnswer},
+		{"platform call, number does not exist", platform("UNALLOCATED_NUMBER", false), store.CDRStatusNoAnswer},
+		{"platform call, temporary failure", platform("NORMAL_TEMPORARY_FAILURE", false), store.CDRStatusNoAnswer},
+		{"platform call, no cause recorded", platform("", false), store.CDRStatusNoAnswer},
+		{"platform call, cause in another case", platform("user_busy", false), store.CDRStatusNoAnswer},
+
+		{"agent call, far end busy, own leg cleared normally", agent("NORMAL_CLEARING", "USER_BUSY", false), store.CDRStatusBusy},
+		{"agent call, far end busy, own leg also USER_BUSY", agent("USER_BUSY", "USER_BUSY", false), store.CDRStatusBusy},
+		{"agent call, far end rang out", agent("NORMAL_CLEARING", "NO_ANSWER", false), store.CDRStatusNoAnswer},
+		{"agent call, only the agent's own leg says USER_BUSY", agent("USER_BUSY", "NO_ANSWER", false), store.CDRStatusNoAnswer},
+		{"agent call, far end declined with CALL_REJECTED", agent("NORMAL_CLEARING", "CALL_REJECTED", false), store.CDRStatusNoAnswer},
+
+		{"inbound call, every leg USER_BUSY", inbound("USER_BUSY"), store.CDRStatusNoAnswer},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tt.snap)
+			if got.Status != tt.want {
+				t.Errorf("status = %s, want %s", got.Status, tt.want)
+			}
+		})
+	}
+
+	t.Run("an answered call stays answered however a later leg released", func(t *testing.T) {
+		t.Parallel()
+		s := agent("NORMAL_CLEARING", "USER_BUSY", true)
+		s.Parties[1].Bridges = []BridgeSpan{{OtherChannelID: "agent", StartedAt: at(8), EndedAt: at(12)}}
+		s.Parties[0].Bridges = []BridgeSpan{{OtherChannelID: "far", StartedAt: at(8), EndedAt: at(12)}}
+		// A second dialled leg that was busy, after the first one talked.
+		s.Parties = append(s.Parties, PartySnapshot{
+			Role: RoleTarget, Number: "18688886670", ChannelID: "far2",
+			CreatedAt: at(10), ReleasedAt: atPtr(11), ReleaseCause: "USER_BUSY",
+		})
+		got := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), s)
+		if got.Status != store.CDRStatusAnswered {
+			t.Errorf("status = %s, want ANSWERED", got.Status)
+		}
+	})
+
+	t.Run("a busy row keeps what the unanswered branch would have given it", func(t *testing.T) {
+		t.Parallel()
+		asm := func(s Snapshot) store.CDR {
+			return newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), s)
+		}
+		busy, noAnswer := asm(agent("NORMAL_CLEARING", "USER_BUSY", false)), asm(agent("NORMAL_CLEARING", "NO_ANSWER", false))
+		if busy.Status != store.CDRStatusBusy || noAnswer.Status != store.CDRStatusNoAnswer {
+			t.Fatalf("statuses = %s / %s", busy.Status, noAnswer.Status)
+		}
+		if busy.MissedReason != noAnswer.MissedReason || busy.RingSec != noAnswer.RingSec ||
+			busy.TalkSec != noAnswer.TalkSec || busy.BillSec != noAnswer.BillSec {
+			t.Errorf("busy row {missed %q ring %d talk %d bill %d} differs from no-answer {%q %d %d %d}",
+				busy.MissedReason, busy.RingSec, busy.TalkSec, busy.BillSec,
+				noAnswer.MissedReason, noAnswer.RingSec, noAnswer.TalkSec, noAnswer.BillSec)
+		}
+
+		// A queue-served platform call exercises the ring and missed-reason
+		// fields with real values.
+		withAgent := func(cause string) Snapshot {
+			s := platform(cause, false)
+			s.Queue = QueueFacts{JoinedAt: at(0), LeftAt: at(9), Cause: "Cancel"}
+			s.Parties = append(s.Parties, PartySnapshot{
+				Role: RoleTarget, AgentID: &agentID, ChannelID: "a", CreatedAt: at(3), ReleasedAt: atPtr(9),
+			})
+			return s
+		}
+		b, n := asm(withAgent("USER_BUSY")), asm(withAgent("NO_ANSWER"))
+		if b.Status != store.CDRStatusBusy || n.Status != store.CDRStatusNoAnswer {
+			t.Fatalf("statuses = %s / %s", b.Status, n.Status)
+		}
+		if b.MissedReason != n.MissedReason || b.RingSec != n.RingSec {
+			t.Errorf("busy {missed %q ring %d} differs from no-answer {%q %d}",
+				b.MissedReason, b.RingSec, n.MissedReason, n.RingSec)
+		}
+	})
 }
