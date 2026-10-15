@@ -9,6 +9,18 @@ carries the one-line installer's files.
 
 ### Added
 
+- `AICC_PROVIDER=grok`: xAI Grok Voice (`grok-voice-3.0`, key in `XAI_API_KEY`)
+  as a profile on the Realtime client, with G.711 passed through untouched. The
+  client now ignores the `ping` event, treats cumulative
+  `...input_audio_transcription.updated` as partial text, and counts a
+  `...transcription.completed` as final only when its `status` is absent or
+  `completed`, so each caller utterance is one transcript line. A refused
+  `response.cancel` with nothing active is no longer reported as an error.
+  Grok drops a per-response instruction override once the conversation has a
+  turn, so on that profile every mid-call spoken line is first put in the
+  conversation as a caller message (profile trait `IgnoresOverrideOnceTalking`).
+  `aicc doctor` and the installer (`--provider grok`) know the provider. Live
+  measurements: `docs/design/grok-findings.md` (#226).
 - Flow tools can keep a list across their calls: `collect` on an HTTP tool
   appends a rendered value (`{args.x}`, `{slots.y}`) to a list slot after each
   successful call for which its optional `when` condition holds, without

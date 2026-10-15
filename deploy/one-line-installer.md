@@ -28,6 +28,7 @@ environment variable, not an `AICC_*` setting:
 | Provider | Key |
 |---|---|
 | `openai` | `OPENAI_API_KEY` |
+| `grok` | `XAI_API_KEY` |
 | `qwen` | `ALIYUN_API_KEY` |
 | `gateway` | `REALTIME_API_KEY` and `AICC_PROVIDER_ENDPOINT=ws://…` |
 | `doubao` | `DOUBAO_API_KEY` |

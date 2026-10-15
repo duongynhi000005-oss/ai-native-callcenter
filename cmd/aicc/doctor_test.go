@@ -467,6 +467,18 @@ func TestTheProviderChecks(t *testing.T) {
 				return nil, errors.New("bad endpoint")
 			}
 		}, DoctorStatePass, DoctorStateFail},
+		{"grok without its key", func(h *harness) {
+			h.deps.cfg.Provider = "grok"
+		}, DoctorStateFail, DoctorStateSkip},
+		{"grok with its key", func(h *harness) {
+			h.deps.cfg.Provider = "grok"
+			h.deps.getenv = func(k string) string {
+				if k == "XAI_API_KEY" {
+					return "xai-test"
+				}
+				return ""
+			}
+		}, DoctorStatePass, DoctorStatePass},
 		{"no key", func(h *harness) {
 			h.deps.getenv = func(string) string { return "" }
 		}, DoctorStateFail, DoctorStateSkip},

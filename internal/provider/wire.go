@@ -26,6 +26,10 @@ type wireEvent struct {
 	Delta      string `json:"delta"`
 	Transcript string `json:"transcript"`
 	ItemID     string `json:"item_id"`
+	// Status is on input-transcription events of vendors that repeat
+	// .completed while the text is still settling ("in_progress", then
+	// "completed"). Absent means final, which is what OpenAI sends.
+	Status string `json:"status"`
 
 	CallID    string `json:"call_id"`
 	Name      string `json:"name"`

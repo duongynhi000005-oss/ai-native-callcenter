@@ -69,6 +69,7 @@ func TestThePublishRuleFollowsTheDeploymentsEngine(t *testing.T) {
 	}{
 		{provider.NameDoubao, true},
 		{provider.NameQwen, false},
+		{provider.NameGrok, false},
 	} {
 		t.Run(tc.provider, func(t *testing.T) {
 			ctx := context.Background()

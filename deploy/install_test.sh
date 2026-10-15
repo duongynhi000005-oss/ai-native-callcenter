@@ -277,6 +277,8 @@ eq 'env_set keeps the value verbatim' "$(env_get "$env" X)" 'a/b@c=d'
 
 eq 'parse_args: --provider=' "$(parse_args --provider=none --yes && echo "$PROVIDER_FLAG $ASSUME_YES")" 'none 1'
 eq 'parse_args: --provider doubao' "$(parse_args --provider doubao && echo "$PROVIDER_FLAG")" doubao
+eq 'parse_args: --provider grok' "$(parse_args --provider grok && echo "$PROVIDER_FLAG")" grok
+eq 'provider_key_var: grok' "$(provider_key_var grok)" XAI_API_KEY
 eq 'provider_key_var: doubao' "$(provider_key_var doubao)" DOUBAO_API_KEY
 notok 'parse_args: the removed provider is not a choice' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --provider gemini" 2>/dev/null
 eq 'provider_key_var: the removed provider has none' "$(provider_key_var gemini)" ''
@@ -288,7 +290,7 @@ printf 'AICC_PROVIDER=gemini\nGEMINI_API_KEY=old-key\n' >"$env"
 out=$(sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; ENV_FILE='$env'; PROVIDER_FLAG=''; resolve_provider" 2>&1) && status=0 || status=$?
 eq 'kept .env naming the removed provider: the rerun stops' "$status" 1
 case $out in
-*'accepted: openai, qwen, gateway, doubao'*) accepted=yes ;;
+*'accepted: openai, grok, qwen, gateway, doubao'*) accepted=yes ;;
 *) accepted=no ;;
 esac
 eq 'kept .env naming the removed provider: names the accepted values' "$accepted" yes

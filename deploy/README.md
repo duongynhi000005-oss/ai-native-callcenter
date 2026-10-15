@@ -54,9 +54,9 @@ allowing the stack's ports ([Ports and firewall](#ports-and-firewall)).
   interface, skipping loopback, link-local and TUN-proxy addresses
   (198.18.0.0/15). Pass `--external-ip <ip>` when the inference is wrong or
   phones reach the host through NAT.
-- The voice provider (`--provider openai|qwen|gateway|doubao|none`) and
+- The voice provider (`--provider openai|grok|qwen|gateway|doubao|none`) and
   its key. The key is read from the environment (`OPENAI_API_KEY`,
-  `ALIYUN_API_KEY` for qwen, `DOUBAO_API_KEY`,
+  `XAI_API_KEY` for grok, `ALIYUN_API_KEY` for qwen, `DOUBAO_API_KEY`,
   `REALTIME_API_KEY` plus `AICC_PROVIDER_ENDPOINT` for gateway) or asked for at
   the terminal with the input hidden. With `sudo`, keep an exported key with
   `sudo -E`. `none` runs without a bot: calls to the bot numbers go to their
@@ -584,9 +584,12 @@ AICC_TRANSCRIBE_ENDPOINT=wss://<workspace-id>.cn-beijing.maas.aliyuncs.com/api-w
   application's environment.
 
 **Voice provider.** One provider answers every call, chosen at startup. A
-call's language does not select it. `AICC_PROVIDER` takes `openai`, `qwen`,
+call's language does not select it. `AICC_PROVIDER` takes `openai`, `grok`, `qwen`,
 `gateway` or `doubao`, each with its own credential.
 
+- `grok` uses `XAI_API_KEY` (xAI Grok Voice, `grok-voice-3.0`, over the same
+  Realtime protocol as openai). If transcription is on, set
+  `AICC_TRANSCRIBE_PROVIDER` (also `qwen`), since xAI has no recogniser here.
 - `doubao` uses `DOUBAO_API_KEY` (ByteDance full-duplex dialogue API).
 - On `doubao`, the client pins the model, so `AICC_PROVIDER_MODEL`
   is ignored. If transcription is on, set `AICC_TRANSCRIBE_PROVIDER` (also

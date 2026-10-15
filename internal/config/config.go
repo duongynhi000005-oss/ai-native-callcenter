@@ -174,7 +174,7 @@ type Config struct {
 
 	// Provider is the speech model this deployment runs, resolved once at
 	// startup: qwen or doubao inside mainland China, openai
-	// elsewhere, gateway for a self-hosted service speaking the Realtime
+	// or grok elsewhere, gateway for a self-hosted service speaking the Realtime
 	// protocol. A call's language never selects it.
 	Provider string
 	// ProviderEndpoint and ProviderModel replace the built-in address and

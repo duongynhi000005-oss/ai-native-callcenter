@@ -159,7 +159,7 @@ func TestAnUnknownProviderNameIsAStartupFailure(t *testing.T) {
 // be the first thing to notice.
 func TestTheProviderNameChoosesTheClient(t *testing.T) {
 	for _, keyEnv := range []string{
-		"OPENAI_API_KEY", "ALIYUN_API_KEY", "REALTIME_API_KEY", "DOUBAO_API_KEY",
+		"OPENAI_API_KEY", "ALIYUN_API_KEY", "REALTIME_API_KEY", "DOUBAO_API_KEY", "XAI_API_KEY",
 	} {
 		t.Setenv(keyEnv, "not-a-real-key")
 	}
@@ -171,6 +171,7 @@ func TestTheProviderNameChoosesTheClient(t *testing.T) {
 		{provider.DoubaoProfile(), (*doubao.Session)(nil)},
 		{provider.OpenAIProfile(), (*provider.Realtime)(nil)},
 		{provider.QwenProfile(), (*provider.Realtime)(nil)},
+		{provider.GrokProfile(), (*provider.Realtime)(nil)},
 		{provider.GatewayProfile(), (*provider.Realtime)(nil)},
 	} {
 		t.Run(tc.profile.Name, func(t *testing.T) {
@@ -191,7 +192,7 @@ func TestTheProviderNameChoosesTheClient(t *testing.T) {
 // has nothing to be told.
 func TestAMissingProviderKeyIsReportedByTheNameItsClientReads(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{provider.NameOpenAI, provider.NameQwen, provider.NameGateway, provider.NameDoubao} {
+	for _, name := range []string{provider.NameOpenAI, provider.NameGrok, provider.NameQwen, provider.NameGateway, provider.NameDoubao} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			profile, err := provider.ProfileFor(name, provider.Override{})
