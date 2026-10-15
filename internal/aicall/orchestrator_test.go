@@ -365,7 +365,7 @@ func TestACallerAnsweringTheGoodbyeFiresTheArmedAction(t *testing.T) {
 	}
 
 	// The closing line finishes generating in the next turn...
-	actions.onTurnDone(session.currentTurn()+1, false)
+	actions.onTurnDone(session.currentTurn()+1, false, true)
 	// ...and the caller talks over the tail of it.
 	actions.onBargeIn(0)
 
@@ -1602,6 +1602,14 @@ func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON st
 func startToolPathBackend(t *testing.T, profile provider.Profile, lang, flowJSON,
 	backendURL string) *toolPath {
 	t.Helper()
+	return startToolPathFull(t, profile, lang, flowJSON, backendURL, nil, io.Discard)
+}
+
+// startToolPathFull is startToolPathBackend with the engine's starting slots
+// and a sink for the call's log.
+func startToolPathFull(t *testing.T, profile provider.Profile, lang, flowJSON,
+	backendURL string, slots map[string]any, logSink io.Writer) *toolPath {
+	t.Helper()
 	// The session asks the actions whether the ending is armed, as the
 	// orchestrator wires it; the actions exist only after the session does.
 	var actionsRef atomic.Pointer[callActions]
@@ -1616,12 +1624,12 @@ func startToolPathBackend(t *testing.T, profile provider.Profile, lang, flowJSON
 
 	o := testOrchestrator(t, &fakeSwitch{})
 	o.cfg.Profile = profile
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.NewTextHandler(logSink, nil))
 	spec, err := flow.Load([]byte(flowJSON))
 	if err != nil {
 		t.Fatalf("load flow: %v", err)
 	}
-	engine := flow.NewEngine(spec, lang, nil, log)
+	engine := flow.NewEngine(spec, lang, slots, log)
 	actions := &callActions{
 		orchestrator: o, session: session, log: log, callerChannel: "chan-9",
 	}
@@ -1979,7 +1987,7 @@ func TestACutShortTurnIsNotTheClosingLine(t *testing.T) {
 	fired := make(chan struct{})
 	actions.arm(t.Context(), func() { close(fired) })
 
-	actions.onTurnDone(session.currentTurn()+1, true)
+	actions.onTurnDone(session.currentTurn()+1, true, true)
 	actions.onBargeIn(0)
 	select {
 	case <-fired:
@@ -1987,7 +1995,7 @@ func TestACutShortTurnIsNotTheClosingLine(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	actions.onTurnDone(session.currentTurn()+2, false)
+	actions.onTurnDone(session.currentTurn()+2, false, true)
 	actions.onBargeIn(0)
 	select {
 	case <-fired:
@@ -2316,7 +2324,7 @@ func TestOnlyTheUnplayedTailDecidesWhetherSpeechIsAnAcknowledgement(t *testing.T
 	actions, session, _ := testActions(t, &fakeSwitch{})
 	fired := make(chan struct{})
 	actions.arm(t.Context(), func() { close(fired) })
-	actions.onTurnDone(session.currentTurn()+1, false)
+	actions.onTurnDone(session.currentTurn()+1, false, true)
 
 	actions.onBargeIn(closingTailAck + time.Millisecond)
 	select {
@@ -2335,7 +2343,7 @@ func TestOnlyTheUnplayedTailDecidesWhetherSpeechIsAnAcknowledgement(t *testing.T
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	actions.onTurnDone(session.currentTurn()+2, false)
+	actions.onTurnDone(session.currentTurn()+2, false, true)
 	actions.onBargeIn(closingTailAck)
 	select {
 	case <-fired:
@@ -2574,15 +2582,15 @@ func TestTheCapCoversEveryAnswerToAnInterruptedClosingLine(t *testing.T) {
 
 	// The closing line finishes generating; the caller cuts in early on it.
 	leg.holdFrames(400)
-	actions.onTurnDone(armedTurn+1, false)
+	actions.onTurnDone(armedTurn+1, false, true)
 	actions.onBargeIn(closingTailAck + time.Second)
 	leg.holdFrames(0)
 
 	// Answer one is short, answer two is long.
 	leg.holdFrames(5)
-	actions.onTurnDone(armedTurn+2, false)
+	actions.onTurnDone(armedTurn+2, false, true)
 	leg.holdFrames(300) // 6 s queued
-	actions.onTurnDone(armedTurn+3, false)
+	actions.onTurnDone(armedTurn+3, false, true)
 
 	actions.mu.Lock()
 	due := actions.capDue
@@ -2637,7 +2645,7 @@ func armInterruptedHangup(t *testing.T, graceCap time.Duration) (
 	fired := make(chan struct{})
 	actions.armAs(t.Context(), false, func() { close(fired) })
 	armedTurn := session.currentTurn()
-	actions.onTurnDone(armedTurn+1, false)
+	actions.onTurnDone(armedTurn+1, false, true)
 	actions.onBargeIn(closingTailAck + time.Second)
 	return actions, session, armedTurn, fired
 }
@@ -2662,12 +2670,12 @@ func TestABareHangupAfterAnInterruptionIsRefusedOnceAndItsSilentTurnDoesNotEndTh
 		t.Fatalf("hangup = %+v, %v; want a CALL_ENDING refusal", result, err)
 	}
 	// The audio-less turn that carried the hangup.
-	actions.onTurnDone(armedTurn+2, false)
+	actions.onTurnDone(armedTurn+2, false, true)
 	actions.onPlaybackDone(armedTurn+2, false)
 	neverFired(t, fired, "an audio-less turn's playback ran the armed ending")
 
 	// The answer, with audio.
-	actions.onTurnDone(armedTurn+3, false)
+	actions.onTurnDone(armedTurn+3, false, true)
 	actions.onPlaybackDone(armedTurn+3, true)
 	select {
 	case <-fired:
@@ -2704,7 +2712,7 @@ func TestAHangupAfterASpokenAnswerIsNotRefused(t *testing.T) {
 	session.mu.Lock()
 	session.audioTurns++ // the answer finished generating with audio
 	session.mu.Unlock()
-	actions.onTurnDone(armedTurn+2, false)
+	actions.onTurnDone(armedTurn+2, false, true)
 	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
 		t.Fatalf("hangup after a spoken answer = %+v, %v; want success", result, err)
 	}
@@ -2720,7 +2728,7 @@ func TestARepeatedHangupWithoutAnInterruptionKeepsToday(t *testing.T) {
 	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
 		t.Fatalf("repeated hangup = %+v, %v; want success", result, err)
 	}
-	actions.onTurnDone(armedTurn+1, false)
+	actions.onTurnDone(armedTurn+1, false, true)
 	actions.onPlaybackDone(armedTurn+1, false)
 	select {
 	case <-fired:
