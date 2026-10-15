@@ -26,7 +26,11 @@ type Engine struct {
 
 	current Node
 	slots   map[string]any
-	turns   int
+	// collected holds the values of each collect list, in the order they were
+	// first collected, keyed by the list's slot. The slot map holds their
+	// rendered form (see collect).
+	collected map[string][]string
+	turns     int
 	// turnsWithoutTool counts tool-less replies to the caller in the current
 	// phase (see OnBotTurnDone), mirrored into the slot of the same name so a
 	// condition can test it the way it tests turns.
@@ -62,6 +66,13 @@ func NewEngine(spec *Spec, lang string, baseSlots map[string]any, log *slog.Logg
 	}
 	maps.Copy(e.slots, baseSlots)
 	e.slots["lang"] = e.lang
+	e.collected = map[string][]string{}
+	for _, tool := range spec.Tools {
+		if tool.Collect != nil {
+			e.slots[tool.Collect.Slot] = ""
+			e.slots[tool.Collect.Slot+collectCountSuffix] = 0
+		}
+	}
 	e.enter(spec.InitialNode)
 	return e
 }
@@ -191,6 +202,7 @@ func (e *Engine) OnToolResult(tool string, args, result map[string]any) string {
 	}
 	e.slots[tool+".calls"] = e.countOf(tool+".calls") + 1
 	e.recordArgs(tool, args)
+	e.collect(tool, args, result)
 
 	node := e.guardRunawayLoop()
 	if node == "" {

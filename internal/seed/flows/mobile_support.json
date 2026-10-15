@@ -100,8 +100,8 @@
     },
     "repair_report": {
       "instruction": {
-        "zh": "维修单查询结果:设备 {slots.repair_status.device},当前状态 {slots.repair_status.status},{slots.repair_status.eta}。向用户播报后问“请问还需要其它服务吗?”对方有手机使用问题就继续解答;要查其它维修单就再次调用 repair_status(以最新返回为准);对方请你再说一遍,就重复播报。对方说“没有了”“不用了”“没事了”这类话,就是不需要了:立即调用 hangup,不要再问一次。",
-        "en": "Repair lookup result: device {slots.repair_status.device}, status {slots.repair_status.status}, {slots.repair_status.eta}. Announce it in English (translate the Chinese fields naturally), then ask \"Anything else I can help you with?\" If the caller has a usage question, answer it; if they want another repair order checked, call repair_status again (trust the latest result); if they ask you to repeat, repeat the result. If they decline — \"no\", \"that's all\", \"nothing else\" — call hangup immediately and do not ask again."
+        "zh": "本通电话查到的维修单只有一张:{slots.repair_status.foundOrders}。最近一次查询:单号 {slots.repair_status.args.rma},found={slots.repair_status.found},设备 {slots.repair_status.device},当前状态 {slots.repair_status.status},{slots.repair_status.eta}。found=1 就向用户播报结果;found=0 是查无此单,请用户核对单号。然后问“请问还需要其它服务吗?”对方有手机使用问题就继续解答;对方报了新的单号,就照常调用 repair_status 查询;对方请你再说一遍,就重复播报。对方问“我的维修单”“那个单子”却没说单号时,说的就是 {slots.repair_status.foundOrders}:直接回答它,不要问是哪一张,不要再问单号,也不要提查无此单的号码;它不是最近一次查询的单号,就先调用 repair_status 再查一次。说要查一个单号,就一定要调用 repair_status;没有调用,就不要说查过。本通电话已经查过的单号,绝不要说没听清,也不要让对方重报。对方说“没有了”“不用了”“没事了”这类话,就是不需要了:立即调用 hangup,不要再问一次。",
+        "en": "Orders found in this call: only one, {slots.repair_status.foundOrders}. Latest lookup: order {slots.repair_status.args.rma}, found={slots.repair_status.found}, device {slots.repair_status.device}, status {slots.repair_status.status}, {slots.repair_status.eta}. If found=1, announce the result in English (translate the Chinese fields naturally); found=0 means no such order: ask the caller to double-check the number. Then ask \"Anything else I can help you with?\" If the caller has a usage question, answer it; if they give another order number, look it up with repair_status as usual; if they ask you to repeat, repeat the result. If they ask about \"my order\" or \"that order\" without a number, they mean {slots.repair_status.foundOrders}: answer for it directly, without asking which one or asking for the number, and do not mention any number that was not found; if it is not the latest lookup, call repair_status for it first. If you say you will check a number, call repair_status; never say a number was checked unless you called it. Never say you did not hear a number already looked up in this call, and never ask the caller to repeat it. If they decline — \"no\", \"that's all\", \"nothing else\" — call hangup immediately and do not ask again."
       },
       "tools": [
         "repair_status"
@@ -116,7 +116,26 @@
             "value": "0"
           },
           "target": "repair_report"
+        },
+        {
+          "on": "TOOL_RESULT",
+          "tool": "repair_status",
+          "condition": {
+            "slot": "repair_status.foundOrders.count",
+            "op": "GTE",
+            "value": 2
+          },
+          "target": "repair_report_multi"
         }
+      ]
+    },
+    "repair_report_multi": {
+      "instruction": {
+        "zh": "本通电话查到的维修单有 {slots.repair_status.foundOrders.count} 张:{slots.repair_status.foundOrders}。最近一次查询:单号 {slots.repair_status.args.rma},found={slots.repair_status.found},设备 {slots.repair_status.device},当前状态 {slots.repair_status.status},{slots.repair_status.eta}。found=1 就向用户播报结果;found=0 是查无此单,请用户核对单号。然后问“请问还需要其它服务吗?”对方有手机使用问题就继续解答;对方报了新的单号,就照常调用 repair_status 查询;对方请你再说一遍,就重复播报。对方问“我的维修单”“那个单子”却没说单号时,报出这几张请对方选,就说“您这通电话查到了 {slots.repair_status.foundOrders},请问是哪一张?”,查无此单的号码不要提;对方选定后回答那一张,它不是最近一次查询的单号,就先调用 repair_status 再查一次。说要查一个单号,就一定要调用 repair_status;没有调用,就不要说查过。本通电话已经查过的单号,绝不要说没听清,也不要让对方重报。对方说“我刚才说过了”,就报出这几张请对方选;对方仍说说过了,就回答对方最后报的那一张,并说另一张也可以帮忙查,不要再原样重复问话。对方说“没有了”“不用了”“没事了”这类话,就是不需要了:立即调用 hangup,不要再问一次。",
+        "en": "Orders found in this call: {slots.repair_status.foundOrders.count} of them, {slots.repair_status.foundOrders}. Latest lookup: order {slots.repair_status.args.rma}, found={slots.repair_status.found}, device {slots.repair_status.device}, status {slots.repair_status.status}, {slots.repair_status.eta}. If found=1, announce the result in English (translate the Chinese fields naturally); found=0 means no such order: ask the caller to double-check the number. Then ask \"Anything else I can help you with?\" If the caller has a usage question, answer it; if they give another order number, look it up with repair_status as usual; if they ask you to repeat, repeat the result. If they ask about \"my order\" or \"that order\" without a number, name these and ask which one: \"In this call you checked {slots.repair_status.foundOrders} — which one?\", without mentioning any number that was not found; then answer for the one they pick, calling repair_status for it first if it is not the latest lookup. If you say you will check a number, call repair_status; never say a number was checked unless you called it. Never say you did not hear a number already looked up in this call, and never ask the caller to repeat it. If they say they already told you, name these orders and ask which one; if they say so again, answer for the order they named last and offer to check the other, instead of repeating the question. If they decline — \"no\", \"that's all\", \"nothing else\" — call hangup immediately and do not ask again."
+      },
+      "tools": [
+        "repair_status"
       ]
     },
     "need_transfer": {
@@ -184,6 +203,15 @@
           "device": "data.device",
           "status": "data.status",
           "eta": "data.eta"
+        }
+      },
+      "collect": {
+        "slot": "repair_status.foundOrders",
+        "value": "{args.rma}",
+        "when": {
+          "slot": "result.found",
+          "op": "EQ",
+          "value": "1"
         }
       }
     }
