@@ -48,6 +48,12 @@ import (
 // "instructions":...}}, the way the repo's Realtime client sends one; the
 // first probe records whether Grok accepts the type field.
 //
+// One trap, found 2026-10-15: the 20 ms pump must not start before the
+// session.update that sets audio/pcmu has been acknowledged. Started at dial
+// time, 40 s of correctly formatted pcmu produced no speech_started, no commit
+// and no error (the same bytes sent after the ack worked at once, as did
+// audio/pcm 24 kHz).
+//
 // Arms (AICC_LIVE_RUNS sessions each, default 3): control, idle, speaking,
 // tools-control and tools, as in the doubao test. Assertions encode what was
 // measured on 2026-10-15; whatever was not obeyed is logged, not asserted.
@@ -150,7 +156,7 @@ func grokDial(t *testing.T, key, label string) *grokConn {
 	}
 	t.Logf("[%s] connected; upgrade headers: %s", label, strings.Join(ids, " "))
 	go g.read()
-	go g.pump()
+
 	return g
 }
 
@@ -367,8 +373,8 @@ func grokOpen(t *testing.T, key, label string, instructions string, withTool boo
 			"type": "server_vad",
 		},
 		"audio": map[string]any{
-			"input":  map[string]any{"format": map[string]any{"type": "audio/pcmu"}},
-			"output": map[string]any{"format": map[string]any{"type": "audio/pcmu"}},
+			"input":  map[string]any{"format": map[string]any{"type": "audio/pcmu", "rate": 8000}},
+			"output": map[string]any{"format": map[string]any{"type": "audio/pcmu", "rate": 8000}},
 		},
 	}
 	if withTool {
@@ -384,6 +390,7 @@ func grokOpen(t *testing.T, key, label string, instructions string, withTool boo
 	if !ok || ev.Type == "error" {
 		t.Fatalf("[%s] session.update not acknowledged: %+v", label, ev.Raw)
 	}
+	go g.pump()
 	return g
 }
 
@@ -528,6 +535,9 @@ func TestLiveGrokProtocol(t *testing.T) {
 		_ = g.send(map[string]any{"type": "response.create"})
 		tr, ok := g.reply(20 * time.Second)
 		t.Logf("[p3] complete=%v turn=%+v", ok, tr)
+		if !ok || tr.text == "" {
+			t.Errorf("response.create on an empty conversation did not greet: %+v", tr)
+		}
 	})
 
 	t.Run("4-bargein-and-cancel", func(t *testing.T) {
@@ -565,6 +575,9 @@ func TestLiveGrokProtocol(t *testing.T) {
 		_ = g.send(map[string]any{"type": "conversation.item.truncate", "item_id": tr.itemID,
 			"content_index": 0, "audio_end_ms": 500})
 		g.drain(3 * time.Second)
+		if !g.seen["conversation.item.truncated"] {
+			t.Errorf("truncate after a completed response was not acknowledged")
+		}
 		_ = g.send(map[string]any{"type": "conversation.item.truncate", "item_id": "item_does_not_exist",
 			"content_index": 0, "audio_end_ms": 500})
 		g.drain(3 * time.Second)
@@ -582,13 +595,16 @@ func TestLiveGrokProtocol(t *testing.T) {
 		defer g.close()
 		_ = g.send(map[string]any{"type": "session.update", "session": map[string]any{
 			"audio": map[string]any{"input": map[string]any{
-				"format":        map[string]any{"type": "audio/pcmu"},
+				"format":        map[string]any{"type": "audio/pcmu", "rate": 8000},
 				"transcription": map[string]any{"model": "grok-transcribe"}}}}})
 		g.drain(1 * time.Second)
 		g.say(hours)
 		tr, ok := g.reply(30 * time.Second)
 		t.Logf("[p7] reply ok=%v %+v", ok, tr)
 		g.drain(2 * time.Second)
+		if !g.seen["conversation.item.input_audio_transcription.updated"] {
+			t.Errorf("no input_audio_transcription.updated event with grok-transcribe")
+		}
 	})
 
 	t.Run("8-g711-roundtrip", func(t *testing.T) {
