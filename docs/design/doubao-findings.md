@@ -624,12 +624,67 @@ And `aicc_provider_ws_errors_total` counts a failed doubao session twice, once
 for the error frame and once for the session end it causes; one session that
 ended badly should be one.
 
-**W-D9 — a mid-call instruction change is sent, not measured (issue #13).**
+**W-D9 — a mid-call instruction change is obeyed (issue #13). MEASURED,
+2026-10-15; closed as a fact, with one edge left.**
 `Session.UpdateInstructions` sends a full `session.update` (instructions plus
-every tool, since tools are a full overwrite here), and the wire test and the
-fake confirm the frame. Whether the live server applies new instructions to a
-dialogue already in progress was never measured, so the re-pin that keeps a
-recorded slot (a slot tool's fact, `{slots.x}` in an instruction) in front of
-the model is best effort on doubao. The slot itself stays exact for templates
-and HTTP bodies. Measure it before relying on it: change the instruction mid-call
-and see whether the next reply obeys.
+every tool, since tools are a full overwrite here). The live server accepted it
+in every session (no error frame, no close) and applied it to the dialogue
+already in progress.
+
+The test is `TestLiveDoubaoMidCallInstructions`. The standing instructions are a
+persona; the update is the same persona with one paragraph appended, the way a
+flow changes phase, requiring every answer to begin with "好的，王先生" — a
+phrase the model never says unprompted. The caller's questions are synthesized
+speech (qwen3-tts-flash, voice Cherry; how the clips were made is in the test's
+comment) streamed at real-time pace between stretches of room tone, because
+this provider takes no text turns (§5). Three sessions per arm, 15 in all.
+
+| What was tried | Obeyed |
+|---|---|
+| **Control**: no update, three questions | marker in **0 of 9** replies |
+| Update while idle, after the first answer; then two more questions | **6 of 6** — the first reply after the update and the next one |
+| Update sent while the first answer was still being spoken; then two more questions | **6 of 6**; the answer being spoken was not cut |
+| Tools declared at start; the update adds the marker rule and "call `lookup_order` on an order question"; the order question after it | tool called **3 of 3**, reply after the tool result carries the marker **3 of 3** |
+| **Tool control**: tools declared, no update, the same order question | tool called **3 of 3** |
+
+Every first answer, before the update, was plain (`我们的客服是24小时在线的…`);
+every answer after it began as told (`好的，王先生，您可以直接带上身份证到就近的
+NovaNet营业厅办理…`), the next question included. Logids, in order: control
+`20261015125559C9ECF79C77446149C571` `20261015125621278A9D7C99D8D0C86AB2`
+`20261015125645DBE6AA752AA461708039`; idle `20261015125708F7FDD095783A64C5B7CE`
+`20261015125731625943F3364B2EAFDBE9` `2026101512575402C0803A5F0C77D454B4`;
+speaking `20261015125818D9A720519D48F3DDB3FE` `202610151258414C814F5D34A0FA384EE9`
+`202610151259057646F1CA39178145FBD5`; tools-control
+`20261015125929BDBFEEE9E26F864092B9` `2026101512595038ADA48F90E4F9E56933`
+`202610151300094DC9DC8573864442966E`; tools `20261015130028F7FC72E78615832F101C`
+`20261015130047DE5894A77B0C97485E18` `2026101513010514572405A51624431AF2`.
+
+- **Tools survive the full overwrite.** The tool was declared at start and
+  re-sent with the update, and the model still called it afterwards. The tool
+  control shows the order question calls it with no instruction at all, so the
+  tools arm proves survival, not that the phase paragraph caused the call.
+- **A tool call does not hide the marker.** In the tools arm the model said
+  "好的，王先生，我这就为您查询订单状态" before calling the tool, so the
+  line before a tool call also follows the new instructions. That speech arrived
+  with a non-fatal `the provider stopped partway through speaking` error and its
+  transcript only after the call, in all three sessions; it is the existing
+  turn-abandoned path of §4, not a consequence of the update.
+- **One quirk.** In two replies of one speaking-arm session (#3) the
+  marker opened every line, not only the reply (`好的，王先生，…\n好的，王先生，…`).
+  The instruction is applied literally; a real phase paragraph should say what
+  it means to repeat.
+
+**Consequence for slots (issue #13) and phase changes.** On doubao the re-pin is
+no longer merely sent: a fact recorded by a slot tool and rendered into the
+instructions reaches the very next reply, and it persists over the following
+turn. A phase change by appended paragraph takes effect at once, including when
+sent mid-reply. The slot is still exact for templates and HTTP bodies, as before.
+Gemini (gemini-findings §2.6) is the client where the re-pin is genuinely late.
+
+**NOT MEASURED**: a long or conflicting instruction (a second update that
+contradicts the first), many updates in one session, an update that carries a
+slot value the model must recall verbatim (the marker is a style rule, not a
+fact), whether an update interacts with the provider's own history truncation
+late in a long call, and a phase paragraph that competes with a tool result's
+hint. The test measures obedience of a style directive, which is the easiest
+kind to check and not proof that every instruction is followed.
