@@ -70,6 +70,80 @@
       "expect": {"lead": {"intent": "MEDIUM", "notes": "改口,还要再考虑"}, "ending": "hangup"}
     },
     {
+      "name": "a stance, the confirming question, a change of mind, then hangup",
+      "description": "The model confirms the outcome in words and asks once; the caller changes their mind, so the stance is recorded again and the call ends only after the second confirmation.",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "Sign me up."},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "wants to sign up"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "Actually, let me think about it."},
+        {"call": "record_lead", "args": {"intent": "MEDIUM", "notes": "changed their mind, still thinking"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "No, that's all."},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["talk", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["record_lead", "record_lead", "hangup"],
+        "lead": {"intent": "MEDIUM", "notes": "changed their mind, still thinking"}
+      }
+    },
+    {
+      "name": "记录态度、确认追问、客户改口、再挂断",
+      "description": "模型用一句话确认结果并问一次;客户改口后重新记录,第二次确认之后才结束通话。",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "好,给我报名吧。"},
+        {"call": "record_lead", "args": {"intent": "HIGH", "notes": "想报名"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "还是算了,我再想想。"},
+        {"call": "record_lead", "args": {"intent": "MEDIUM", "notes": "改口,还要再想想"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "没有了,就这样。"},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {
+        "path": ["talk", "finish"],
+        "ending": "hangup",
+        "toolsRun": ["record_lead", "record_lead", "hangup"],
+        "lead": {"intent": "MEDIUM", "notes": "改口,还要再想想"}
+      }
+    },
+    {
+      "name": "a stance, the confirming question, then hangup when there is nothing else",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "Not really interested, thanks."},
+        {"call": "record_lead", "args": {"intent": "NONE", "notes": "not interested"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "No, that's it. Bye."},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "NONE"}}
+    },
+    {
+      "name": "记录态度、确认追问、客户没有别的事就挂断",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "不太感兴趣,谢谢。"},
+        {"call": "record_lead", "args": {"intent": "NONE", "notes": "不感兴趣"}, "expect": {"phase": "talk"}},
+        {"botTurn": "reply"},
+        {"say": "没有了,再见。"},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "NONE"}}
+    },
+    {
       "name": "a customer who asks not to be called again is recorded DO_NOT_CALL and the call ends",
       "lang": "en",
       "isCampaign": true,
