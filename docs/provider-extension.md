@@ -99,12 +99,29 @@ after it still covers (gemini-findings W-G6).
 **Mid-call instructions (`UpdateInstructions`, an instructions-only
 `session.update`).** Qwen: MEASURED 2026-10-15 to be obeyed from the next reply,
 mid-reply included, with tools surviving (qwen-findings W-Q7; the doubao
-counterpart is doubao-findings W-D9). OpenAI: NOT MEASURED. The same test,
-`TestLiveOpenAIMidCallInstructions` (`internal/provider/live_instructions_test.go`),
-is written and gated but could not run on 2026-10-15: the keys available were
-rejected by the endpoint (`expired_secret_key` for the environment's, then
-`invalid_api_key` for the checkout's `.env`). Run it with a working
-`OPENAI_API_KEY` and `-count=1` to fill this in; three sessions per arm.
+counterpart is doubao-findings W-D9). OpenAI (`gpt-realtime-2.1`, G.711 mu-law
+passthrough): MEASURED 2026-10-15 with the same test and arms,
+`TestLiveOpenAIMidCallInstructions`
+(`internal/provider/live_instructions_test.go`), three sessions per arm, 15 in
+all, no error frame and no close. Appended paragraph making every answer begin
+"好的，王先生":
+
+| Arm | Obeyed |
+|---|---|
+| Control, no update | marker in 0 of 9 replies |
+| Update while idle, then two questions | 6 of 6 (answer before the update plain 3 of 3) |
+| Update while the first answer was speaking, then two questions | 6 of 6; the spoken answer was not marked |
+| Tool control (no update) | `lookup_order` called 3 of 3 |
+| Tools declared at start, update adds the marker rule | tool called 3 of 3; reply after the result carries the marker 3 of 3 |
+
+Before the update: `我们的人工客服服务时间是工作日早上九点到晚上六点。…` After it:
+`好的，王先生，您可以通过 NovaNet 官网或 App 提交办理申请，也可以拨打客服热线由专员为您开通。…`
+Tools: `好的，王先生，我先去系统里查一下这个订单的状态。` then
+`lookup_order {"orderId":"12345"}`, then `好的，王先生，您的订单已发货，预计明天送达。`
+So an instructions-only update is a sufficient phase change on openai, mid-reply
+included, and tools survive it. NOT MEASURED, as on qwen: conflicting or repeated
+updates, a slot value recalled verbatim, an update late in a long call. Run
+with `-count=1`.
 
 ## The steps
 

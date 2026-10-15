@@ -52,11 +52,9 @@ import (
 // after the tool result must carry the marker, so a tool lost to an
 // instructions-only update shows as no call).
 //
-// The qwen assertions encode what was measured on 2026-10-15 (W-Q8 in
-// docs/design/qwen-findings.md); every transcript is logged. The OpenAI arm set
-// is written and gated but has not been run to a result: the keys available on
-// that day were rejected (docs/provider-extension.md), so it asserts nothing
-// beyond what the control already checks.
+// The assertions encode what was measured on 2026-10-15 for both profiles (W-Q7
+// in docs/design/qwen-findings.md; docs/provider-extension.md for openai); every
+// transcript is logged.
 //
 //	AICC_LIVE_PROVIDER_TEST=1 go test -count=1 -run LiveQwenMidCall -v ./internal/provider/
 //	AICC_LIVE_PROVIDER_TEST=1 go test -count=1 -run LiveOpenAIMidCall -v ./internal/provider/
@@ -158,12 +156,6 @@ func runMidCall(t *testing.T, profile Profile) {
 			}
 			t.Logf("[%s/%s] RESULT marker obeyed %d/%d, tool calls %d over %d sessions",
 				profile.Name, a.name, obeyed, total, toolCalls, runs)
-			// Only qwen was measured (2026-10-15). OpenAI could not be: both
-			// keys available that day were rejected (expired_secret_key,
-			// invalid_api_key), so its numbers are logged and not asserted.
-			if profile.Name != "qwen" {
-				return
-			}
 			if a.checked >= 0 && obeyed != total {
 				t.Errorf("%s: %d of %d post-update replies obeyed the new instructions", a.name, obeyed, total)
 			}
