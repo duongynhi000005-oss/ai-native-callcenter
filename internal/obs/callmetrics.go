@@ -33,7 +33,6 @@ var (
 	providerFirstAud metric.Int64Histogram
 	providerErrors   metric.Int64Counter
 	providerSessions metric.Int64Counter
-	providerExpired  metric.Int64Counter
 	botInterruptions metric.Int64Counter
 	botSessionLimits metric.Int64Counter
 	botUnbacked      metric.Int64Counter
@@ -112,12 +111,6 @@ func init() {
 			"rate-limit session creation rather than concurrency — doubao allows 60 a "+
 			"minute per application id — so the rate of opening them is a quota a busy "+
 			"minute can exhaust while every other number here looks healthy."))
-	providerExpired, _ = meter.Int64Counter("aicc_provider_sessions_expired_total",
-		metric.WithDescription("Sessions the provider ended because its own session "+
-			"lifetime ran out, by provider. A subset of the error total, separated "+
-			"out because nothing here is broken: a conversation outlived a cap and "+
-			"the caller was rescued mid-sentence, which is answered by what the flow "+
-			"asks of a caller rather than by fixing the network or the credential."))
 	botSessionLimits, _ = meter.Int64Counter("aicc_bot_session_limits_total",
 		metric.WithDescription("AI calls the platform ended because they reached the "+
 			"flow's time limit (global.maxDurationSec), by how: TRANSFER, counted "+
@@ -307,10 +300,9 @@ const (
 // RecordSessionLimit counts one AI call the platform ended because it reached
 // the flow's time limit, by outcome (SessionLimitOutcome*).
 //
-// It is the platform's own cap, where aicc_provider_sessions_expired_total is
-// the vendor's: a rise here says callers are being kept on the line longer
-// than the flow allows, a loop or a conversation the flow never closes, and
-// the flow is what answers it.
+// It is the platform's own cap: a rise here says callers are being kept on the
+// line longer than the flow allows, a loop or a conversation the flow never
+// closes, and the flow is what answers it.
 func RecordSessionLimit(outcome string) {
 	if botSessionLimits == nil {
 		return
@@ -357,23 +349,6 @@ func RecordProviderError(provider string) {
 		return
 	}
 	providerErrors.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("provider", provider)))
-}
-
-// RecordProviderSessionExpired counts a session the provider ended because its
-// own lifetime ran out.
-//
-// It is counted beside aicc_provider_ws_errors_total and not instead of it:
-// this is still a session that ended on an error, and an operator watching that
-// total should not have to know which engines cap a session to read it. What
-// this one answers is whether a deployment's conversations are outliving the
-// cap — which is a question about how long the flow keeps a caller talking, not
-// a fault anyone can fix.
-func RecordProviderSessionExpired(provider string) {
-	if providerExpired == nil {
-		return
-	}
-	providerExpired.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("provider", provider)))
 }
 

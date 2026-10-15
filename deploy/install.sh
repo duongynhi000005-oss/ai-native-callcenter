@@ -63,9 +63,8 @@ Install, upgrade or remove the AI-native call center on this host.
 
 Usage: install.sh [options]
 
-  --provider P        the voice provider: openai, qwen, gateway, doubao,
-                      gemini or none (none: the bot never answers; the human
-                      path works)
+  --provider P        the voice provider: openai, qwen, gateway, doubao
+                      or none (none: the bot never answers; the human path works)
   --external-ip IP    the address phones reach this host at (default: the
                       address of the default route's interface); on a rerun,
                       rewrites the address in .env
@@ -81,7 +80,7 @@ Usage: install.sh [options]
   -h, --help          this text
 
 The provider key comes from the environment (OPENAI_API_KEY, ALIYUN_API_KEY
-for qwen, DOUBAO_API_KEY, GEMINI_API_KEY, REALTIME_API_KEY for gateway, which
+for qwen, DOUBAO_API_KEY, REALTIME_API_KEY for gateway, which
 also needs AICC_PROVIDER_ENDPOINT) or a prompt. With sudo, keep it with
 `sudo -E`.
 
@@ -376,8 +375,8 @@ parse_args() {
         shift
     done
     case $PROVIDER_FLAG in
-    '' | openai | qwen | gateway | doubao | gemini | none) ;;
-    *) die "--provider must be openai, qwen, gateway, doubao, gemini or none, got '$PROVIDER_FLAG'" ;;
+    '' | openai | qwen | gateway | doubao | none) ;;
+    *) die "--provider must be openai, qwen, gateway, doubao or none, got '$PROVIDER_FLAG'" ;;
     esac
     if [ -n "$EXTERNAL_IP_FLAG" ] && ! is_ipv4 "$EXTERNAL_IP_FLAG"; then
         die "--external-ip must be an IPv4 address, got '$EXTERNAL_IP_FLAG'"
@@ -817,7 +816,6 @@ provider_key_var() {
     qwen) printf ALIYUN_API_KEY ;;
     gateway) printf REALTIME_API_KEY ;;
     doubao) printf DOUBAO_API_KEY ;;
-    gemini) printf GEMINI_API_KEY ;;
     esac
 }
 
@@ -832,19 +830,23 @@ resolve_provider() {
     fi
     if [ -n "$_rp_have" ]; then
         PROVIDER=$_rp_have
+        case $PROVIDER in
+        openai | qwen | gateway | doubao | none) ;;
+        *) die "$ENV_FILE names AICC_PROVIDER=$PROVIDER, which is not a provider this release runs (accepted: openai, qwen, gateway, doubao). Edit $ENV_FILE to name one of them and set its API key, then run the installer again" ;;
+        esac
         if [ -n "$PROVIDER_FLAG" ] && [ "$PROVIDER_FLAG" != "$PROVIDER" ]; then
             warn "$ENV_FILE already names provider $PROVIDER; keeping it (edit .env to change it)"
         fi
     else
         PROVIDER=$PROVIDER_FLAG
         if [ -z "$PROVIDER" ] && can_prompt; then
-            ask "Voice provider (openai, qwen, gateway, doubao, gemini, none): "
+            ask "Voice provider (openai, qwen, gateway, doubao, none): "
             PROVIDER=$REPLY
         fi
         case $PROVIDER in
-        openai | qwen | gateway | doubao | gemini | none) ;;
-        '') die "no provider chosen: pass --provider openai|qwen|gateway|doubao|gemini|none" ;;
-        *) die "unknown provider '$PROVIDER': pass --provider openai|qwen|gateway|doubao|gemini|none" ;;
+        openai | qwen | gateway | doubao | none) ;;
+        '') die "no provider chosen: pass --provider openai|qwen|gateway|doubao|none" ;;
+        *) die "unknown provider '$PROVIDER': pass --provider openai|qwen|gateway|doubao|none" ;;
         esac
     fi
     PROVIDER_KEY_VAR=$(provider_key_var "$PROVIDER")

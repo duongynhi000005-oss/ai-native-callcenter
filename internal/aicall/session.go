@@ -95,10 +95,6 @@ type Event struct {
 	IsInterrupted bool
 
 	Err error
-	// FailureCause is why a FAILED event happened, when the provider put a name
-	// to it. It becomes the call's hangup cause; empty means the failure has no
-	// word of its own, which is most of them.
-	FailureCause provider.FailureCause
 }
 
 // Config parameterises one bridged call.
@@ -571,7 +567,7 @@ func (s *Session) pumpCallerAudio() {
 				// A model that cannot be fed is a call that cannot continue.
 				// Nothing names this one: a socket that stopped taking audio
 				// has not said why.
-				s.fail("the model stopped accepting audio", err, "")
+				s.fail("the model stopped accepting audio", err)
 				return
 			}
 		}
@@ -743,15 +739,7 @@ func (s *Session) handleModelEvent(event provider.Event) {
 	case provider.EventTypeError:
 		if event.IsFatal {
 			obs.RecordProviderError(s.providerName)
-			if event.FailureCause == provider.FailureCauseSessionExpired {
-				// Counted as well as, never instead of: this is still a session
-				// that ended on an error, and an operator watching that total
-				// should not have to know which engines cap a session to read
-				// it. The second counter is what separates a limit reached from
-				// a fault to fix.
-				obs.RecordProviderSessionExpired(s.providerName)
-			}
-			s.fail(event.Text, event.Err, event.FailureCause)
+			s.fail(event.Text, event.Err)
 			return
 		}
 		s.log.Warn("model reported a recoverable error", "error", event.Err)
@@ -932,8 +920,7 @@ func (s *Session) beginTurn() {
 
 // isHoldingTheFloor reports whether the bot has the floor: a turn is being
 // generated, or its tail is still playing to the caller. A turn asked for now
-// would collide with it — refused on the Realtime providers, cut off
-// mid-sentence on gemini.
+// would collide with it, and the Realtime providers refuse it.
 func (s *Session) isHoldingTheFloor() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1195,13 +1182,9 @@ func (s *Session) watchLeg() {
 }
 
 // fail ends the call because the conversation cannot go on.
-//
-// The cause travels with it when the provider named one: what releases the call
-// is the same rescue either way, but "the provider's session ran out of time" is
-// a different thing to find in a CDR from "the provider failed".
-func (s *Session) fail(reason string, err error, cause provider.FailureCause) {
-	s.log.Error("ai call failed", "reason", reason, "error", err, "cause", cause)
-	s.emit(Event{Type: EventTypeFailed, Text: reason, Err: err, FailureCause: cause})
+func (s *Session) fail(reason string, err error) {
+	s.log.Error("ai call failed", "reason", reason, "error", err)
+	s.emit(Event{Type: EventTypeFailed, Text: reason, Err: err})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

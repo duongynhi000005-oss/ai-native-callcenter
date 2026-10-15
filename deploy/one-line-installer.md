@@ -31,7 +31,6 @@ environment variable, not an `AICC_*` setting:
 | `qwen` | `ALIYUN_API_KEY` |
 | `gateway` | `REALTIME_API_KEY` and `AICC_PROVIDER_ENDPOINT=ws://…` |
 | `doubao` | `DOUBAO_API_KEY` |
-| `gemini` | `GEMINI_API_KEY` |
 
 Export the key and pass `--provider` when there is no terminal to prompt at; on
 Linux keep the exported key through sudo with `sudo -E`:
@@ -101,7 +100,7 @@ cd ~/.aicc && docker compose exec aicc aicc useradd -username admin -password '<
 |---|---|---|---|---|
 | Ubuntu 24.04.5 LTS | x86_64 | Docker Engine | Engine 29.8.0, Compose v5.5.1 | The installer end to end (install, rerun, `--external-ip`, `--upgrade`, `--uninstall` / `--purge`, preflight failures); `aicc doctor` all PASS; a WebRTC agent on another LAN machine (Chrome 154 on macOS, web-sip-phone 1.0.7) registered over `ws://` with two-way audio to the bot on 95001 |
 | macOS 26.6.2 | arm64 | Colima (vz, port forwarder `grpc`) | Colima 0.10.3, Docker 28.4.0, Compose 5.1.4 | The macOS overlay stack; `aicc doctor` all PASS; a WebRTC agent on the same host with two-way audio (switch configuration from this release); installer preflight (`--check`) only (the macOS 12.7.6 row is a full installer run) |
-| macOS 12.7.6 | x86_64 | Colima (QEMU, port forwarder `grpc`) | Colima 0.10.1, Docker 29.2.1, Compose 2.40.0 | Verified 2026-10-04: the installer end to end (install with `--provider qwen` and `ALIYUN_API_KEY` in the environment, rerun, provider changed in `.env` to gemini and back; `aicc doctor` all PASS, including `provider_session` for qwen and gemini); admin login over the API; SIP over the UDP port forwarder (an OPTIONS on 5060 was answered). WebRTC audio not tested |
+| macOS 12.7.6 | x86_64 | Colima (QEMU, port forwarder `grpc`) | Colima 0.10.1, Docker 29.2.1, Compose 2.40.0 | Verified 2026-10-04: the installer end to end (install with `--provider qwen` and `ALIYUN_API_KEY` in the environment, rerun, provider changed in `.env` to another one and back; `aicc doctor` all PASS, including `provider_session`); admin login over the API; SIP over the UDP port forwarder (an OPTIONS on 5060 was answered). WebRTC audio not tested |
 
 - Colima: 0.10.1 is the oldest version verified, and it must run the `grpc`
   port forwarder (`colima start --port-forwarder grpc`); the default `ssh`

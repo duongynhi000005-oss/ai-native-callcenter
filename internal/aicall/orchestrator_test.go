@@ -176,7 +176,7 @@ func TestTransferWaitsForTheBridgeLineToPlay(t *testing.T) {
 	}
 }
 
-// What a gemini call showed (#25): the model called transfer_to_agent three
+// What a live call showed (#25): the model called transfer_to_agent three
 // times, each call re-armed the transfer, and it ran on the cap ten seconds
 // after the last one. The first ending armed is the call's ending: a repeat —
 // or a hangup — in a later turn keeps its turn, its cap and its stamps, and
@@ -458,24 +458,14 @@ func TestDriveAnswersToolCallsThroughTheFlow(t *testing.T) {
 	}
 }
 
-// A failure the provider could name reaches the CDR as that name. A failure it
-// could not is released exactly as it always was.
-//
-// Both halves matter. The caller is rescued the same way either way — nothing
-// about the release changes — but "the provider's session ran out of time" and
-// "the bot could not go on" are different answers to give whoever reads the
-// call afterwards, and a deployment whose calls keep outliving a cap can only
-// see that if the cause survives the trip out of the client.
-func TestAFailureSaysWhatTheProviderCalledIt(t *testing.T) {
+// A fatal provider error releases the caller and records the call as FAILED
+// with the media-or-provider cause.
+func TestAFatalProviderErrorIsRecordedAsAMediaOrProviderFailure(t *testing.T) {
 	for _, testCase := range []struct {
-		name  string
-		cause provider.FailureCause
-		want  string
+		name string
+		want string
 	}{
-		{"a failure with nothing to say for itself",
-			"", "MEDIA_OR_PROVIDER_FAILURE"},
-		{"a session the provider's own clock ended",
-			provider.FailureCauseSessionExpired, "PROVIDER_SESSION_EXPIRED"},
+		{"a failure", "MEDIA_OR_PROVIDER_FAILURE"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			session, _, model := startBridge(t, provider.OpenAIProfile())
@@ -502,7 +492,6 @@ func TestAFailureSaysWhatTheProviderCalledIt(t *testing.T) {
 			model.events <- provider.Event{
 				Type: provider.EventTypeError, IsFatal: true,
 				Text: "the session ended", Err: errors.New("the session ended"),
-				FailureCause: testCase.cause,
 			}
 
 			select {
@@ -1889,20 +1878,16 @@ func TestAClosingLineThatNeverFinishesPlayingStillEndsTheCall(t *testing.T) {
 	h.awaitCallEnded(t, lineDrainMargin)
 }
 
-// On doubao and gemini the line is its own turn, exactly as before: the tool
-// result carries the phase's instruction, and SpeakText says the line. On
-// doubao that path is exact by construction; a direction to a model is not. On
-// gemini the SpeakText after the result is what still says the line when the
-// model answers the result with nothing (gemini-findings W-G6).
-func TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore(t *testing.T) {
+// On doubao the line is its own turn: the tool result carries the phase's
+// instruction, and SpeakText says the line. That path is exact by construction;
+// a direction to a model is not.
+func TestAToolThatEndsTheCallOnDoubaoSpeaksTheLineAsItsOwnTurn(t *testing.T) {
 	for _, testCase := range []struct {
 		profile provider.Profile
 		lang    string
 	}{
 		{provider.DoubaoProfile(), "en"},
 		{provider.DoubaoProfile(), "zh"},
-		{provider.GeminiProfile(), "en"},
-		{provider.GeminiProfile(), "zh"},
 	} {
 		t.Run(testCase.profile.Name+"/"+testCase.lang, func(t *testing.T) {
 			lang := testCase.lang
@@ -1953,7 +1938,7 @@ func TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore(t *testing.T)
 // what it does to the turns after it has not been measured.
 func TestAToolThatMovesIntoALineThatIsNotTheEndIsUnchanged(t *testing.T) {
 	for _, profile := range []provider.Profile{
-		provider.OpenAIProfile(), provider.QwenProfile(), provider.GeminiProfile(),
+		provider.OpenAIProfile(), provider.QwenProfile(),
 		provider.DoubaoProfile(),
 	} {
 		t.Run(profile.Name, func(t *testing.T) {
@@ -2050,7 +2035,6 @@ const parallelToolsFlow = `{
 func TestTheSecondToolOfOneResponseIsNotRefusedByTheFirstsMove(t *testing.T) {
 	for _, profile := range []provider.Profile{
 		provider.OpenAIProfile(), provider.QwenProfile(), provider.DoubaoProfile(),
-		provider.GeminiProfile(),
 	} {
 		t.Run(profile.Name, func(t *testing.T) {
 			h := startToolPathWith(t, profile, "en", parallelToolsFlow)
@@ -2095,7 +2079,6 @@ func TestTheLastMoveOfOneResponseWins(t *testing.T) {
 		{provider.OpenAIProfile(), true},
 		{provider.QwenProfile(), true},
 		{provider.DoubaoProfile(), false},
-		{provider.GeminiProfile(), false},
 	} {
 		t.Run(testCase.profile.Name, func(t *testing.T) {
 			h := startToolPath(t, testCase.profile, "en")

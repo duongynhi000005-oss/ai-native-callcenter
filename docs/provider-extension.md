@@ -13,21 +13,16 @@ endpoint, a model, a dialect of the session payload, and a handful of
 behavioural traits discovered by calling them. A fourth that speaks the same
 protocol differs in exactly the same way.
 
-Only a different **protocol** earns another client, and two have. `doubao` is
-ByteDance's full-duplex dialogue API and `gemini` is Google's Live bidirectional
-API; `internal/provider/doubao` and `internal/provider/gemini` are the clients
-that speak them. That is the same rule applied rather than an exception to it —
-`internal/transcribe` has held two clients under the same sentence since it was
-written, for the same reason. A new *engine* on a protocol already spoken here
-is a profile; a new *grammar* is a client, and the test is lifecycle rather than
-field names. Doubao bootstraps its session and waits to be told it exists, has
-no way to ask for a turn, announces neither the start nor the end of the caller
-speaking, returns tool results as items with a role, and ends with a handshake.
-Gemini configures its session once and cannot change any of it while the
-connection is open, declares a turn over twice because the model stopping and
-the caller having heard it are different moments, offers no cancel at all, and
-reports errors only by closing the socket with a code. None of that is
-expressible as values in a `Profile`.
+Only a different **protocol** earns another client, and one has. `doubao` is
+ByteDance's full-duplex dialogue API, and `internal/provider/doubao` is the
+client that speaks it. That is the same rule applied rather than an exception
+to it — `internal/transcribe` has held two clients under the same sentence since
+it was written, for the same reason. A new *engine* on a protocol already spoken
+here is a profile; a new *grammar* is a client, and the test is lifecycle
+rather than field names. Doubao bootstraps its session and waits to be told it
+exists, has no way to ask for a turn, announces neither the start nor the end of
+the caller speaking, returns tool results as items with a role, and ends with a
+handshake. None of that is expressible as values in a `Profile`.
 
 Another client changes nothing above it. It lives in its own sub-package, it
 implements the same provider-neutral `VoiceSession`, and every event it produces
@@ -41,16 +36,12 @@ together is the abstraction layer this rule exists to prevent.
 Two of those shared pieces are worth their own sentence, because they are the
 shape sharing is allowed to take. `pacer` carries frames and names no protocol:
 a client hands it a function that turns a frame into bytes and a function that
-writes them, and keeps every decision about what the frames *say* — one takes a
-frame per tick because its engine reads the uplink as a clock, the other keeps a
-deep queue and drains it whole because writes to it were measured blocking for
-seconds at a time — where that happens is open (`gemini-findings.md` §2.5: the
-network path those measurements ran over was not a controlled condition) and the
-policy is right either way, since that engine accepts a burst and dropping the
-caller's words would buy nothing. `SayExactly` is a
-demand about a conversation rather than about a wire: say these words, add
+writes them, and keeps every decision about what the frames *say* — doubao takes
+a frame per tick because its engine reads the uplink as a clock. `SayExactly` is
+a demand about a conversation rather than about a wire: say these words, add
 nothing, in the language this session is being held in. Both are shared because
-the two clients mean the same thing by them, which is the only test.
+every client that uses them means the same thing by them, which is the only
+test.
 
 ## What a profile is
 
@@ -64,14 +55,14 @@ Every field of `provider.Profile` exists because a vendor forced it to
 | `Headers` | Anything the upgrade request needs beyond authorization |
 | `Style` | `GA` nests audio settings under `session.audio.input/output`; `BETA` is the older flat shape. Both are in the wild. |
 | `Voice` | The profile's default voice, used only when the flow does not name one |
-| `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours) and gemini (`setup.generationConfig.temperature`, range [0.0, 2.0], default undocumented for the Live model). False on openai (the GA `session` object has no such field), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
+| `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours). False on openai (the GA `session` object has no such field), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
 | `AcceptsG711` | Whether telephone audio passes through untouched. True removes conversion from the hot path entirely. |
 | `LinearInput` / `LinearOutput` | The PCM formats used when it does not. Fixed by the vendor, not negotiated. |
 | `CancelsResponseItself` | Whether it stops generating when it hears the caller, or has to be told |
 | `NeedsCueForFirstTurn` | Whether it refuses to speak into an empty conversation. Our bot greets first, so those providers need a synthetic cue. |
 | `NeedsDirectedLineInConversation` | Whether a mid-call line that *ends the call* (`SpeakText(text, isClosing=true)`) must also be put in the conversation as a caller message carrying the same `SayExactly` direction, ahead of the request that carries it as a per-response override. True on qwen, where the override alone lost to the conversation already there (qwen-findings W-Q1). A line the call goes on from keeps the override alone on every profile. |
 | `RequiresTerminalAnnounce` | Whether *no* text will make it take a turn. Stronger than the row above: a cue is something a client can invent, and this says there is no cue at all, so a phase the call stops at must carry its own words or the caller hears silence. A publish is refused otherwise. |
-| `PutsTerminalAnnounceInToolResult` | Whether a tool result that moves the call into a terminal phase with an `announce` carries the line as its hint (`SayExactly`), so the turn the result produces is the line, or carries the phase's instruction and has the line said with `SpeakText`. True on the Realtime profiles, where a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). False on doubao, whose `SpeakText` is exact by construction, and on gemini until a tool result it leaves unanswered is fixed (gemini-findings W-G6). |
+| `PutsTerminalAnnounceInToolResult` | Whether a tool result that moves the call into a terminal phase with an `announce` carries the line as its hint (`SayExactly`), so the turn the result produces is the line, or carries the phase's instruction and has the line said with `SpeakText`. True on the Realtime profiles, where a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). False on doubao, whose `SpeakText` is exact by construction. |
 | `SemanticTurnType`, `SemanticTurnSilenceMs` | The vendor's name for semantic turn detection, and the hold it forces in that mode regardless of what was asked |
 
 The last seven are the interesting ones. They are not configuration in any
@@ -80,21 +71,46 @@ behaved differently from the documentation, and each is a bug somewhere else in
 the call if it is wrong.
 
 A profile answered by a client other than the Realtime one fills in only what
-that client reads. `DoubaoProfile` and `GeminiProfile` both leave `Style`,
-`TranscribeModel`, `CancelsResponseItself`, `NeedsCueForFirstTurn`,
-`NeedsDirectedLineInConversation` and both semantic-turn fields at zero, and say so in their doc comments: a trait
-nothing reads is worse than an absent one, because the next person takes it for
-a statement about the vendor. `Headers` is the exception: both clients send
-its entries with the upgrade request, after their own API-key header, though
-neither profile sets any. `Model` is informational on both for the same
-reason — the version, or the model name, is a constant inside the client, and
-`AICC_PROVIDER_MODEL` cannot move it. Where the two differ is
-`RequiresTerminalAnnounce`: true on doubao, whose engine takes no text cue at
-all, and false on gemini, which speaks a line it is given the way the Realtime
-client's engines do. `PutsTerminalAnnounceInToolResult` is false on both, for
-different reasons: doubao's `SpeakText` commits text the engine synthesises,
-and gemini sometimes answers a tool result with nothing, which the `SpeakText`
-after it still covers (gemini-findings W-G6).
+that client reads. `DoubaoProfile` leaves `Style`, `TranscribeModel`,
+`CancelsResponseItself`, `NeedsCueForFirstTurn`,
+`NeedsDirectedLineInConversation` and both semantic-turn fields at zero, and
+says so in its doc comment: a trait nothing reads is worse than an absent one,
+because the next person takes it for a statement about the vendor. `Headers`
+is the exception: the doubao client sends its entries with the upgrade request,
+after its own API-key header, though the profile sets none. `Model` is
+informational for the same reason — the version is a constant inside the
+client, and `AICC_PROVIDER_MODEL` cannot move it. `RequiresTerminalAnnounce` is
+true on doubao, whose engine takes no text cue at all, and
+`PutsTerminalAnnounceInToolResult` is false on it, because its `SpeakText`
+commits text the engine synthesises.
+
+**Mid-call instructions (`UpdateInstructions`, an instructions-only
+`session.update`).** Qwen: MEASURED 2026-10-15 to be obeyed from the next reply,
+mid-reply included, with tools surviving (qwen-findings W-Q7; the doubao
+counterpart is doubao-findings W-D9). OpenAI (`gpt-realtime-2.1`, G.711 mu-law
+passthrough): MEASURED 2026-10-15 with the same test and arms,
+`TestLiveOpenAIMidCallInstructions`
+(`internal/provider/live_instructions_test.go`), three sessions per arm, 15 in
+all, no error frame and no close. Appended paragraph making every answer begin
+"好的，王先生":
+
+| Arm | Obeyed |
+|---|---|
+| Control, no update | marker in 0 of 9 replies |
+| Update while idle, then two questions | 6 of 6 (answer before the update plain 3 of 3) |
+| Update while the first answer was speaking, then two questions | 6 of 6; the spoken answer was not marked |
+| Tool control (no update) | `lookup_order` called 3 of 3 |
+| Tools declared at start, update adds the marker rule | tool called 3 of 3; reply after the result carries the marker 3 of 3 |
+
+Before the update: `我们的人工客服服务时间是工作日早上九点到晚上六点。…` After it:
+`好的，王先生，您可以通过 NovaNet 官网或 App 提交办理申请，也可以拨打客服热线由专员为您开通。…`
+Tools: `好的，王先生，我先去系统里查一下这个订单的状态。` then
+`lookup_order {"orderId":"12345"}`, then `好的，王先生，您的订单已发货，预计明天送达。`
+So an instructions-only update is a sufficient phase change on openai, mid-reply
+included, and tools survive it. NOT MEASURED, as on qwen: conflicting or repeated
+updates, a slot value recalled verbatim, an update late in a long call. Run
+with `-count=1`. Every engine this repository ships (openai, qwen, gateway, doubao) applies a
+mid-call instruction change at once; the provider layer assumes it.
 
 ## The steps
 
@@ -181,8 +197,8 @@ another service.
 
 **Another protocol on a whim.** A new client is a wire protocol's worth of
 lifecycle, failure modes and tests, verified against the live endpoint before a
-line of it is written. That two have now been admitted is not a precedent for a
-third: each was argued from lifecycle, against the real service, with the
+line of it is written. That one has been admitted is not a precedent for
+another: each was argued from lifecycle, against the real service, with the
 findings written down first. An engine that speaks none of the protocols here
 reaches a call through the Realtime gateway, which is what the gateway is for; a
 client of its own has to be worth that, and has to be decided rather than
@@ -190,11 +206,9 @@ drifted into.
 
 ## Attaching another protocol
 
-`AICC_PROVIDER=doubao` and `AICC_PROVIDER=gemini` are the two names here that
-select a client as well as a profile. What each costs, and what was measured to
-justify it, is written down in
-[doubao-findings](design/doubao-findings.md) and
-[gemini-findings](design/gemini-findings.md); what a deployment has to know is
+`AICC_PROVIDER=doubao` is the one name here that selects a client as well as a
+profile. What it costs, and what was measured to justify it, is written down in
+[doubao-findings](design/doubao-findings.md); what a deployment has to know is
 short.
 
 ```sh
@@ -216,36 +230,6 @@ all, because there is no goodbye cue to send. Doubao flows should set
 `closingTarget`, whose terminal phase already carries an `announce`. This is
 documented, not enforced at publish. An entry phase with no
 `announce` is legal and means the bot answers and waits for the caller to speak.
-
-```sh
-AICC_PROVIDER=gemini
-GEMINI_API_KEY=…                  # the vendor's own name for it
-AICC_TRANSCRIBE_PROVIDER=openai   # the human phase's recogniser is separate
-# AICC_PROVIDER_MODEL is ignored — the model name is pinned in the client
-# outbound access to generativelanguage.googleapis.com is required
-```
-
-Gemini asks nothing of a flow that the Realtime providers do not, and three
-things of a deployment. Voice names are this vendor's own, in `global.voice` as
-always. **The language the bot speaks is steered by the flow's instructions and
-by nothing else** — this session has no language field, and the native-audio
-models refuse to be told one — so a flow that wants Chinese asks for Chinese in
-its own words. And **the provider ends the connection** once its own session
-lifetime runs out, with the caller still on the line: there is no reconnect, the
-call is released with the hangup cause `PROVIDER_SESSION_EXPIRED`, and the
-caller is rescued to the DID's fallback queue. A deployment that puts long
-conversations behind this provider wants that queue to exist.
-That lifetime (about ten minutes) is shorter than a flow's default time limit
-(`global.maxDurationSec`, 900 seconds), so on gemini the provider, not the
-flow, ends a long call — without the wrap-up. A flow meant for gemini sets
-`maxDurationSec` below the lifetime (540, say) so the platform's own limit
-comes first.
-
-One consequence of the setup-once session is worth knowing before writing a
-flow for it: a phase change cannot be pushed to the model. It rides the next
-thing the client says — a tool result's hint, or the text cue a keypress or a
-silence produces — which is enough for the flows this repository ships and is
-the reason `gemini-findings.md` §2.6 exists.
 
 ## Attaching something that is not a vendor
 
@@ -304,8 +288,4 @@ It has never selected a provider and reintroducing that mapping is a regression
 (phase1-decisions A1). One provider answers every call in a deployment, chosen
 at startup, because the vendors that ship here are not all reachable with
 acceptable latency from the same network — `qwen` or `doubao` inside mainland
-China, `openai` or `gemini` elsewhere.
-
-On `gemini` this is more than a rule about routing: that session has no language
-field at all, so the DID's language reaches the model as words in its
-instructions and in nothing else.
+China, `openai` elsewhere.

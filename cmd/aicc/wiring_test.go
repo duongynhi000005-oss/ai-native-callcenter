@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,7 +18,6 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider/doubao"
-	"github.com/rasonyang/ai-native-callcenter/internal/provider/gemini"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcript"
 )
@@ -91,7 +92,7 @@ func TestAPlacedCallsLineIsReleasedOnFinishAndOnRetire(t *testing.T) {
 // What a deployment demands of a flow follows from what answers its calls.
 //
 // The three engines reached over the Realtime protocol can all be prompted into
-// a turn, and so can gemini, so none of them demands anything. Doubao cannot be,
+// a turn, so none of them demands anything. Doubao cannot be,
 // so every ending a call can stop at has to carry its own words — and a
 // deployment with the AI leg switched off demands nothing either, whatever
 // provider its configuration names: there is no session to have shortcomings.
@@ -106,8 +107,6 @@ func TestWhatAPublishMustSatisfyFollowsFromWhatAnswersTheCalls(t *testing.T) {
 		wantRules    int
 	}{
 		{"a provider that can be cued asks for nothing", true, provider.OpenAIProfile(), 0},
-		{"and a third protocol that can be cued asks for nothing either", true,
-			provider.GeminiProfile(), 0},
 		{"a provider that cannot needs every ending written", true, speaksOnDemand, 1},
 		{"with no AI leg there is nothing to satisfy", false, speaksOnDemand, 0},
 	} {
@@ -128,6 +127,17 @@ func TestAnUnknownProviderNameIsAStartupFailure(t *testing.T) {
 	t.Parallel()
 	if _, err := voiceProfile(config.Config{Provider: "nonesuch"}); err == nil {
 		t.Error("an unknown provider name was accepted")
+	}
+	// A deployment left over from the removed engine is refused with the
+	// values that do run, not started broken.
+	_, err := voiceProfile(config.Config{Provider: "gemini"})
+	if err == nil {
+		t.Fatal("the removed provider gemini was accepted")
+	}
+	for _, name := range []string{"openai", "qwen", "gateway", "doubao"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the refusal for gemini does not name %q: %v", name, err)
+		}
 	}
 	profile, err := voiceProfile(config.Config{
 		Provider: "openai", ProviderEndpoint: "wss://gateway.internal/realtime",
@@ -150,7 +160,6 @@ func TestAnUnknownProviderNameIsAStartupFailure(t *testing.T) {
 func TestTheProviderNameChoosesTheClient(t *testing.T) {
 	for _, keyEnv := range []string{
 		"OPENAI_API_KEY", "ALIYUN_API_KEY", "REALTIME_API_KEY", "DOUBAO_API_KEY",
-		"GEMINI_API_KEY",
 	} {
 		t.Setenv(keyEnv, "not-a-real-key")
 	}
@@ -160,7 +169,6 @@ func TestTheProviderNameChoosesTheClient(t *testing.T) {
 		want    provider.VoiceSession
 	}{
 		{provider.DoubaoProfile(), (*doubao.Session)(nil)},
-		{provider.GeminiProfile(), (*gemini.Session)(nil)},
 		{provider.OpenAIProfile(), (*provider.Realtime)(nil)},
 		{provider.QwenProfile(), (*provider.Realtime)(nil)},
 		{provider.GatewayProfile(), (*provider.Realtime)(nil)},
@@ -183,7 +191,7 @@ func TestTheProviderNameChoosesTheClient(t *testing.T) {
 // has nothing to be told.
 func TestAMissingProviderKeyIsReportedByTheNameItsClientReads(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{provider.NameOpenAI, provider.NameQwen, provider.NameGateway, provider.NameDoubao, provider.NameGemini} {
+	for _, name := range []string{provider.NameOpenAI, provider.NameQwen, provider.NameGateway, provider.NameDoubao} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			profile, err := provider.ProfileFor(name, provider.Override{})
@@ -215,6 +223,53 @@ func TestAMissingProviderKeyIsReportedByTheNameItsClientReads(t *testing.T) {
 			}
 			if reportMissingProviderKey(log, profile, set) || buf.Len() != 0 {
 				t.Errorf("a key that is set was reported: %q", buf.String())
+			}
+		})
+	}
+}
+
+// A deployment left over from the removed Gemini provider names it in .env (with
+// its key still set) or in the real environment. Neither may crash the loader:
+// both come out as the same refusal at startup, naming the values that run.
+func TestAGeminiDeploymentIsRefusedWithTheAcceptedValuesFromEnvOrDotEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"a real environment variable", func(t *testing.T) {
+			t.Setenv("AICC_PROVIDER", "gemini")
+		}},
+		{"a .env file", func(t *testing.T) {
+			dir := t.TempDir()
+			dotEnv := "GEMINI_API_KEY=not-a-real-key\nAICC_PROVIDER=gemini\n"
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(dotEnv), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(dir)
+			// loadDotEnv lets the real environment win, so make sure it is unset.
+			t.Setenv("AICC_PROVIDER", "")
+			if err := os.Unsetenv("AICC_PROVIDER"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+			if cfg.Provider != "gemini" {
+				t.Fatalf("Provider = %q, want gemini", cfg.Provider)
+			}
+			_, err = voiceProfile(cfg)
+			if err == nil {
+				t.Fatal("the removed provider gemini was accepted")
+			}
+			for _, name := range []string{"openai", "qwen", "gateway", "doubao"} {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("the refusal does not name %q: %v", name, err)
+				}
 			}
 		})
 	}

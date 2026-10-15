@@ -269,14 +269,6 @@ env_merge "$env"
 eq 'gateway: endpoint' "$(env_get "$env" AICC_PROVIDER_ENDPOINT)" wss://gw.example.com/v1/realtime
 eq 'gateway: key' "$(env_get "$env" REALTIME_API_KEY)" sk-test
 
-# gemini: key.
-env="$TMP/gemini.env"
-PROVIDER=gemini
-PROVIDER_KEY_VAR=GEMINI_API_KEY
-env_merge "$env"
-eq 'gemini: provider' "$(env_get "$env" AICC_PROVIDER)" gemini
-eq 'gemini: key' "$(env_get "$env" GEMINI_API_KEY)" sk-test
-
 # env_set on a value with a slash, an @ and an =.
 env_set "$env" X 'a/b@c=d'
 eq 'env_set keeps the value verbatim' "$(env_get "$env" X)" 'a/b@c=d'
@@ -284,8 +276,22 @@ eq 'env_set keeps the value verbatim' "$(env_get "$env" X)" 'a/b@c=d'
 # --------------------------------------------------------------- arguments ----
 
 eq 'parse_args: --provider=' "$(parse_args --provider=none --yes && echo "$PROVIDER_FLAG $ASSUME_YES")" 'none 1'
-eq 'parse_args: --provider gemini' "$(parse_args --provider gemini && echo "$PROVIDER_FLAG")" gemini
-eq 'provider_key_var: gemini' "$(provider_key_var gemini)" GEMINI_API_KEY
+eq 'parse_args: --provider doubao' "$(parse_args --provider doubao && echo "$PROVIDER_FLAG")" doubao
+eq 'provider_key_var: doubao' "$(provider_key_var doubao)" DOUBAO_API_KEY
+notok 'parse_args: the removed provider is not a choice' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --provider gemini" 2>/dev/null
+eq 'provider_key_var: the removed provider has none' "$(provider_key_var gemini)" ''
+
+# A kept .env that still names the removed provider stops the rerun with the
+# accepted values rather than starting a broken stack.
+env="$TMP/kept-removed.env"
+printf 'AICC_PROVIDER=gemini\nGEMINI_API_KEY=old-key\n' >"$env"
+out=$(sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; ENV_FILE='$env'; PROVIDER_FLAG=''; resolve_provider" 2>&1) && status=0 || status=$?
+eq 'kept .env naming the removed provider: the rerun stops' "$status" 1
+case $out in
+*'accepted: openai, qwen, gateway, doubao'*) accepted=yes ;;
+*) accepted=no ;;
+esac
+eq 'kept .env naming the removed provider: names the accepted values' "$accepted" yes
 notok 'parse_args: bad provider' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --provider bogus" 2>/dev/null
 notok 'parse_args: bad address' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --external-ip 1.2.3" 2>/dev/null
 notok 'parse_args: --purge alone' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --purge" 2>/dev/null

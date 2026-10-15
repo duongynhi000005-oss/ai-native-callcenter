@@ -61,9 +61,8 @@ func (b sessionBudget) since(answeredAt, now time.Time) sessionBudget {
 //
 // Through its standing instructions, not a turn of its own: the moment is
 // arbitrary, and a cue asking for a turn would collide with one in progress
-// (refused on the Realtime providers, cutting the bot off on gemini, and
-// refused outright on doubao). The instructions carry it from here on, so a
-// later phase change keeps it; on gemini it lands with the next turn.
+// (refused on the Realtime providers and refused outright on doubao). The instructions carry it from here on, so a
+// later phase change keeps it.
 func (o *Orchestrator) handleWrapUpDue(ctx context.Context, session *Session, runtime *flow.Runtime,
 	actions *callActions, deadline time.Time, log *slog.Logger) {
 
@@ -182,8 +181,7 @@ func (o *Orchestrator) askForTheHandover(session *Session, actions *callActions,
 // askForTheGoodbye asks the model for the goodbye of a call the limit closed
 // with no line of its own. A client that cannot be asked ends it at once, and
 // so does a bot that never gave up the floor: the cue asks for a turn the
-// provider refuses (gemini answers by cutting the bot off), so the armed
-// hangup runs now. A closing phase's announce is not this: a line pre-empts.
+// provider refuses, so the armed hangup runs now. A closing phase's announce is not this: a line pre-empts.
 //
 // Doubao is the same: it takes no text cue, so a flow with no closing phase
 // (global.closingTarget) is hung up with no line at the limit. Doubao flows

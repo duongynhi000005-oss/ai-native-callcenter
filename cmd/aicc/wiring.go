@@ -22,7 +22,6 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider/doubao"
-	"github.com/rasonyang/ai-native-callcenter/internal/provider/gemini"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcript"
@@ -504,15 +503,13 @@ func botUAS(cfg config.Config, slots *voice.BotSlots) voice.Config {
 //
 // Every other name is a dialect of the Realtime protocol and reaches the one
 // client that speaks it, which is the rule this file has always followed; the
-// switch has a case per protocol, not per vendor, and it has two because two
-// other protocols are spoken here.
+// switch has a case per protocol, not per vendor, and it has one because one
+// other protocol is spoken here.
 func voiceSession(profile provider.Profile, log *slog.Logger) (provider.VoiceSession, error) {
 	obs.RecordProviderSessionStarted(profile.Name)
 	switch profile.Name {
 	case provider.NameDoubao:
 		return doubao.New(profile, log)
-	case provider.NameGemini:
-		return gemini.New(profile, log)
 	default:
 		return provider.New(profile, log)
 	}
@@ -528,7 +525,7 @@ func voiceSession(profile provider.Profile, log *slog.Logger) (provider.VoiceSes
 // without this the process logs a healthy start, and the first sign of trouble
 // is a caller hearing hold music, because the orchestrator hands a call whose
 // session cannot open to the number's fallback queue. The variable comes from
-// the profile, which is where every client (Realtime, doubao, gemini) looks.
+// the profile, which is where every client (Realtime, doubao) looks.
 func reportMissingProviderKey(log *slog.Logger, profile provider.Profile, getenv func(string) string) bool {
 	if profile.APIKeyEnv == "" || getenv(profile.APIKeyEnv) != "" {
 		return false

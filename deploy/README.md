@@ -54,9 +54,9 @@ allowing the stack's ports ([Ports and firewall](#ports-and-firewall)).
   interface, skipping loopback, link-local and TUN-proxy addresses
   (198.18.0.0/15). Pass `--external-ip <ip>` when the inference is wrong or
   phones reach the host through NAT.
-- The voice provider (`--provider openai|qwen|gateway|doubao|gemini|none`) and
+- The voice provider (`--provider openai|qwen|gateway|doubao|none`) and
   its key. The key is read from the environment (`OPENAI_API_KEY`,
-  `ALIYUN_API_KEY` for qwen, `DOUBAO_API_KEY`, `GEMINI_API_KEY`,
+  `ALIYUN_API_KEY` for qwen, `DOUBAO_API_KEY`,
   `REALTIME_API_KEY` plus `AICC_PROVIDER_ENDPOINT` for gateway) or asked for at
   the terminal with the input hidden. With `sudo`, keep an exported key with
   `sudo -E`. `none` runs without a bot: calls to the bot numbers go to their
@@ -79,7 +79,7 @@ would have had to ask for.
 
 | Option | Meaning |
 |---|---|
-| `--provider P` | `openai`, `qwen`, `gateway`, `doubao`, `gemini` or `none`. Only a first install chooses; later runs keep what `.env` names |
+| `--provider P` | `openai`, `qwen`, `gateway`, `doubao` or `none`. Only a first install chooses; later runs keep what `.env` names |
 | `--external-ip IP` | The address phones reach this host at. On a rerun, rewrites the address in `.env` |
 | `--version TAG` | The release to install. Default: the release the script came from |
 | `--no-demo` | Do not seed the demo dataset (`AICC_SEED` empty). Use it for production |
@@ -585,20 +585,14 @@ AICC_TRANSCRIBE_ENDPOINT=wss://<workspace-id>.cn-beijing.maas.aliyuncs.com/api-w
 
 **Voice provider.** One provider answers every call, chosen at startup. A
 call's language does not select it. `AICC_PROVIDER` takes `openai`, `qwen`,
-`gateway`, `doubao` or `gemini`, each with its own credential.
+`gateway` or `doubao`, each with its own credential.
 
-- `doubao` uses `DOUBAO_API_KEY` (ByteDance full-duplex dialogue API); `gemini`
-  uses `GEMINI_API_KEY` (Google Live API).
-- On `doubao` and `gemini`, the client pins the model, so `AICC_PROVIDER_MODEL`
+- `doubao` uses `DOUBAO_API_KEY` (ByteDance full-duplex dialogue API).
+- On `doubao`, the client pins the model, so `AICC_PROVIDER_MODEL`
   is ignored. If transcription is on, set `AICC_TRANSCRIBE_PROVIDER` (also
   required on `gateway`).
 - On `doubao`, every terminal phase of a flow needs an `announce`; publishing a
   flow without one is refused.
-- On `gemini`, allow outbound access to `generativelanguage.googleapis.com`,
-  and give every DID a fallback queue. Gemini closes the connection when its
-  session lifetime runs out and the application does not reconnect: the call is
-  released with hangup cause `PROVIDER_SESSION_EXPIRED` and the caller goes to
-  the queue.
 
 See [the provider notes](../docs/provider-extension.md).
 
