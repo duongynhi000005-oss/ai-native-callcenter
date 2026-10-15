@@ -1512,7 +1512,7 @@ type CDR struct {
 	RingSec   int       `json:"ringSec"`
 	StartedAt time.Time `json:"startedAt"`
 
-	// Status How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first.
+	// Status How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first. BUSY is an unanswered outbound call whose callee released the dialled leg with USER_BUSY; every other unanswered call, including a decline reported as CALL_REJECTED, is NO_ANSWER.
 	Status CDRStatus `json:"status"`
 
 	// TalkSec Seconds an agent had two-way media with the caller, measured from the bridges on the agent legs and unioned across them, so a call passed from one agent to another counts both stretches once. A leg that answered without a bridge — an auto-answer phone in front of nobody, a codec mismatch — contributes nothing. Hold counts as talk.
@@ -1551,7 +1551,7 @@ type CDRList struct {
 	Total int `json:"total"`
 }
 
-// CDRStatus How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first.
+// CDRStatus How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first. BUSY is an unanswered outbound call whose callee released the dialled leg with USER_BUSY; every other unanswered call, including a decline reported as CALL_REJECTED, is NO_ANSWER.
 type CDRStatus string
 
 // CallList defines model for CallList.

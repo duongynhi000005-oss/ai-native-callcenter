@@ -2495,7 +2495,7 @@ export interface components {
             deletedKeys: string[];
         };
         /**
-         * @description How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first.
+         * @description How the call concluded. There is no MISSED status: abandonment is a missedReason on an ANSWERED row, because the bot answered first. BUSY is an unanswered outbound call whose callee released the dialled leg with USER_BUSY; every other unanswered call, including a decline reported as CALL_REJECTED, is NO_ANSWER.
          * @enum {string}
          */
         CDRStatus: "ANSWERED" | "NO_ANSWER" | "BUSY" | "FAILED";

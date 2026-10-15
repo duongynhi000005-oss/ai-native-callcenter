@@ -424,6 +424,9 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 
 	default:
 		cdr.Status = store.CDRStatusNoAnswer
+		if calleeWasBusy(snap, originator, dialled, placed) {
+			cdr.Status = store.CDRStatusBusy
+		}
 		cdr.MissedReason = a.missedReason(snap, agentLegs)
 		cdr.RingSec = ringSpan(agentLegs)
 	}
@@ -768,6 +771,39 @@ func buildLegs(snap Snapshot, originator *PartySnapshot, agentLegs []*PartySnaps
 		legs = append(legs, store.Leg{Kind: "DIALING", Label: originator.Number})
 	}
 	return legs
+}
+
+// causeUserBusy is the switch's release cause for a callee whose line is in
+// use, which is also what most networks report when a mobile declines.
+// CALL_REJECTED is deliberately not counted: it is not a statement that the
+// line was in use (#180).
+const causeUserBusy = "USER_BUSY"
+
+// calleeWasBusy reports whether an unanswered outbound call ended because the
+// person dialled was busy. It refines the unanswered branch and is never asked
+// of an answered call, so a later leg releasing USER_BUSY cannot undo an
+// answer.
+//
+// The cause that counts is the one on the leg that went out towards the
+// callee. On a call this platform placed that is the originator, because we
+// created the customer's leg. On a call an agent placed it is a dialled leg:
+// the originator is the agent's own leg, which auto-answers in front of them
+// and releases with whatever ended their side, so its cause says nothing about
+// the far end. Inbound calls never qualify: an agent leg releasing USER_BUSY
+// in a queue is a missed delivery, not a busy caller.
+func calleeWasBusy(snap Snapshot, originator *PartySnapshot, dialled []*PartySnapshot, placed bool) bool {
+	if snap.CallType != events.CallTypeOutbound || originator == nil {
+		return false
+	}
+	if !placed {
+		return originator.ReleaseCause == causeUserBusy
+	}
+	for _, leg := range dialled {
+		if leg.AnsweredAt == nil && leg.ReleaseCause == causeUserBusy {
+			return true
+		}
+	}
+	return false
 }
 
 // dialledLegs are the legs a call reached out to that are nobody's agent:
