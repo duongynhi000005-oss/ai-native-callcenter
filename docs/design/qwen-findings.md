@@ -884,3 +884,69 @@ OpenAI documents the event. Covered by
 `TestACancelledResponseKeepsACallThatFinished`,
 `TestACallFinishedByCallIDAloneIsKept`, `TestACompletedResponseDeletesNothing`
 and `TestARefusedDeleteIsNotAnError` in `internal/provider/realtime_test.go`.
+
+## W-Q7: a mid-call instructions-only update is obeyed (2026-10-15)
+
+**W-Q7 — `Realtime.UpdateInstructions` on qwen is obeyed from the next reply,
+including when sent while a reply is being spoken, and the tools survive.
+MEASURED, 2026-10-15, for an appended style directive.** The row in the
+measurement table of the first section ("Mid-call `session.update` with
+`instructions` only → `session.updated`") recorded only that the server answers;
+this measures that the model acts on it.
+
+**Method.** `TestLiveQwenMidCallInstructions`
+(`internal/provider/live_instructions_test.go`), through the product client
+(`provider.New(QwenProfile())`, `Start`, `SendAudio`, `UpdateInstructions`,
+`SendToolResult`), model `qwen-audio-3.1-realtime-plus`, default endpoint,
+`ALIYUN_API_KEY`. The standing instructions are a persona; the update is the
+same persona plus one appended paragraph, the way a flow changes phase,
+requiring every answer to begin with "好的，王先生" (a phrase the model never
+says unprompted). The caller's questions are synthesized speech (qwen3-tts-flash,
+voice Cherry; `testdata/q_*.pcm`, 16 kHz mono PCM16, which is this profile's
+`LinearInput`, so no conversion) streamed at real-time pace in 20 ms frames
+between stretches of room tone. Three sessions per arm, 15 sessions in all, the
+same arms and clips as doubao W-D9 so the two compare directly. Replies are the
+final `EventTypeOutputTranscript`s of each turn.
+
+| Arm | Obeyed |
+|---|---|
+| **Control**: no update, three questions | marker in **0 of 9** replies |
+| Update while idle, after the first answer; then two more questions | **6 of 6**: the first reply after the update and the next one; the answer before the update was plain in 3 of 3 |
+| Update sent while the first answer was still being spoken; then two more questions | **6 of 6**; the answer being spoken was not cut and carried no marker (3 of 3); every later one did |
+| **Tool control**: `lookup_order` declared at start, no update, the order question | tool called **3 of 3** with no instruction at all |
+| **Tools**: tool declared at start; the update adds the marker rule and "call `lookup_order` on an order question" | tool called **3 of 3**; the reply after the tool result carries the marker **3 of 3** |
+
+Every `session.update` was answered with `session.updated`; no error frame, no
+close, no turn-detection complaint in any of the 15 sessions. The server
+returned no session id that the client surfaces (`session.created` is dropped by
+`handle`), so there are none to quote.
+
+Quoted. Control, third question: `资费会根据您选择的套餐带宽和签约时长有所不同，
+通常每月在几十到几百元不等。` Idle #1, before the update: `我们的客服工作时间是早上
+9点到晚上6点。` after it: `好的，王先生，您可以登录我们的官网在线办理，或者携带身份证
+前往附近的营业厅办理。` then `好的，王先生，资费根据您的具体需求和套餐类型有所不同…`.
+Speaking #3, the answer spoken during the update: `我们的客服全天 24 小时在线，随时
+为您提供服务。` the next: `好的，王先生，您可以通过我们的官方网站或前往线下营业厅办理
+宽带业务。` Tools #2: before the call `好的，王先生，我马上为您查询订单 12345 的状态。`,
+tool call `lookup_order {"orderId": "12345"}`, after the result `好的，王先生，您的订单
+12345 已发货，预计明天送达。` The tool control's post-result reply was plain
+(`您的订单 12345 已发货，预计明天送达。`).
+
+**Consequences.**
+
+- An instructions-only update is a sufficient phase change on qwen: it takes
+  effect at the next reply and keeps over the following turn, mid-reply
+  included. No full `session.update` is needed, which matters because a full one
+  would re-assert turn detection.
+- **Tools survive an instructions-only update**: the tool declared at start was
+  still called afterwards. The tool control shows the order question calls it
+  without any instruction, so the tools arm proves survival, not that the phase
+  paragraph caused the call.
+- The line before a tool call also follows the new instructions, as on doubao.
+
+**NOT MEASURED**: a long or conflicting instruction (a second update that
+contradicts the first), many updates in one session, an update carrying a slot
+value the model must recall verbatim (the marker is a style rule, the easiest
+kind of instruction to check), an update late in a long call when the provider
+trims its own history, and a phase paragraph that competes with a tool result's
+hint.

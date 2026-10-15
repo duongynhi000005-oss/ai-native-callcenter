@@ -96,6 +96,16 @@ different reasons: doubao's `SpeakText` commits text the engine synthesises,
 and gemini sometimes answers a tool result with nothing, which the `SpeakText`
 after it still covers (gemini-findings W-G6).
 
+**Mid-call instructions (`UpdateInstructions`, an instructions-only
+`session.update`).** Qwen: MEASURED 2026-10-15 to be obeyed from the next reply,
+mid-reply included, with tools surviving (qwen-findings W-Q7; the doubao
+counterpart is doubao-findings W-D9). OpenAI: NOT MEASURED. The same test,
+`TestLiveOpenAIMidCallInstructions` (`internal/provider/live_instructions_test.go`),
+is written and gated but could not run on 2026-10-15: the keys available were
+rejected by the endpoint (`expired_secret_key` for the environment's, then
+`invalid_api_key` for the checkout's `.env`). Run it with a working
+`OPENAI_API_KEY` and `-count=1` to fill this in; three sessions per arm.
+
 ## The steps
 
 1. **Verify against the real endpoint first.** Everything above is
