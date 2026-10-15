@@ -41,7 +41,7 @@ func goldenConfig() SessionConfig {
 		Instructions: "You answer the phone for NovaNet.",
 		// No voice: the profile's own is the one that has to reach the wire.
 		Language: "en",
-		Turn:     TurnDetection{SilenceMs: 500, Threshold: 0.5},
+		Turn:     DefaultTurnDetection(),
 		Tools: []ToolSpec{{
 			Name:        "lookup_balance",
 			Description: "Read the caller's balance.",

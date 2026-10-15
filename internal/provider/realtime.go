@@ -893,9 +893,6 @@ func (r *Realtime) buildTurnDetection(turn TurnDetection) any {
 	if turn.SilenceMs > 0 {
 		detection["silence_duration_ms"] = turn.SilenceMs
 	}
-	if turn.Threshold > 0 {
-		detection["threshold"] = turn.Threshold
-	}
 	return detection
 }
 

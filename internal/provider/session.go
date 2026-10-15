@@ -177,9 +177,6 @@ type TurnDetection struct {
 	// SilenceMs is how long a pause ends a turn. It is the single biggest
 	// knob in the response-latency budget.
 	SilenceMs int
-	// Threshold is the speech-detection sensitivity; zero uses the provider's
-	// own default.
-	Threshold float64
 }
 
 // DefaultTurnDetection is what a flow gets unless it says otherwise.
