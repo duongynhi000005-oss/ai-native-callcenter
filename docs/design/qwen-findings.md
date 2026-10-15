@@ -199,7 +199,7 @@ history as caller speech — and whether that trade is worth making mid-call is
 open.
 
 *Update 2026-09-23.* The tool-result half was since fixed by carrying the line
-in the result (A5c, `PutsTerminalAnnounceInToolResult`). The half with no tool
+in the result (A5c, then the profile capability `PutsTerminalAnnounceInToolResult`, since collapsed into the negation of `RequiresTerminalAnnounce`, #225). The half with no tool
 result to carry it — a dead-air move into a terminal phase, and the
 `maxTurnsWithoutTool` wall — still went through `SpeakText` with the override
 alone, and failed again on live call `01a0cbb9-3f93-702d-8c62-7536378c1b93`
@@ -637,7 +637,7 @@ result's hint — the new phase's preamble and instruction — with
 `provider.SayExactly(line, language)`, re-pins the instructions and arms the
 ending, and only then answers the tool; no `SpeakText` follows, so the turn the
 result produces is the line. The gate is a new profile capability,
-`PutsTerminalAnnounceInToolResult`: true on the Realtime profiles only — openai,
+`PutsTerminalAnnounceInToolResult` (since collapsed into the negation of `RequiresTerminalAnnounce`, #225): true on the Realtime profiles only — openai,
 qwen and gateway. Doubao and Google Live (then a client) kept today's path exactly (the phase's
 instruction as the hint, the answer, the instructions, then `SpeakText`), for
 different reasons. Doubao's `SpeakText` is exact by construction, which a

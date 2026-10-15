@@ -52,7 +52,6 @@ Every field of `provider.Profile` exists because a vendor forced it to
 |---|---|
 | `Name`, `Endpoint`, `Model` | Who this is and where it answers. Both are overridable per deployment. |
 | `APIKeyEnv` | The environment variable the credential comes from — the vendor's own name for it, not an `AICC_*` setting |
-| `Headers` | Anything the upgrade request needs beyond authorization |
 | `Style` | `GA` nests audio settings under `session.audio.input/output`; `BETA` is the older flat shape. Both are in the wild. |
 | `Voice` | The profile's default voice, used only when the flow does not name one |
 | `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours). False on openai (the GA `session` object has no such field), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
@@ -61,11 +60,9 @@ Every field of `provider.Profile` exists because a vendor forced it to
 | `CancelsResponseItself` | Whether it stops generating when it hears the caller, or has to be told |
 | `NeedsCueForFirstTurn` | Whether it refuses to speak into an empty conversation. Our bot greets first, so those providers need a synthetic cue. |
 | `NeedsDirectedLineInConversation` | Whether a mid-call line that *ends the call* (`SpeakText(text, isClosing=true)`) must also be put in the conversation as a caller message carrying the same `SayExactly` direction, ahead of the request that carries it as a per-response override. True on qwen, where the override alone lost to the conversation already there (qwen-findings W-Q1). A line the call goes on from keeps the override alone on every profile. |
-| `RequiresTerminalAnnounce` | Whether *no* text will make it take a turn. Stronger than the row above: a cue is something a client can invent, and this says there is no cue at all, so a phase the call stops at must carry its own words or the caller hears silence. A publish is refused otherwise. |
-| `PutsTerminalAnnounceInToolResult` | Whether a tool result that moves the call into a terminal phase with an `announce` carries the line as its hint (`SayExactly`), so the turn the result produces is the line, or carries the phase's instruction and has the line said with `SpeakText`. True on the Realtime profiles, where a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). False on doubao, whose `SpeakText` is exact by construction. |
-| `SemanticTurnType`, `SemanticTurnSilenceMs` | The vendor's name for semantic turn detection, and the hold it forces in that mode regardless of what was asked |
+| `RequiresTerminalAnnounce` | Whether the engine speaks only words it is handed: *no* text will make it take a turn. Stronger than the row above: a cue is something a client can invent, and this says there is no cue at all, so a phase the call stops at must carry its own words or the caller hears silence, and a publish is refused otherwise (`flow.RequireTerminalAnnounce`, `TERMINAL_ANNOUNCE_REQUIRED`). The same capability decides how the closing line travels. Where it is true (doubao) a tool result that moves the call into a terminal phase carries the phase's instruction and the line is said with `SpeakText`, which is exact by construction; the session limit also has no cue to ask for a goodbye or handover with. Where it is false (openai, qwen, gateway) the tool result carries the line as its hint (`SayExactly`), so the turn the result produces is the line, because a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). |
 
-The last seven are the interesting ones. They are not configuration in any
+The last five are the interesting ones. They are not configuration in any
 meaningful sense — they are findings. Each was written down after a live call
 behaved differently from the documentation, and each is a bug somewhere else in
 the call if it is wrong.
@@ -73,15 +70,12 @@ the call if it is wrong.
 A profile answered by a client other than the Realtime one fills in only what
 that client reads. `DoubaoProfile` leaves `Style`, `TranscribeModel`,
 `CancelsResponseItself`, `NeedsCueForFirstTurn`,
-`NeedsDirectedLineInConversation` and both semantic-turn fields at zero, and
+`NeedsDirectedLineInConversation` at zero, and
 says so in its doc comment: a trait nothing reads is worse than an absent one,
-because the next person takes it for a statement about the vendor. `Headers`
-is the exception: the doubao client sends its entries with the upgrade request,
-after its own API-key header, though the profile sets none. `Model` is
+because the next person takes it for a statement about the vendor. `Model` is
 informational for the same reason — the version is a constant inside the
 client, and `AICC_PROVIDER_MODEL` cannot move it. `RequiresTerminalAnnounce` is
-true on doubao, whose engine takes no text cue at all, and
-`PutsTerminalAnnounceInToolResult` is false on it, because its `SpeakText`
+true on doubao, whose engine takes no text cue at all and whose `SpeakText`
 commits text the engine synthesises.
 
 **Mid-call instructions (`UpdateInstructions`, an instructions-only
