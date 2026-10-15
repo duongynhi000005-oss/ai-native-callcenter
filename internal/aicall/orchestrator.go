@@ -657,8 +657,8 @@ const hangupCauseMediaOrProvider = "MEDIA_OR_PROVIDER_FAILURE"
 // not under the previous record's.
 //
 // One move is answered differently: into a terminal phase that has a line of
-// its own, on a profile that puts that line in the tool result
-// (every profile that does not set Profile.RequiresTerminalAnnounce — the Realtime ones). There the
+// its own, on a profile that puts that line in the tool result (any profile
+// without Profile.RequiresTerminalAnnounce — the Realtime ones). There the
 // tool result's hint IS the line — SayExactly in place of the new phase's
 // instruction — and the turn the result produces is the line's turn; nothing
 // else is asked for. Asking for the line in a turn of its own on top of the
