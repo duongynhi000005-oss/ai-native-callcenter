@@ -625,7 +625,7 @@ for the error frame and once for the session end it causes; one session that
 ended badly should be one.
 
 **W-D9 — a mid-call instruction change is obeyed (issue #13). MEASURED,
-2026-10-15; closed as a fact, with one edge left.**
+2026-10-15, for an appended style directive; the edges below are open.**
 `Session.UpdateInstructions` sends a full `session.update` (instructions plus
 every tool, since tools are a full overwrite here). The live server accepted it
 in every session (no error frame, no close) and applied it to the dialogue
@@ -675,10 +675,11 @@ speaking `20261015125818D9A720519D48F3DDB3FE` `202610151258414C814F5D34A0FA384EE
   it means to repeat.
 
 **Consequence for slots (issue #13) and phase changes.** On doubao the re-pin is
-no longer merely sent: a fact recorded by a slot tool and rendered into the
-instructions reaches the very next reply, and it persists over the following
-turn. A phase change by appended paragraph takes effect at once, including when
-sent mid-reply. The slot is still exact for templates and HTTP bodies, as before.
+no longer merely sent: the server applies new instructions from the very next
+reply and keeps them over the following turn. A phase change by appended
+paragraph takes effect at once, including when sent mid-reply. Whether a slot
+value rendered into the instructions is then recalled verbatim was not measured
+(below). The slot is still exact for templates and HTTP bodies, as before.
 Gemini (gemini-findings §2.6) is the client where the re-pin is genuinely late.
 
 **NOT MEASURED**: a long or conflicting instruction (a second update that

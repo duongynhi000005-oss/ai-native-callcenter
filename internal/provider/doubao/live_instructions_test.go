@@ -29,9 +29,8 @@ import (
 // here is the same persona plus a paragraph that makes the model begin every
 // answer with a marker it would never say on its own. The provider takes no
 // text user turns, so the caller's questions are synthesized speech
-// (testdata/q_*.pcm, 16 kHz mono PCM16, macOS `say -v Tingting`) streamed at
-// real-time pace between stretches of room tone, which is what lets the
-// server's VAD end each turn.
+// (testdata/q_*.pcm, 16 kHz mono PCM16) streamed at real-time pace between
+// stretches of room tone, which is what lets the server's VAD end each turn.
 //
 // The clips were generated on 2026-10-15 with Aliyun qwen TTS (model
 // qwen3-tts-flash, voice Cherry, language_type Chinese, DashScope
@@ -44,9 +43,10 @@ import (
 // the model is silent, then two more questions: immediacy and persistence),
 // speaking (update sent while the model is still talking, then two more
 // questions), tools-control (no update; does the order question call the tool
-// on its own) and tools (update adds the marker rule and tells the model to call lookup_order on an
-// order question, and the reply after the tool result must carry the marker; the tool was declared at session start, so a lost tool shows
-// as no call).
+// on its own) and tools (the update adds the marker rule and tells the model
+// to call lookup_order on an order question, and the reply after the tool
+// result must carry the marker; the tool was declared at session start, so a
+// tool lost to the overwrite shows as no call).
 //
 // The assertions encode what was measured on 2026-10-15 (see W-D9): the control
 // never carries the marker, and every post-update reply in the update arms
