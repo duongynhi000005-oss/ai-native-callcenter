@@ -76,8 +76,6 @@ type Event struct {
 	ToolName   string
 	ToolArgs   string
 
-	Status string
-	Usage  provider.Usage
 	// Unplayed is, on a BARGE_IN, how much of the bot's audio was still queued
 	// for the caller when they took the floor. Read before the flush empties
 	// the queue; the armed ending needs it to tell an acknowledgement of the
@@ -485,8 +483,8 @@ func (s *Session) Wait() { s.wg.Wait() }
 //
 
 // AnswerTool replies to a tool call and steers the next turn.
-func (s *Session) AnswerTool(toolCallID, output, hint string) error {
-	if err := s.model.SendToolResult(toolCallID, output, hint); err != nil {
+func (s *Session) AnswerTool(toolCallID, output string) error {
+	if err := s.model.SendToolResult(toolCallID, output); err != nil {
 		return err
 	}
 	s.askedForATurn()
@@ -709,16 +707,14 @@ func (s *Session) handleModelEvent(event provider.Event) {
 				"reason", string(event.InterruptedBy), "playedMs", playedMs)
 			s.tellTheModelWhatWasHeard(event.InterruptedBy, playedMs)
 		}
-		s.emit(Event{Type: EventTypeTurnDone, Status: event.Status,
-			Usage: event.Usage, Turn: s.currentTurn(), IsInterrupted: true})
+		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn(), IsInterrupted: true})
 
 	case provider.EventTypeResponseStarted:
 		s.beginTurn()
 
 	case provider.EventTypeResponseDone:
 		s.endTurn()
-		s.emit(Event{Type: EventTypeTurnDone, Status: event.Status,
-			Usage: event.Usage, Turn: s.currentTurn()})
+		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn()})
 
 	case provider.EventTypeInputTranscript:
 		s.emit(Event{Type: EventTypeCustomerSaid, Text: event.Text, IsFinal: event.IsFinal})

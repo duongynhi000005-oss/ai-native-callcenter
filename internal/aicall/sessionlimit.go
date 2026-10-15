@@ -61,8 +61,8 @@ func (b sessionBudget) since(answeredAt, now time.Time) sessionBudget {
 //
 // Through its standing instructions, not a turn of its own: the moment is
 // arbitrary, and a cue asking for a turn would collide with one in progress
-// (refused on the Realtime providers and refused outright on doubao). The instructions carry it from here on, so a
-// later phase change keeps it.
+// (refused on the Realtime providers and refused outright on doubao). The
+// instructions carry it from here on, so a later phase change keeps it.
 func (o *Orchestrator) handleWrapUpDue(ctx context.Context, session *Session, runtime *flow.Runtime,
 	actions *callActions, deadline time.Time, log *slog.Logger) {
 

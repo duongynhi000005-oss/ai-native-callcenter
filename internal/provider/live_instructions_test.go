@@ -122,7 +122,7 @@ func runMidCall(t *testing.T, profile Profile) {
 					for _, call := range reply.tools {
 						toolCalls++
 						t.Logf("[%s #%d] ask %d TOOL_CALL %s %s", a.name, run, i+1, call.ToolName, call.ToolArgs)
-						if err := c.session.SendToolResult(call.ToolCallID, `{"status":"已发货，预计明天送达"}`, ""); err != nil {
+						if err := c.session.SendToolResult(call.ToolCallID, `{"status":"已发货，预计明天送达"}`); err != nil {
 							t.Fatalf("send tool result: %v", err)
 						}
 					}

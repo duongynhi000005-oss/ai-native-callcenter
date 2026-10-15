@@ -410,7 +410,7 @@ func TestTheLimitWaitsForTheBotToFinishItsTurn(t *testing.T) {
 		t.Fatalf("cues = %v, want none while the bot holds the floor", cues)
 	}
 
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	waitFor(t, "the handover cue", func() bool { return len(h.model.recordedUserText()) == 1 })
 	if got := h.sw.variable("aicc_bot_reason"); got != "SESSION_LIMIT" {
 		t.Errorf("aicc_bot_reason = %q, want SESSION_LIMIT", got)
@@ -586,7 +586,7 @@ func TestASentToolResultHoldsTheFloorUntilTheAnswerTurnBegins(t *testing.T) {
 		t.Fatal("holding the floor before anything was asked")
 	}
 
-	if err := h.session.AnswerTool("call-1", `{"ok":1}`, ""); err != nil {
+	if err := h.session.AnswerTool("call-1", `{"ok":1}`); err != nil {
 		t.Fatal(err)
 	}
 	if !h.session.isHoldingTheFloor() {
@@ -594,7 +594,7 @@ func TestASentToolResultHoldsTheFloorUntilTheAnswerTurnBegins(t *testing.T) {
 	}
 
 	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, h.session, EventTypeTurnDone)
 	h.session.mu.Lock()
 	owed := h.session.turnOwedUntil
@@ -634,7 +634,7 @@ func TestAnOwedTurnThatNeverComesStopsHoldingTheFloor(t *testing.T) {
 // and acts only once the caller has heard it.
 func TestTheLimitWaitsThroughTheGapAfterAToolResult(t *testing.T) {
 	h, _ := driveHarness(t, sessionBudget{limitAfter: 40 * time.Millisecond, floorWait: time.Minute})
-	if err := h.session.AnswerTool("call-1", `{"ok":1}`, ""); err != nil {
+	if err := h.session.AnswerTool("call-1", `{"ok":1}`); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(150 * time.Millisecond)
@@ -648,7 +648,7 @@ func TestTheLimitWaitsThroughTheGapAfterAToolResult(t *testing.T) {
 	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 	h.model.events <- provider.Event{Type: provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples)}
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	waitFor(t, "the handover cue", func() bool { return len(h.model.recordedUserText()) == 1 })
 	if got := h.sw.variable("aicc_bot_reason"); got != "SESSION_LIMIT" {
 		t.Errorf("aicc_bot_reason = %q, want SESSION_LIMIT", got)
@@ -668,6 +668,6 @@ func TestAStalePlaybackDoneDoesNotEnforceTheLimitOverANewTurn(t *testing.T) {
 		t.Fatalf("cues = %v, want none: a new turn holds the floor", cues)
 	}
 
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	waitFor(t, "the handover cue", func() bool { return len(h.model.recordedUserText()) == 1 })
 }

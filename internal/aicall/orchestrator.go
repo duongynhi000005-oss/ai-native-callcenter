@@ -657,8 +657,8 @@ const hangupCauseMediaOrProvider = "MEDIA_OR_PROVIDER_FAILURE"
 // not under the previous record's.
 //
 // One move is answered differently: into a terminal phase that has a line of
-// its own, on a profile that puts that line in the tool result
-// (Profile.PutsTerminalAnnounceInToolResult — the Realtime ones). There the
+// its own, on a profile that puts that line in the tool result (any profile
+// without Profile.RequiresTerminalAnnounce — the Realtime ones). There the
 // tool result's hint IS the line — SayExactly in place of the new phase's
 // instruction — and the turn the result produces is the line's turn; nothing
 // else is asked for. Asking for the line in a turn of its own on top of the
@@ -710,7 +710,7 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 				batch.lineOwedIn = moved
 			}
 		}
-		if err := session.AnswerTool(event.ToolCallID, output, ""); err != nil {
+		if err := session.AnswerTool(event.ToolCallID, output); err != nil {
 			log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
 		}
 		return
@@ -733,7 +733,7 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 	// and no playback would ever count.
 	o.enterPhase(moved, session, runtime, actions, log)
 	log.Info("the tool's answer asks for the phase's own line", "node", moved)
-	if err := session.AnswerTool(event.ToolCallID, output, ""); err != nil {
+	if err := session.AnswerTool(event.ToolCallID, output); err != nil {
 		log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
 	}
 }
@@ -744,7 +744,7 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 // profile that puts that line in the result. See answerToolCall.
 func (o *Orchestrator) isLineTheToolAnswer(moved string, runtime *flow.Runtime) bool {
 	return moved != "" &&
-		o.cfg.Profile.PutsTerminalAnnounceInToolResult &&
+		!o.cfg.Profile.RequiresTerminalAnnounce &&
 		runtime.Engine().IsTerminal() &&
 		runtime.Announce() != ""
 }

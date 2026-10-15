@@ -120,7 +120,7 @@ func TestLiveDoubaoMidCallInstructions(t *testing.T) {
 					for _, call := range reply.tools {
 						toolCalls++
 						t.Logf("[%s #%d] ask %d TOOL_CALL %s %s", a.name, run, i+1, call.ToolName, call.ToolArgs)
-						_ = r.session.SendToolResult(call.ToolCallID, `{"status":"已发货，预计明天送达"}`, "")
+						_ = r.session.SendToolResult(call.ToolCallID, `{"status":"已发货，预计明天送达"}`)
 					}
 					afterText := ""
 					if len(reply.tools) > 0 {

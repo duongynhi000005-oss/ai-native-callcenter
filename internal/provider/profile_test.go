@@ -182,30 +182,26 @@ func TestTheLinearProfilesReachTheCallerBothWays(t *testing.T) {
 }
 
 // How each engine delivers a closing line is a profile trait (table in
-// docs/provider-extension.md). Only doubao makes a flow's terminal phases carry
-// their own words: nothing its client sends makes that engine speak, and
-// turning the rule on elsewhere would refuse flows that run perfectly well at
-// publish. Only the Realtime profiles answer a tool result that ends the call
-// with the closing line itself (W-Q1, A5c): off for a Realtime profile puts the
-// line back in a turn of its own, which qwen measured at 0 of 7; on for doubao
-// trades an exact line for a best-effort one.
+// docs/provider-extension.md), and it is one capability. Only doubao makes a
+// flow's terminal phases carry their own words: nothing its client sends makes
+// that engine speak, and turning the rule on elsewhere would refuse flows that
+// run perfectly well at publish. The same capability decides how the line
+// travels: where it is off (the Realtime profiles) a tool result that ends the
+// call carries the closing line itself (W-Q1, A5c) and a turn of its own
+// measured 0 of 7 on qwen; on for doubao, the line keeps its own SpeakText.
 func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 	for _, tt := range []struct {
-		profile                            Profile
-		requiresAnnounce, lineInToolResult bool
+		profile          Profile
+		requiresAnnounce bool
 	}{
-		{OpenAIProfile(), false, true},
-		{QwenProfile(), false, true},
-		{GatewayProfile(), false, true},
-		{DoubaoProfile(), true, false},
+		{OpenAIProfile(), false},
+		{QwenProfile(), false},
+		{GatewayProfile(), false},
+		{DoubaoProfile(), true},
 	} {
 		if got := tt.profile.RequiresTerminalAnnounce; got != tt.requiresAnnounce {
 			t.Errorf("%s: RequiresTerminalAnnounce = %v, want %v",
 				tt.profile.Name, got, tt.requiresAnnounce)
-		}
-		if got := tt.profile.PutsTerminalAnnounceInToolResult; got != tt.lineInToolResult {
-			t.Errorf("%s: PutsTerminalAnnounceInToolResult = %v, want %v",
-				tt.profile.Name, got, tt.lineInToolResult)
 		}
 	}
 }

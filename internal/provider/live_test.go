@@ -114,7 +114,7 @@ func probe(t *testing.T, profile Profile, instructions string, listenFor time.Du
 					result.heard += event.Text
 				}
 			case EventTypeResponseDone:
-				t.Logf("turn finished: status=%q usage=%+v", event.Status, event.Usage)
+				t.Logf("turn finished")
 			case EventTypeError:
 				t.Logf("provider error (fatal=%v): %v", event.IsFatal, event.Err)
 				if event.IsFatal {

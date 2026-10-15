@@ -49,12 +49,12 @@ type VoiceSession interface {
 	// as surely as if they had said it.
 	SendUserText(text string) error
 
-	// SendToolResult answers a tool call. hint steers the next turn: it is
-	// what the engine wants said or done next, and it reaches the model
-	// alongside the result rather than as a separate instruction.
+	// SendToolResult answers a tool call. What the engine wants said or done
+	// next is already part of output: the caller of this method merges it in
+	// (MergeHint) so it reaches the model as part of what it just learned.
 	//
 	// toolCallID identifies the model's function call, not the telephone call.
-	SendToolResult(toolCallID, output, hint string) error
+	SendToolResult(toolCallID, output string) error
 
 	// UpdateInstructions replaces the standing instructions mid-call, which is
 	// how flow state and collected facts are re-pinned as a conversation moves
@@ -123,11 +123,6 @@ type SessionConfig struct {
 	Language string
 	Turn     TurnDetection
 	Tools    []ToolSpec
-	// GreetingCue prompts the opening turn on providers that will not speak
-	// into an empty conversation. It is a stage direction, not something the
-	// caller said, and it is never recorded as caller speech. Empty uses a
-	// default in the session's language.
-	GreetingCue string
 	// OpeningText is what the bot says at the start of the call: not a brief
 	// for a greeting but the greeting, in the words the flow chose. Empty
 	// leaves the opening to the model, which is what every call did before
@@ -174,35 +169,19 @@ func AwaitOpeningGate(ctx context.Context, gate <-chan struct{}, closed <-chan s
 	}
 }
 
-// TurnMode is how the end of the caller's turn is decided.
-type TurnMode string
-
-const (
-	// TurnModeVAD ends a turn after a fixed silence. This is the default for
-	// both languages: it is the only mode that meets the latency budget.
-	TurnModeVAD TurnMode = "VAD"
-	// TurnModeSemantic waits for the utterance to sound complete. It ignores
-	// backchannels, at a cost of well over a second of added turn latency on
-	// at least one provider. Only the Realtime client maps it, and nothing
-	// selects it today: no flow field or setting asks for it, and every call
-	// runs DefaultTurnDetection.
-	TurnModeSemantic TurnMode = "SEMANTIC"
-)
-
-// TurnDetection configures turn taking.
+// TurnDetection configures turn taking. Every call ends a caller's turn after
+// a fixed silence (server-side VAD): it is the only mode that meets the latency
+// budget. Semantic turn detection was removed with no flow field or setting
+// asking for it; it comes back with a measured reason.
 type TurnDetection struct {
-	Mode TurnMode
 	// SilenceMs is how long a pause ends a turn. It is the single biggest
 	// knob in the response-latency budget.
 	SilenceMs int
-	// Threshold is the speech-detection sensitivity; zero uses the provider's
-	// own default.
-	Threshold float64
 }
 
 // DefaultTurnDetection is what a flow gets unless it says otherwise.
 func DefaultTurnDetection() TurnDetection {
-	return TurnDetection{Mode: TurnModeVAD, SilenceMs: 500}
+	return TurnDetection{SilenceMs: 500}
 }
 
 // ToolSpec is a function the model may call.
@@ -269,11 +248,6 @@ type Event struct {
 	ToolName   string
 	ToolArgs   string
 
-	// Status is the provider's own word for how a response ended
-	// (EventTypeResponseDone).
-	Status string
-	Usage  Usage
-
 	// InterruptedBy says what cut a response short (EventTypeInterrupted).
 	InterruptedBy InterruptReason
 
@@ -282,12 +256,4 @@ type Event struct {
 	// rather than retried.
 	Err     error
 	IsFatal bool
-}
-
-// Usage is what a turn cost, for budget tracking on providers that cap a
-// session by turns or by audio duration rather than by wall-clock time.
-type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
 }

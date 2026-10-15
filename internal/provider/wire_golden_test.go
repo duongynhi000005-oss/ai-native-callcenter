@@ -41,7 +41,7 @@ func goldenConfig() SessionConfig {
 		Instructions: "You answer the phone for NovaNet.",
 		// No voice: the profile's own is the one that has to reach the wire.
 		Language: "en",
-		Turn:     TurnDetection{Mode: TurnModeVAD, SilenceMs: 500, Threshold: 0.5},
+		Turn:     DefaultTurnDetection(),
 		Tools: []ToolSpec{{
 			Name:        "lookup_balance",
 			Description: "Read the caller's balance.",
@@ -52,16 +52,13 @@ func goldenConfig() SessionConfig {
 	}
 }
 
-// goldenProfiles are the two dialects, each carrying a header of its own so the
-// handshake assertion has something profile-shaped to find.
+// goldenProfiles are the two dialects.
 func goldenProfiles() []struct {
 	name    string
 	profile Profile
 } {
 	openai := OpenAIProfile()
-	openai.Headers = map[string]string{"X-Aicc-Dialect": "ga"}
 	qwen := QwenProfile()
-	qwen.Headers = map[string]string{"X-Aicc-Dialect": "beta"}
 	return []struct {
 		name    string
 		profile Profile
@@ -91,13 +88,10 @@ func TestTheFramesOfAWholeCallAreWhatTheyWere(t *testing.T) {
 			}
 			awaitFrames(t, f, sent)
 
-			// The credential and the profile's headers ride the upgrade.
+			// The credential rides the upgrade.
 			handshake := f.handshake()
 			if got := handshake.Get("Authorization"); got != "Bearer test-key" {
 				t.Errorf("Authorization = %q, want the credential", got)
-			}
-			if got := handshake.Get("X-Aicc-Dialect"); got != profile.Headers["X-Aicc-Dialect"] {
-				t.Errorf("X-Aicc-Dialect = %q, want the profile's own header", got)
 			}
 
 			// The bot starts speaking and the caller talks over it.
@@ -161,8 +155,8 @@ func TestTheFramesOfAWholeCallAreWhatTheyWere(t *testing.T) {
 				"response": map[string]any{"status": "completed"}})
 			awaitEvent(t, session, EventTypeResponseDone)
 
-			if err := session.SendToolResult("call-7", `{"balance":"12.50"}`,
-				"Tell the caller the balance, then offer to close."); err != nil {
+			if err := session.SendToolResult("call-7", MergeHint(`{"balance":"12.50"}`,
+				"Tell the caller the balance, then offer to close.")); err != nil {
 				t.Fatalf("send tool result: %v", err)
 			}
 			sent += 2

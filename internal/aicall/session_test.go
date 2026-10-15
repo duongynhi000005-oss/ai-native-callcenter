@@ -168,7 +168,7 @@ type fakeModel struct {
 	calls []string
 }
 
-type toolResult struct{ id, output, hint string }
+type toolResult struct{ id, output string }
 type interrupt struct {
 	reason   provider.InterruptReason
 	playedMs int
@@ -205,7 +205,7 @@ func (m *fakeModel) SendUserText(text string) error {
 	return nil
 }
 
-func (m *fakeModel) SendToolResult(id, output, hint string) error {
+func (m *fakeModel) SendToolResult(id, output string) error {
 	m.mu.Lock()
 	onToolResult := m.onToolResult
 	m.mu.Unlock()
@@ -215,7 +215,7 @@ func (m *fakeModel) SendToolResult(id, output, hint string) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.toolResults = append(m.toolResults, toolResult{id, output, hint})
+	m.toolResults = append(m.toolResults, toolResult{id, output})
 	m.calls = append(m.calls, "SendToolResult")
 	return nil
 }
@@ -446,7 +446,7 @@ func TestTheTailOfATurnIsPaddedAndSent(t *testing.T) {
 
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 	model.events <- provider.Event{Type: provider.EventTypeAudioDelta, Audio: make([]byte, 40)}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -533,12 +533,12 @@ func TestAProviderInitiatedCancelStopsPlayback(t *testing.T) {
 		Audio: make([]byte, media.FrameSamples*3),
 	}
 	model.events <- provider.Event{
-		Type: provider.EventTypeInterrupted, Status: "cancelled",
+		Type: provider.EventTypeInterrupted,
 	}
 
 	event := awaitBridgeEvent(t, session, EventTypeTurnDone)
-	if event.Status != "cancelled" {
-		t.Errorf("status = %q, want the turn reported as cut short", event.Status)
+	if !event.IsInterrupted {
+		t.Error("want the turn reported as cut short")
 	}
 	if leg.clears() == 0 {
 		t.Error("playback continued after the provider abandoned the turn")
@@ -565,7 +565,7 @@ func TestSpeechOverTheTailOfAFinishedTurnStillTrimsTheHistory(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples*8),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
 	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
@@ -598,7 +598,7 @@ func TestAProviderInitiatedCancelStillReportsWhatWasHeard(t *testing.T) {
 		Audio: make([]byte, media.FrameSamples*8),
 	}
 	model.events <- provider.Event{
-		Type: provider.EventTypeInterrupted, Status: "cancelled",
+		Type: provider.EventTypeInterrupted,
 	}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -630,7 +630,7 @@ func TestABargeInOverAQueuedButUnheardTurnReportsZeroHeard(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples*8),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
 	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
@@ -656,7 +656,7 @@ func TestAProviderCancelOverAnUnheardTurnReportsZeroHeard(t *testing.T) {
 		Audio: make([]byte, media.FrameSamples*8),
 	}
 	model.events <- provider.Event{
-		Type: provider.EventTypeInterrupted, Status: "cancelled",
+		Type: provider.EventTypeInterrupted,
 	}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -675,7 +675,7 @@ func TestAProviderCancelOfATurnWithNoQueuedAudioSaysNothing(t *testing.T) {
 
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 	model.events <- provider.Event{
-		Type: provider.EventTypeInterrupted, Status: "cancelled",
+		Type: provider.EventTypeInterrupted,
 	}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -702,7 +702,7 @@ func TestTheProvidersOwnCancelAfterABargeInSaysNothingTwice(t *testing.T) {
 	awaitBridgeEvent(t, session, EventTypeBargeIn)
 
 	model.events <- provider.Event{
-		Type: provider.EventTypeInterrupted, Status: "cancelled",
+		Type: provider.EventTypeInterrupted,
 	}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -933,7 +933,7 @@ func TestPlaybackCompletionIsReportedSeparatelyFromGeneration(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples*5),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
@@ -962,7 +962,7 @@ func TestAnInterruptedTurnReportsNoPlaybackCompletion(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples*5),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 
 	// The caller cuts in before the queue drains. Speech over the tail is an
@@ -1002,7 +1002,7 @@ func TestDeadAirIsReportedWhenTheCallerSaysNothing(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 
 	awaitBridgeEvent(t, session, EventTypePlaybackDone)
 	awaitBridgeEvent(t, session, EventTypeNoInput)
@@ -1020,7 +1020,7 @@ func TestACallerWhoSpeaksCancelsTheDeadAirWatch(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypePlaybackDone)
 
 	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
@@ -1123,7 +1123,7 @@ func speakTurn(model *fakeModel, frames int) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples*frames),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 }
 
 // awaitFramesSent waits until the leg has been handed n frames in all.
@@ -1323,7 +1323,7 @@ func TestTurnLatencyIsMeasuredFromSpeechStoppedToFirstFrame(t *testing.T) {
 	session.mu.Unlock()
 
 	// A real turn: the caller speaks, stops, and the reply reaches the wire.
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
 	model.events <- provider.Event{Type: provider.EventTypeSpeechStopped}
 	time.Sleep(30 * time.Millisecond) // measurable latency
@@ -1507,13 +1507,13 @@ func TestAStaleInterruptDoesNotEndTheCurrentTurn(t *testing.T) {
 
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
-	model.events <- provider.Event{Type: provider.EventTypeInterrupted, Status: "cancelled"}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 	if !responding() {
 		t.Fatal("a stale interruption ended the turn now being generated")
 	}
 
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 	if responding() {
 		t.Error("the current turn's own end did not clear it")
@@ -1526,7 +1526,7 @@ func TestAnInterruptOfTheOnlyOpenTurnEndsIt(t *testing.T) {
 	awaitBridgeEvent(t, session, EventTypeReady)
 
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
-	model.events <- provider.Event{Type: provider.EventTypeInterrupted, Status: "cancelled"}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 	session.mu.Lock()
 	defer session.mu.Unlock()
@@ -1641,8 +1641,7 @@ func TestAudioOfAResponseThatWasCutOffIsNotPlayed(t *testing.T) {
 	model.events <- provider.Event{
 		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeInterrupted,
-		Status: "cancelled", InterruptedBy: provider.InterruptReasonDTMF}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted, InterruptedBy: provider.InterruptReasonDTMF}
 	awaitBridgeEvent(t, session, EventTypeTurnDone)
 	model.events <- provider.Event{
 		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),

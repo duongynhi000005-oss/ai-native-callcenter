@@ -397,9 +397,6 @@ func TestAnAbandonedTurnIsClosedOut(t *testing.T) {
 	if events[1].IsFatal {
 		t.Error("an abandoned turn ended the session; the next turn is still possible")
 	}
-	if got := events[2].Status; got != provider.StatusStalled {
-		t.Errorf("the abandoned turn ended with status %q, want %q", got, provider.StatusStalled)
-	}
 	refuteMoreEvents(t, session)
 }
 

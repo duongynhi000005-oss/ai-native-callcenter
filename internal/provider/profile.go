@@ -27,8 +27,6 @@ type Profile struct {
 	Model    string
 	// APIKeyEnv is where the credential comes from.
 	APIKeyEnv string
-	// Headers are sent with the upgrade request, beyond authorization.
-	Headers map[string]string
 
 	Style sessionStyle
 	Voice string
@@ -81,41 +79,33 @@ type Profile struct {
 	// already pays: the direction enters the history as caller text.
 	NeedsDirectedLineInConversation bool
 
-	// RequiresTerminalAnnounce means no text this client sends will make the
-	// engine take a turn, so the words of a phase the call does not leave have
-	// to come from the flow itself.
+	// RequiresTerminalAnnounce says the engine speaks only words it is handed:
+	// no text this client sends makes it take a turn, so a phase the call does
+	// not leave has to carry its own words (a flow without them is refused at
+	// publish, flow.RequireTerminalAnnounce), and those words reach the caller
+	// as SpeakText, in a turn of their own.
 	//
-	// It is stronger than NeedsCueForFirstTurn and not the same thing: that one
-	// says a cue is needed to START a conversation, and a cue is something this
-	// client can invent. This one says there is no cue at all — the engine
-	// speaks when it is given words, and a terminal phase with none is a caller
-	// listening to silence.
+	// It is one capability with two faces. For a flow: a terminal phase needs an
+	// announce. For the closing path: the line is committed with SpeakText, so
+	// a tool result that moves the call into the terminal phase carries only the
+	// phase's instruction, and there is no text cue to ask for a goodbye or a
+	// handover with (session limit). Where it is false the engine takes a text
+	// cue, and a tool result that moves the call into a terminal phase with a
+	// line of its own carries that line as its hint (SayExactly) — the turn the
+	// result produces is the line, and no SpeakText follows. Asking for the line
+	// in a turn of its own on top of the result measured 0 of 7 on qwen, because
+	// the model follows the tool result it has just read over a per-response
+	// override (docs/design/qwen-findings.md, W-Q1). Doubao's SpeakText commits
+	// text the engine synthesises and is exact by construction; a direction to a
+	// model is not.
 	//
-	// True on one profile here, doubao: every other engine this build speaks to
-	// takes a text cue. A flow is refused at publish rather than at load
-	// because of exactly that, the rule belongs to the deployment and not to
-	// the dialect (flow.RequireTerminalAnnounce).
+	// Stronger than NeedsCueForFirstTurn and not the same thing: that one says a
+	// cue is needed to START a conversation, and a cue is something this client
+	// can invent. This one says there is no cue at all.
+	//
+	// True on one profile here, doubao. A flow is refused at publish rather than
+	// at load because the rule belongs to the deployment and not to the dialect.
 	RequiresTerminalAnnounce bool
-
-	// PutsTerminalAnnounceInToolResult means a tool result that moves the call
-	// into a terminal phase with a line of its own carries that line as its
-	// hint (SayExactly), and the turn the result produces is the line: no
-	// SpeakText follows. Where it is false the result carries the new phase's
-	// instruction and SpeakText says the line in a turn of its own, as every
-	// other move does.
-	//
-	// True on the Realtime profiles (openai, qwen, gateway). There asking for
-	// the line in a turn of its own on top of the result measured 0 of 7 on
-	// qwen, because the model follows the tool result it has just read over a
-	// per-response override (docs/design/qwen-findings.md, W-Q1).
-	//
-	// False on doubao, whose SpeakText commits text the engine synthesises and
-	// is exact by construction; a direction to a model is not.
-	//
-	// Not RequiresTerminalAnnounce: that one says whether a flow may leave a
-	// terminal phase wordless, this one says how the words it did write reach
-	// the caller after a tool call.
-	PutsTerminalAnnounceInToolResult bool
 
 	// AcceptsTemperature means the session configuration has a sampling
 	// temperature field and this client sends SessionConfig.Temperature in it.
@@ -124,12 +114,6 @@ type Profile struct {
 	// no sampling parameter at all. Sending it anyway risks a rejected
 	// session.update, which costs the whole session.
 	AcceptsTemperature bool
-
-	// SemanticTurnType is this vendor's name for semantic turn detection.
-	SemanticTurnType string
-	// SemanticTurnSilenceMs is the hold the vendor forces in that mode,
-	// overriding any configured value. Zero means it honours the request.
-	SemanticTurnSilenceMs int
 }
 
 // OpenAIProfile is the provider used outside mainland China.
@@ -156,10 +140,6 @@ func OpenAIProfile() Profile {
 		LinearInput:           media.PCM16Format(media.RateProviderOut),
 		LinearOutput:          media.PCM16Format(media.RateProviderOut),
 		CancelsResponseItself: true,
-		// A line is a direction to the model, never audio handed over, and
-		// best said in the turn the tool result produces (W-Q1).
-		PutsTerminalAnnounceInToolResult: true,
-		SemanticTurnType:                 "semantic_vad",
 	}
 }
 
@@ -206,14 +186,6 @@ func QwenProfile() Profile {
 		// the conversation already there (W-Q1, and a dead-air goodbye on live
 		// call 01a0cbb9-…); the opening turn, told both ways, did not.
 		NeedsDirectedLineInConversation: true,
-		// A line asked for in a turn of its own after a tool result lost to
-		// the result 0 of 7 times; carried in the result, 7 of 7 (W-Q1).
-		PutsTerminalAnnounceInToolResult: true,
-		SemanticTurnType:                 "smart_turn",
-		// Selecting semantic turns here rewrites the silence hold to two
-		// seconds and ignores any attempt to lower it, which is why that mode
-		// is opt-in rather than the default.
-		SemanticTurnSilenceMs: 2000,
 	}
 }
 
@@ -264,10 +236,6 @@ func GatewayProfile() Profile {
 		// accepts — the refusal that forces a cue on Qwen's own realtime
 		// dialect does not exist here.
 		NeedsCueForFirstTurn: false,
-		// A line is a direction to whatever the gateway composes, never text
-		// this client can make it synthesise — the same wire as openai.
-		PutsTerminalAnnounceInToolResult: true,
-		SemanticTurnType:                 "semantic_vad",
 	}
 }
 
@@ -277,10 +245,10 @@ func GatewayProfile() Profile {
 // It is therefore the one profile whose values do not all mean what they mean
 // above: everything the Realtime client alone reads — Style,
 // TranscribeModel, CancelsResponseItself, NeedsCueForFirstTurn,
-// NeedsDirectedLineInConversation and the two semantic-turn fields — is left
+// NeedsDirectedLineInConversation — is left
 // at zero, because the client that answers for this name
 // (internal/provider/doubao) reads none of them. What it does read is the name,
-// the endpoint, the credential, any extra Headers, the voice and the two audio
+// the endpoint, the credential, the voice and the two audio
 // formats.
 // Model is informational for the same reason: that protocol's version is a
 // constant inside its client and AICC_PROVIDER_MODEL cannot move it.
@@ -289,9 +257,8 @@ func GatewayProfile() Profile {
 // This engine answers audio and nothing else — no text this client sends makes
 // it take a turn — so a phase the call never leaves has to carry its own words
 // or the caller hears silence, and a flow without them is refused at publish.
-// PutsTerminalAnnounceInToolResult is false for the related reason: the words a
-// phase does carry are given to the engine as text to synthesise, not as a
-// direction to a model, so they keep their own SpeakText.
+// The words a phase does carry are given to the engine as text to synthesise,
+// not as a direction to a model, so they keep their own SpeakText.
 func DoubaoProfile() Profile {
 	return Profile{
 		Name:     NameDoubao,
@@ -306,14 +273,13 @@ func DoubaoProfile() Profile {
 		// Telephone audio is refused: this endpoint takes linear 16-bit PCM at
 		// 16 kHz up and returns it at 24 kHz, both fixed rather than
 		// negotiated, so both directions convert.
-		AcceptsG711:              false,
-		LinearInput:              media.PCM16Format(media.RateProviderIn),
-		LinearOutput:             media.PCM16Format(media.RateProviderOut),
-		RequiresTerminalAnnounce: true,
+		AcceptsG711:  false,
+		LinearInput:  media.PCM16Format(media.RateProviderIn),
+		LinearOutput: media.PCM16Format(media.RateProviderOut),
 		// SpeakText commits the line as text the engine synthesises
 		// (speech_text_buffer.commit), so it is said as written; a tool result
 		// keeps the phase's instruction and the line keeps SpeakText.
-		PutsTerminalAnnounceInToolResult: false,
+		RequiresTerminalAnnounce: true,
 		// No TranscribeModel, and as on qwen that is the finding rather than an
 		// omission: this engine transcribes the caller unprompted, and its
 		// session payload has no field to ask for it in.
