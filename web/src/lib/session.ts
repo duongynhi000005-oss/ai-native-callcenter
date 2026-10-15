@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 
 import { ApiError, api, type Identity } from './api'
 import { usePhoneBridge } from './phone-bridge'
@@ -26,6 +26,15 @@ export function useSession() {
   })
 }
 
+/**
+ * The session is over: forget the user, and with them every cache that was
+ * theirs, so whoever signs in next in this tab starts from nothing.
+ */
+export function clearSession(queryClient: QueryClient) {
+  queryClient.setQueryData(SESSION_KEY, null)
+  void queryClient.invalidateQueries()
+}
+
 export function useLogin() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -41,6 +50,11 @@ export function useLogin() {
  * Signing out, phone included.
  *
  * The extension is told to drop the credentials, and then the session ends.
+ * The bridge latches on that: from here it sends no hello and mints nothing,
+ * since the bridge stays enabled until the session is cleared and a hello in
+ * that window would bring the widget back onto the sign-in page. (A session
+ * that ends any other way is deprovisioned by the bridge itself when it stops
+ * being enabled or unmounts.)
  * Revoking the SIP session is the server's part of signing out: it signs the
  * agent out of presence first and only then revokes the session and flushes
  * the registration, so the phone disappearing is no longer news — an agent
@@ -60,9 +74,7 @@ export function useLogout() {
       await api.logout()
     },
     onSuccess: () => {
-      queryClient.setQueryData(SESSION_KEY, null)
-      // Session-scoped caches must not survive a user switch.
-      void queryClient.invalidateQueries()
+      clearSession(queryClient)
     },
   })
 }

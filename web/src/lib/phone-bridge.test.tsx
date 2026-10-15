@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { StrictMode } from 'react'
 import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -1026,5 +1027,114 @@ describe('what the page knows about the extension', () => {
       })
       expect(postMessage).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('when the bridge stops having a phone', () => {
+  function posted(type: string) {
+    return postMessage.mock.calls.filter((call) => (call[0] as { type?: string }).type === type)
+  }
+
+  /** A bridge whose `enabled` the test can change, optionally under StrictMode. */
+  function renderToggle(initial: boolean, { strict = false } = {}) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+    })
+    const tree = (enabled: boolean) => {
+      const inner = (
+        <QueryClientProvider client={queryClient}>
+          <Host enabled={enabled} myExtension={MY_EXTENSION} />
+        </QueryClientProvider>
+      )
+      return strict ? <StrictMode>{inner}</StrictMode> : inner
+    }
+    const view = render(tree(initial))
+    return { ...view, setEnabled: (enabled: boolean) => view.rerender(tree(enabled)) }
+  }
+
+  it('deprovisions once when enabled goes false', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const view = renderToggle(true)
+    view.setEnabled(false)
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(1)
+  })
+
+  it('says nothing for a bridge that was never enabled, or that did not change', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const view = renderToggle(false)
+    view.setEnabled(false)
+    view.unmount()
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(0)
+
+    const second = renderToggle(false)
+    second.setEnabled(true)
+    second.setEnabled(true)
+    act(() => {
+      vi.advanceTimersByTime(1)
+    })
+    expect(posted('deprovision')).toHaveLength(0)
+  })
+
+  it('deprovisions once when it unmounts while enabled', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const view = renderToggle(true)
+    view.unmount()
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(1)
+  })
+
+  it('does not mistake StrictMode simulated unmount for a real one', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const view = renderToggle(true, { strict: true })
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(0)
+    expect(posted('hello').length).toBeGreaterThan(0)
+    view.unmount()
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(1)
+  })
+
+  it('stays quiet after an explicit deprovision until it is enabled again', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const view = renderToggle(true)
+    act(() => bridge.deprovision())
+    const sent = postMessage.mock.calls.length
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      bridge.sendHello()
+      bridge.provision(sipSessionFixture())
+      vi.advanceTimersByTime(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS + HELLO_RECHECK_MS)
+    })
+    expect(postMessage.mock.calls.length).toBe(sent)
+
+    // The session clearing is the stop the deprovision already announced.
+    view.setEnabled(false)
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(posted('deprovision')).toHaveLength(1)
+
+    view.setEnabled(true)
+    expect(posted('hello').length).toBeGreaterThan(0)
+    expect(postMessage.mock.calls.length).toBeGreaterThan(sent)
   })
 })

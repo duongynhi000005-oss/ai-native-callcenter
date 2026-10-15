@@ -369,6 +369,14 @@ function readExtensionMessage(event: MessageEvent): ExtensionMessage | null {
  * reports is theirs. `mySipDomain` is this deployment's SIP domain, which
  * decides whether a credential for that account was issued by *this*
  * deployment or by another one the same browser has visited.
+ *
+ * The bridge also deprovisions when it stops having a phone: when `enabled`
+ * goes from true to false, and when the page that holds it unmounts while
+ * enabled. A session can end without anyone pressing sign out (it expires,
+ * an administrator revokes it), and an extension whose widget is controlled
+ * by the page would otherwise leave it on screen for a user who is gone.
+ * A full page reload runs no cleanup and so sends nothing; the reloaded page
+ * asks again.
  */
 export function usePhoneBridgeValue(
   enabled: boolean,
@@ -390,6 +398,16 @@ export function usePhoneBridgeValue(
   const nonces = useRef(new Set<string>())
   /** The outstanding question's clock: it ticks once per unanswered hello. */
   const helloTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  /**
+   * The extension has been told to drop the phone, and this bridge has not
+   * been enabled again since. Nothing may bring the widget back until it is:
+   * a hello shows the widget, and signing out leaves the bridge enabled for
+   * the length of the logout request.
+   */
+  const isDeprovisioned = useRef(false)
+  /** Whether the bridge has had a phone since it was last stopped. */
+  const wasEnabled = useRef(false)
+  const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearHelloTimer = useCallback(() => {
     if (helloTimer.current === null) return
@@ -414,7 +432,9 @@ export function usePhoneBridgeValue(
   }, [])
 
   const sendHello = useCallback(() => {
+    if (isDeprovisioned.current) return
     const ask = () => {
+      if (isDeprovisioned.current) return
       const nonce = newNonce()
       nonces.current.add(nonce)
       post({ type: 'hello', nonce })
@@ -442,13 +462,56 @@ export function usePhoneBridgeValue(
 
   const provision = useCallback(
     (credentials: SipSession) => {
+      if (isDeprovisioned.current) return
       // Posted and dropped. Nothing above this line remembers the hash.
       post({ type: 'provision', nonce: newNonce(), ...credentials })
     },
     [post],
   )
 
-  const deprovision = useCallback(() => post({ type: 'deprovision' }), [post])
+  const deprovision = useCallback(() => {
+    isDeprovisioned.current = true
+    clearHelloTimer()
+    post({ type: 'deprovision' })
+  }, [post, clearHelloTimer])
+
+  /**
+   * The bridge no longer has a phone. Once per stop: an explicit
+   * `deprovision()` (signing out) has already said it.
+   */
+  const stop = useCallback(() => {
+    if (stopTimer.current !== null) {
+      clearTimeout(stopTimer.current)
+      stopTimer.current = null
+    }
+    if (!wasEnabled.current) return
+    wasEnabled.current = false
+    if (isDeprovisioned.current) return
+    deprovision()
+  }, [deprovision])
+
+  useEffect(() => {
+    if (!enabled) {
+      stop()
+      return
+    }
+    // Enabled again: a new sign-in may talk to the extension. Cancelling the
+    // pending stop is what keeps StrictMode's simulated unmount, which runs
+    // this cleanup and then the effect again on the same instance, from
+    // deprovisioning a bridge that never went anywhere.
+    if (stopTimer.current !== null) {
+      clearTimeout(stopTimer.current)
+      stopTimer.current = null
+    }
+    if (!wasEnabled.current) isDeprovisioned.current = false
+    wasEnabled.current = true
+    return () => {
+      // Runs when `enabled` flips (the effect above then stops it at once)
+      // and when the page unmounts, where there is no later render to ask.
+      // Deferred, so a remount in the same tick finds the stop cancelled.
+      stopTimer.current = setTimeout(stop, 0)
+    }
+  }, [enabled, stop])
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -565,7 +628,14 @@ export function usePhoneBridgeValue(
 
   const openOnboarding = useCallback(() => setOnboardingForced(true), [])
   const closeOnboarding = useCallback(() => setOnboardingForced(false), [])
-  const provisioning = usePhoneProvisioning(enabled, state, myExtension, mySipDomain, provision)
+  const provisioning = usePhoneProvisioning(
+    enabled,
+    state,
+    myExtension,
+    mySipDomain,
+    provision,
+    isDeprovisioned,
+  )
 
   return {
     presence,
@@ -675,6 +745,7 @@ function usePhoneProvisioning(
   myExtension: string | undefined,
   mySipDomain: string | undefined,
   provision: (credentials: SipSession) => void,
+  isDeprovisioned: { readonly current: boolean },
 ): Pick<PhoneBridge, 'reprovision' | 'provisionErrorCode'> {
   const [provisionErrorCode, setProvisionErrorCode] = useState<ErrorCode | null>(null)
   const inFlight = useRef(false)
@@ -689,10 +760,13 @@ function usePhoneProvisioning(
   const hasHeldOurs = useRef(false)
 
   const mint = useCallback(async () => {
-    if (!enabled || inFlight.current || isRefused.current) return
+    if (!enabled || inFlight.current || isRefused.current || isDeprovisioned.current) return
     inFlight.current = true
     try {
       const credentials = await agentApi.createSipSession()
+      // `provision` drops it too once deprovisioned; the check here keeps the
+      // success from clearing an error the next sign-in has not earned.
+      if (isDeprovisioned.current) return
       provision(credentials)
       setProvisionErrorCode(null)
     } catch (error) {
@@ -705,7 +779,7 @@ function usePhoneProvisioning(
     } finally {
       inFlight.current = false
     }
-  }, [enabled, provision])
+  }, [enabled, provision, isDeprovisioned])
 
   useEffect(() => {
     if (!enabled) {
