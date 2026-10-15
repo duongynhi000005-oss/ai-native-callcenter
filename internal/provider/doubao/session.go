@@ -231,9 +231,6 @@ func (s *Session) Start(ctx context.Context, cfg provider.SessionConfig) error {
 
 	headers := http.Header{}
 	headers.Set("X-Api-Key", s.apiKey)
-	for key, value := range s.profile.Headers {
-		headers.Set(key, value)
-	}
 
 	conn, err := wsconn.Dial(ctx, s.profile.Endpoint, headers, s.log)
 	if err != nil {
@@ -391,7 +388,7 @@ func (s *Session) SpeakText(text string, _ bool) error {
 // The model goes on only when every call it made has an answer, and this
 // protocol carries them in one message rather than one each. The engine is
 // answered in the order it asked, whatever order the results arrive in.
-func (s *Session) SendToolResult(toolCallID, output, hint string) error {
+func (s *Session) SendToolResult(toolCallID, output string) error {
 	s.mu.Lock()
 	if !s.toolPending[toolCallID] {
 		_, isAnswered := s.toolResults[toolCallID]
@@ -402,7 +399,7 @@ func (s *Session) SendToolResult(toolCallID, output, hint string) error {
 		return fmt.Errorf("doubao: no tool call %q is waiting for a result", toolCallID)
 	}
 	delete(s.toolPending, toolCallID)
-	s.toolResults[toolCallID] = provider.MergeHint(output, hint)
+	s.toolResults[toolCallID] = output
 	if len(s.toolPending) > 0 {
 		s.mu.Unlock()
 		return nil

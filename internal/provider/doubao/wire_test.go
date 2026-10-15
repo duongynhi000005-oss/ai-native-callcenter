@@ -164,7 +164,7 @@ func TestAToolResultIsByteExact(t *testing.T) {
 			{"call_id": "call-a", "name": "lookup_balance", "arguments": `{"accountId":"42"}`}}})
 	awaitEvent(t, session, provider.EventTypeToolCall)
 
-	if err := session.SendToolResult("call-a", `{"balance":"12.50"}`, "Read it out."); err != nil {
+	if err := session.SendToolResult("call-a", provider.MergeHint(`{"balance":"12.50"}`, "Read it out.")); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 
@@ -196,12 +196,12 @@ func TestParallelToolResultsAreAggregatedIntoOneMessage(t *testing.T) {
 		provider.EventTypeResponseDone)
 
 	// The second call is answered first; the message still follows the items.
-	if err := session.SendToolResult("call-b", `{"n":2}`, ""); err != nil {
+	if err := session.SendToolResult("call-b", `{"n":2}`); err != nil {
 		t.Fatalf("send the second tool result: %v", err)
 	}
 	f.awaitMessages("conversation.item.create", 0)
 
-	if err := session.SendToolResult("call-a", `{"n":1}`, ""); err != nil {
+	if err := session.SendToolResult("call-a", `{"n":1}`); err != nil {
 		t.Fatalf("send the first tool result: %v", err)
 	}
 
@@ -218,7 +218,7 @@ func TestAnAnswerToACallThatWasNeverMadeIsRefused(t *testing.T) {
 	f := newFakeDoubao(t, acceptSession)
 	session := startedSession(t, f)
 
-	if err := session.SendToolResult("call-nobody-made", `{}`, ""); err == nil {
+	if err := session.SendToolResult("call-nobody-made", `{}`); err == nil {
 		t.Fatal("a result for an unknown call was accepted")
 	}
 	f.awaitMessages("conversation.item.create", 0)

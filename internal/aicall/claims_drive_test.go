@@ -184,7 +184,7 @@ func (h *claimsHarness) turn(text, tool, args string) {
 		h.model.events <- provider.Event{Type: provider.EventTypeAudioDelta,
 			Audio: make([]byte, media.FrameSamples)}
 	}
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 }
 
 func (h *claimsHarness) callerSays(text string) {
@@ -304,7 +304,7 @@ func TestDriveDoesNotFlagClaimsAToolBacks(t *testing.T) {
 	// The reply to the hangup is cut short, so the next turn is not a reply
 	// to anything — only the armed hangup backs its goodbye.
 	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
-	h.model.events <- provider.Event{Type: provider.EventTypeInterrupted, Status: "cancelled"}
+	h.model.events <- provider.Event{Type: provider.EventTypeInterrupted}
 	h.turn("Thank you for calling, goodbye.", "", "")
 
 	cdr := h.awaitEnd(t)

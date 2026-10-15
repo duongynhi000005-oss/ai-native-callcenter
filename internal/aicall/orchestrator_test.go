@@ -199,7 +199,7 @@ func TestARepeatedEndingToolCallKeepsTheFirstArming(t *testing.T) {
 
 	// The next turn calls the tool again, then hangs up for good measure.
 	time.Sleep(200 * time.Millisecond)
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 	time.Sleep(50 * time.Millisecond)
 	if session.currentTurn() <= firstTurn {
@@ -441,7 +441,7 @@ func TestDriveAnswersToolCallsThroughTheFlow(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 
 	deadline = time.Now().Add(2 * time.Second)
 	for len(sw.recordedTransfers()) == 0 && time.Now().Before(deadline) {
@@ -1077,7 +1077,7 @@ func TestDriveClosesAToolLessLoopThroughTheWall(t *testing.T) {
 		model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
 		model.events <- provider.Event{Type: provider.EventTypeAudioDelta,
 			Audio: make([]byte, media.FrameSamples)}
-		model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+		model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -1262,7 +1262,7 @@ func TestATerminalTransferPhaseDoesNotHangUpOnTheCallerInstead(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 
 	deadline = time.Now().Add(2 * time.Second)
 	for len(sw.recordedTransfers()) == 0 && time.Now().Before(deadline) {
@@ -1689,7 +1689,7 @@ func (h *toolPath) callTools(t *testing.T, calls ...[2]string) []toolResult {
 // endResponse ends the response the tool calls came in, and gives the drive
 // goroutine the moment it needs to follow it up.
 func (h *toolPath) endResponse() {
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	time.Sleep(50 * time.Millisecond)
 }
 
@@ -1699,7 +1699,7 @@ func (h *toolPath) playTurn() {
 	h.model.events <- provider.Event{
 		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2),
 	}
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 }
 
 func (h *toolPath) isCallEnded() bool {
@@ -1774,9 +1774,6 @@ func TestAToolThatEndsTheCallCarriesTheClosingLineOnARealtimeProfile(t *testing.
 			if !strings.Contains(answer.output, `"ok":"1"`) {
 				t.Errorf("tool output = %s, want the result kept", answer.output)
 			}
-			if answer.hint != "" {
-				t.Errorf("hint argument = %q, want it in the output only", answer.hint)
-			}
 			if got := h.model.spokenLines(); len(got) != 0 {
 				t.Errorf("spoken lines = %v, want none: the tool result's turn is the line", got)
 			}
@@ -1797,7 +1794,7 @@ func TestAToolThatEndsTheCallCarriesTheClosingLineOnARealtimeProfile(t *testing.
 
 			// The turn the tool call arrived in finishes and plays out: the line
 			// has not been said yet, so the call stays up.
-			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 			time.Sleep(150 * time.Millisecond)
 			if h.isCallEnded() || !h.actions.isArmed() {
 				t.Fatal("the call ended on the playback of the turn the tool call came in")
@@ -1819,10 +1816,9 @@ func TestAClosingLineCutShortEndsTheCallOnlyAtTheCap(t *testing.T) {
 	h.actions.graceCap = 400 * time.Millisecond
 
 	h.callTool(t, flow.ToolHangup, `{}`)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
-	h.model.events <- provider.Event{Type: provider.EventTypeInterrupted,
-		Status: "cancelled", InterruptedBy: provider.InterruptReasonSpeech}
+	h.model.events <- provider.Event{Type: provider.EventTypeInterrupted, InterruptedBy: provider.InterruptReasonSpeech}
 	time.Sleep(100 * time.Millisecond)
 
 	h.actions.onBargeIn(0)
@@ -1848,7 +1844,7 @@ func TestAClosingLineQueuedBehindTheToolCallsTurnIsHeardBeforeTheCap(t *testing.
 		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2),
 	}
 	h.leg.holdFrames(100)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 
 	time.Sleep(700 * time.Millisecond)
@@ -1868,7 +1864,7 @@ func TestAClosingLineThatNeverFinishesPlayingStillEndsTheCall(t *testing.T) {
 
 	h.callTool(t, flow.ToolHangup, `{}`)
 	h.leg.holdFrames(5)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 
 	time.Sleep(lineDrainMargin / 2)
@@ -1913,7 +1909,7 @@ func TestAToolThatEndsTheCallOnDoubaoSpeaksTheLineAsItsOwnTurn(t *testing.T) {
 				t.Errorf("spoken lines = %v before the response ended, want none", got)
 			}
 
-			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 			time.Sleep(150 * time.Millisecond)
 			if got := h.model.spokenLines(); len(got) != 1 || got[0] != line {
 				t.Errorf("spoken lines = %v, want [%s]", got, line)
@@ -2156,7 +2152,7 @@ func TestAKeypressAfterTheEndingIsArmedLeavesTheClosingLineAlone(t *testing.T) {
 		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*4),
 	}
 	h.leg.holdFrames(100)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	time.Sleep(50 * time.Millisecond)
 	h.pressKey(t, "0")
 	h.pressKey(t, "0")
@@ -2193,7 +2189,7 @@ func TestSpeechAfterTheClosingLineStillRunsTheArmedAction(t *testing.T) {
 	h.callTool(t, flow.ToolHangup, `{}`)
 	// 40 frames is 800 ms of the line still to play: inside closingTailAck.
 	h.leg.holdFrames(40)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
 	if h.isCallEnded() {
@@ -2213,7 +2209,7 @@ func TestSpeechOverTheLastSecondOfTheClosingLineEndsTheCallAtOnce(t *testing.T) 
 
 	h.callTool(t, flow.ToolHangup, `{}`)
 	h.leg.holdFrames(50) // 1 s still to play
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
 
@@ -2231,7 +2227,7 @@ func TestSpeechEarlyInTheClosingLineIsAnsweredBeforeTheCallEnds(t *testing.T) {
 
 	h.callTool(t, flow.ToolHangup, `{}`)
 	h.leg.holdFrames(350) // 7 s still to play
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
 
@@ -2262,7 +2258,7 @@ func TestTheSameRuleHoldsOverTheAnswerToAnInterruption(t *testing.T) {
 
 	h.callTool(t, flow.ToolHangup, `{}`)
 	h.leg.holdFrames(350)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
 	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
@@ -2296,7 +2292,7 @@ func TestAnInterruptedClosingLineStillEndsAtTheCapWhenTheAnswerNeverFinishesPlay
 
 	h.callTool(t, flow.ToolHangup, `{}`)
 	h.leg.holdFrames(350)
-	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	h.playTurn()
 	time.Sleep(100 * time.Millisecond)
 	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
@@ -2560,7 +2556,7 @@ func TestTheOrchestratorPassesTheDeadAirTimeoutToTheSession(t *testing.T) {
 		Type:  provider.EventTypeAudioDelta,
 		Audio: make([]byte, media.FrameSamples),
 	}
-	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
 	awaitBridgeEvent(t, session, EventTypePlaybackDone)
 	awaitBridgeEvent(t, session, EventTypeNoInput)
 }

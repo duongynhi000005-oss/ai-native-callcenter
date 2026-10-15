@@ -111,46 +111,26 @@ func TestFormatsForFollowTheNegotiatedLaw(t *testing.T) {
 // Session configuration payloads.
 //
 
-// Semantic turn taking is forced to a two-second hold on one provider, and any
-// value we send is ignored. Sending one anyway would make the configuration
-// claim a latency the call will not have.
-func TestSemanticTurnDetectionOmitsAHoldTheProviderWouldIgnore(t *testing.T) {
+// Every call ends a caller's turn on server-side VAD at the configured hold. A
+// semantic mode is not offered: on qwen it would force a two-second hold, and
+// the latency budget does not allow it.
+func TestTurnDetectionIsServerVADAtTheConfiguredHold(t *testing.T) {
 	f := newFakeProvider(t, acceptSession)
 	session := testSession(t, f, QwenProfile())
 
 	cfg := basicConfig()
-	cfg.Turn = TurnDetection{Mode: TurnModeSemantic, SilenceMs: 500}
+	cfg.Turn = TurnDetection{SilenceMs: 500}
 	cfg.InputFormat, cfg.OutputFormat = QwenProfile().FormatsFor(media.LawMu)
 	if err := session.Start(t.Context(), cfg); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
 	turn := nested(t, f.awaitMessage("session.update"), "session", "turn_detection").(map[string]any)
-	if turn["type"] != "smart_turn" {
-		t.Errorf("turn type = %v, want this vendor's semantic mode", turn["type"])
+	if turn["type"] != "server_vad" {
+		t.Errorf("turn type = %v, want server_vad", turn["type"])
 	}
-	if _, present := turn["silence_duration_ms"]; present {
-		t.Error("a silence hold was sent for a mode that overrides it")
-	}
-}
-
-func TestSemanticTurnDetectionKeepsTheHoldWhereItIsHonoured(t *testing.T) {
-	f := newFakeProvider(t, acceptSession)
-	session := testSession(t, f, OpenAIProfile())
-
-	cfg := basicConfig()
-	cfg.Turn = TurnDetection{Mode: TurnModeSemantic, SilenceMs: 400}
-	if err := session.Start(t.Context(), cfg); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	turn := nested(t, f.awaitMessage("session.update"),
-		"session", "audio", "input", "turn_detection").(map[string]any)
-	if turn["type"] != "semantic_vad" {
-		t.Errorf("turn type = %v", turn["type"])
-	}
-	if turn["silence_duration_ms"] != float64(400) {
-		t.Errorf("silence hold = %v, want it passed through", turn["silence_duration_ms"])
+	if turn["silence_duration_ms"] != float64(500) {
+		t.Errorf("silence hold = %v, want 500", turn["silence_duration_ms"])
 	}
 }
 
@@ -209,24 +189,6 @@ func TestNoCueIsSentWhereTheProviderDoesNotNeedOne(t *testing.T) {
 	}
 	f.awaitMessage("response.create")
 	f.refuteMessage("conversation.item.create")
-}
-
-func TestGreetingCueCanBeOverridden(t *testing.T) {
-	f := newFakeProvider(t, acceptSession)
-	session := testSession(t, f, QwenProfile())
-
-	cfg := basicConfig()
-	cfg.GreetingCue = "(the caller is calling about an outage)"
-	cfg.InputFormat, cfg.OutputFormat = QwenProfile().FormatsFor(media.LawMu)
-	if err := session.Start(t.Context(), cfg); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	item := nested(t, f.awaitMessage("conversation.item.create"), "item").(map[string]any)
-	content := item["content"].([]any)[0].(map[string]any)
-	if content["text"] != cfg.GreetingCue {
-		t.Errorf("cue = %v, want the configured one", content["text"])
-	}
 }
 
 //
@@ -527,7 +489,7 @@ func TestALineAskedForBeforeTheProviderAnsweredWaitsForTheTurnToExist(t *testing
 	awaitEvent(t, session, EventTypeSessionReady)
 	finishTheOpeningTurn(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":1}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":1}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	f.awaitMessages("response.create", 2)
@@ -834,14 +796,6 @@ func TestEventMapping(t *testing.T) {
 				"usage":  map[string]any{"input_tokens": 12, "output_tokens": 30, "total_tokens": 42},
 			}},
 			want: EventTypeResponseDone,
-			check: func(t *testing.T, e Event) {
-				if e.Status != "completed" {
-					t.Errorf("status = %q", e.Status)
-				}
-				if e.Usage.TotalTokens != 42 {
-					t.Errorf("usage = %+v", e.Usage)
-				}
-			},
 		},
 		{
 			name: "provider error",
@@ -1187,10 +1141,7 @@ func TestACancelledTurnIsReportedAsAnInterruption(t *testing.T) {
 	f.send(map[string]any{"type": "response.done",
 		"response": map[string]any{"status": "cancelled"}})
 
-	event := awaitEvent(t, session, EventTypeInterrupted)
-	if event.Status != "cancelled" {
-		t.Errorf("status = %q", event.Status)
-	}
+	awaitEvent(t, session, EventTypeInterrupted)
 }
 
 // Interrupting must not block, including when called from the event consumer,
@@ -1279,7 +1230,7 @@ func TestAToolResultSentWhileTheResponseIsOpenAsksForItsTurnWhenItEnds(t *testin
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, "Say goodbye."); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	// The result goes in at once; only the opening request has been made,
@@ -1293,10 +1244,7 @@ func TestAToolResultSentWhileTheResponseIsOpenAsksForItsTurnWhenItEnds(t *testin
 
 	f.send(map[string]any{"type": "response.done",
 		"response": map[string]any{"status": "completed"}})
-	done := awaitEvent(t, session, EventTypeResponseDone)
-	if done.Status != "completed" {
-		t.Errorf("status = %q", done.Status)
-	}
+	awaitEvent(t, session, EventTypeResponseDone)
 
 	f.awaitMessages("response.create", 2)
 	types := typesOf(f.messages())
@@ -1318,10 +1266,10 @@ func TestSeveralToolResultsForOneResponseAskForOneTurn(t *testing.T) {
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send first tool result: %v", err)
 	}
-	if err := session.SendToolResult("fc_2", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_2", `{"ok":true}`); err != nil {
 		t.Fatalf("send second tool result: %v", err)
 	}
 	f.awaitMessages("response.create", 1)
@@ -1361,7 +1309,7 @@ func TestSeveralToolResultsAfterTheResponseEndedAskForOneTurn(t *testing.T) {
 	awaitEvent(t, session, EventTypeResponseDone)
 
 	for _, id := range []string{"fc_1", "fc_2", "fc_3"} {
-		if err := session.SendToolResult(id, `{"ok":true}`, ""); err != nil {
+		if err := session.SendToolResult(id, `{"ok":true}`); err != nil {
 			t.Fatalf("send tool result %s: %v", id, err)
 		}
 	}
@@ -1379,7 +1327,7 @@ func TestSeveralToolResultsAfterTheResponseEndedAskForOneTurn(t *testing.T) {
 	f.awaitMessages("response.create", 2)
 
 	// The turn is discharged: a result from a later turn asks again.
-	if err := session.SendToolResult("fc_4", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_4", `{"ok":true}`); err != nil {
 		t.Fatalf("send later tool result: %v", err)
 	}
 	f.awaitMessages("response.create", 3)
@@ -1399,7 +1347,7 @@ func TestACallerWhoBargesInIsAnsweredByTheProviderAloneAfterTheDone(t *testing.T
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	f.send(map[string]any{"type": "input_audio_buffer.speech_started"})
@@ -1440,7 +1388,7 @@ func TestAResponseTheProviderStartsBeforeTheDoneDischargesTheOwedTurn(t *testing
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	f.send(map[string]any{"type": "input_audio_buffer.speech_started"})
@@ -1526,7 +1474,7 @@ func TestACueDoesNotDischargeAnOwedToolTurn(t *testing.T) {
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
@@ -1560,7 +1508,7 @@ func TestALineAskedForWhileAToolTurnWaitsIsTheOneTurnAskedFor(t *testing.T) {
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	if err := session.SpeakText("I am putting you through now.", false); err != nil {
@@ -1595,7 +1543,7 @@ func TestALineAskedForWhileTheToolTurnIsHeldWaitsForTheProvidersReply(t *testing
 	awaitEvent(t, session, EventTypeSessionReady)
 	openATurnThatCallsATool(t, f, session)
 
-	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+	if err := session.SendToolResult("fc_1", `{"ok":true}`); err != nil {
 		t.Fatalf("send tool result: %v", err)
 	}
 	f.send(map[string]any{"type": "input_audio_buffer.speech_started"})
@@ -1652,7 +1600,7 @@ func TestMergeHint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mergeHint(tt.output, tt.hint); got != tt.want {
+			if got := MergeHint(tt.output, tt.hint); got != tt.want {
 				t.Errorf("got %s, want %s", got, tt.want)
 			}
 		})
@@ -1745,10 +1693,11 @@ func TestAnAbandonedTurnIsClosedOut(t *testing.T) {
 	f.send(map[string]any{"type": "response.created"})
 	awaitEvent(t, session, EventTypeResponseStarted)
 
-	event := awaitEvent(t, session, EventTypeResponseDone)
-	if event.Status != StatusStalled {
-		t.Errorf("status = %q, want the turn closed out as stalled", event.Status)
+	// A stalled turn is reported as an error (not fatal) and then closed out.
+	if event := awaitEvent(t, session, EventTypeError); event.IsFatal {
+		t.Error("an abandoned turn ended the session")
 	}
+	awaitEvent(t, session, EventTypeResponseDone)
 }
 
 func TestATurnThatCompletesDoesNotTripTheWatchdog(t *testing.T) {
@@ -1768,10 +1717,7 @@ func TestATurnThatCompletesDoesNotTripTheWatchdog(t *testing.T) {
 	f.send(map[string]any{"type": "response.done",
 		"response": map[string]any{"status": "completed"}})
 
-	event := awaitEvent(t, session, EventTypeResponseDone)
-	if event.Status != "completed" {
-		t.Fatalf("status = %q", event.Status)
-	}
+	awaitEvent(t, session, EventTypeResponseDone)
 
 	// Well past both deadlines, nothing further should be invented.
 	time.Sleep(400 * time.Millisecond)
@@ -1853,7 +1799,7 @@ func TestACompletedResponseIsNotAbandonedWhenItsSignalIsLost(t *testing.T) {
 		select {
 		case event := <-session.Events():
 			switch {
-			case event.Type == EventTypeResponseDone && event.Status == StatusStalled:
+			case event.Type == EventTypeError:
 				t.Fatal("a response that completed cleanly was reported as abandoned")
 			case event.Type == EventTypeResponseDone:
 				// The real completion arrived. Give the timer its chance to
@@ -1861,7 +1807,7 @@ func TestACompletedResponseIsNotAbandonedWhenItsSignalIsLost(t *testing.T) {
 				time.Sleep(3 * session.deltaStallDeadline)
 				select {
 				case late := <-session.Events():
-					if late.Status == StatusStalled {
+					if late.Type == EventTypeError {
 						t.Fatal("the turn was abandoned after it had already completed")
 					}
 				default:
@@ -1893,7 +1839,9 @@ func TestARealStallIsStillCaught(t *testing.T) {
 	for {
 		select {
 		case event := <-session.Events():
-			if event.Type == EventTypeResponseDone && event.Status == StatusStalled {
+			if event.Type == EventTypeError {
+				// The stall is reported as an error, then the turn is closed out.
+				awaitEvent(t, session, EventTypeResponseDone)
 				return
 			}
 		case <-deadline:

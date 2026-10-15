@@ -181,9 +181,6 @@ func New(profile Profile, log *slog.Logger) (*Realtime, error) {
 	}, nil
 }
 
-// Profile reports the vendor configuration in use.
-func (r *Realtime) Profile() Profile { return r.profile }
-
 func (r *Realtime) Events() <-chan Event { return r.events }
 
 // Start connects, configures the session, and asks for the opening turn.
@@ -195,9 +192,6 @@ func (r *Realtime) Start(ctx context.Context, cfg SessionConfig) error {
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+r.apiKey)
-	for key, value := range r.profile.Headers {
-		headers.Set(key, value)
-	}
 
 	conn, err := wsconn.Dial(ctx, r.profile.endpointURL(), headers, r.log)
 	if err != nil {
@@ -293,9 +287,6 @@ func userTextItem(text string) map[string]any {
 
 // greetingCue is the stage direction that gets a provider talking first.
 func greetingCue(cfg SessionConfig) string {
-	if cfg.GreetingCue != "" {
-		return cfg.GreetingCue
-	}
 	if strings.HasPrefix(strings.ToLower(cfg.Language), "zh") {
 		return "（电话已接通，请按照你的指示开始问候来电者。）"
 	}
@@ -576,9 +567,9 @@ func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
 
 // SendToolResult answers a tool call and steers what happens next.
 //
-// The hint travels inside the result rather than as a separate instruction
-// update: the model reads it as part of what it just learned, which is what
-// makes it act on it immediately instead of at some later turn.
+// Whatever the engine wants said or done next travels inside output
+// (MergeHint), not as a separate instruction update: the model reads it as part
+// of what it just learned, which is what makes it act on it immediately.
 //
 // The result goes into the conversation at once; the turn it asks for may
 // not. A model can go on talking in the same response after calling a tool,
@@ -595,13 +586,13 @@ func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
 // refused (qwen-findings W-Q6). A turn already asked for and not yet started
 // covers the results that follow it, so one batch of results asks for exactly
 // one response.
-func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
+func (r *Realtime) SendToolResult(toolCallID, output string) error {
 	if err := r.sendEvent(map[string]any{
 		"type": "conversation.item.create",
 		"item": map[string]any{
 			"type":    "function_call_output",
 			"call_id": toolCallID,
-			"output":  mergeHint(output, hint),
+			"output":  output,
 		},
 	}); err != nil {
 		return err
@@ -702,9 +693,6 @@ func MergeHint(output, hint string) string {
 	}
 	return string(merged)
 }
-
-// mergeHint is the name this client's one call site knows it by.
-var mergeHint = MergeHint
 
 // UpdateInstructions replaces the standing instructions.
 //
@@ -901,25 +889,14 @@ func audioFormatPayload(name string, rateHz int) map[string]any {
 
 // buildTurnDetection maps the declarative setting onto the vendor's names.
 func (r *Realtime) buildTurnDetection(turn TurnDetection) any {
-	switch turn.Mode {
-	case TurnModeSemantic:
-		detection := map[string]any{"type": r.profile.SemanticTurnType}
-		// Where the vendor forces its own hold, sending a different one would
-		// only make the configuration lie about what the call will do.
-		if r.profile.SemanticTurnSilenceMs == 0 && turn.SilenceMs > 0 {
-			detection["silence_duration_ms"] = turn.SilenceMs
-		}
-		return detection
-	default:
-		detection := map[string]any{"type": "server_vad"}
-		if turn.SilenceMs > 0 {
-			detection["silence_duration_ms"] = turn.SilenceMs
-		}
-		if turn.Threshold > 0 {
-			detection["threshold"] = turn.Threshold
-		}
-		return detection
+	detection := map[string]any{"type": "server_vad"}
+	if turn.SilenceMs > 0 {
+		detection["silence_duration_ms"] = turn.SilenceMs
 	}
+	if turn.Threshold > 0 {
+		detection["threshold"] = turn.Threshold
+	}
+	return detection
 }
 
 // isSpokenItem reports whether an output item is the model talking, which is
@@ -1096,16 +1073,9 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	// line just asked for is that turn.
 	r.releaseOwedTurn()
 
-	out := Event{Type: EventTypeResponseDone}
+	status := ""
 	if event.Response != nil {
-		out.Status = event.Response.Status
-		if usage := event.Response.Usage; usage != nil {
-			out.Usage = Usage{
-				InputTokens:  usage.InputTokens,
-				OutputTokens: usage.OutputTokens,
-				TotalTokens:  usage.TotalTokens,
-			}
-		}
+		status = event.Response.Status
 	}
 	// A cancelled response is a turn that was cut short, whether we asked for
 	// it or the provider decided on its own when it heard the caller. Either
@@ -1119,7 +1089,7 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	// turn this client stopped to make room for a line is not a barge-in, and
 	// logging it as one puts an interruption the caller never made into the
 	// record of the call.
-	if out.Status == statusCancelled {
+	if status == statusCancelled {
 		by := InterruptReasonSpeech
 		if cancelledFor != "" {
 			by = cancelledFor
@@ -1127,13 +1097,10 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 		if isPreemptedForSpeak {
 			by = InterruptReasonSystem
 		}
-		r.emit(Event{
-			Type: EventTypeInterrupted, Status: out.Status,
-			Usage: out.Usage, InterruptedBy: by,
-		})
+		r.emit(Event{Type: EventTypeInterrupted, InterruptedBy: by})
 		return
 	}
-	r.emit(out)
+	r.emit(Event{Type: EventTypeResponseDone})
 }
 
 // takeCancelReason returns why this client last cancelled, if it did so within
@@ -1348,10 +1315,6 @@ func (r *Realtime) finishStart(err error) {
 	})
 }
 
-// StatusStalled is the status on a response the provider abandoned partway.
-// It is synthesised here, not reported by any provider.
-const StatusStalled = "STALLED"
-
 // onResponseStalled closes out a turn the provider walked away from. The
 // watchdog calls it on its own goroutine, having already decided that a
 // response really is open.
@@ -1372,7 +1335,7 @@ func (r *Realtime) onResponseStalled(hasAudioArrived bool) {
 	// whatever did arrive. The flow decides what to say next.
 	r.emit(Event{Type: EventTypeError, Text: reason,
 		Err: errors.New(reason)})
-	r.emit(Event{Type: EventTypeResponseDone, Status: StatusStalled})
+	r.emit(Event{Type: EventTypeResponseDone})
 }
 
 // signal notifies the watchdog without ever blocking the read loop.

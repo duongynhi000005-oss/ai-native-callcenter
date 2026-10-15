@@ -243,7 +243,8 @@ func (s *Session) onTurnFinished() {
 // because a turn this client stopped is not a barge-in and logging it as one
 // puts an interruption the caller never made into the record of the call.
 func (s *Session) onWireResponseDone(event *wireEvent) {
-	if usage := usageOf(event); usage != (provider.Usage{}) {
+	if event.Response != nil && event.Response.Usage != nil {
+		usage := event.Response.Usage
 		s.log.Info("turn usage", "totalTokens", usage.TotalTokens,
 			"inputTokens", usage.InputTokens, "outputTokens", usage.OutputTokens)
 	}
@@ -376,20 +377,7 @@ func (s *Session) onTurnStalled(hasAudioArrived bool) {
 	// arrive. The flow decides what to say next.
 	s.emit(provider.Event{Type: provider.EventTypeError,
 		Text: reason, Err: errors.New(reason)})
-	s.emit(provider.Event{Type: provider.EventTypeResponseDone,
-		Status: provider.StatusStalled})
-}
-
-func usageOf(event *wireEvent) provider.Usage {
-	if event.Response == nil || event.Response.Usage == nil {
-		return provider.Usage{}
-	}
-	usage := event.Response.Usage
-	return provider.Usage{
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-		TotalTokens:  usage.TotalTokens,
-	}
+	s.emit(provider.Event{Type: provider.EventTypeResponseDone})
 }
 
 // emit delivers an event, dropping it only once the session is finished and

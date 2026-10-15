@@ -45,14 +45,7 @@ type wireItem struct {
 type wireResponse struct {
 	ID     string     `json:"id"`
 	Status string     `json:"status"`
-	Usage  *wireUsage `json:"usage"`
 	Output []wireItem `json:"output"`
-}
-
-type wireUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
 }
 
 type wireError struct {
