@@ -87,6 +87,7 @@ A declarative tool is by default an HTTP call to your backend (a second kind, th
 | `http.successWhen` | `{ "path": "retCode", "equals": "000000" }`. Absent means any 2xx counts. |
 | `http.errorFrom` | Dotted path to the backend's own error message when `successWhen` fails. |
 | `http.result` | Map of slot name to dotted path in the response. **Only these fields are exposed.** |
+| `collect` | Optional, HTTP tools only (a slot tool with `collect` does not load). Keeps a list of values across the tool's calls: `{ "slot": "repair_status.foundOrders", "value": "{args.rma}", "when": { "slot": "result.found", "op": "EQ", "value": "1" } }`. See 2.6.1. |
 
 Runtime behaviour worth designing around (`internal/flow/httptool.go`):
 
@@ -126,13 +127,40 @@ Slots are the call's structured state. They live in this application, not in the
 
 A tool result that changes what the current phase's instruction renders from slots re-pins the instruction without a phase change, so an instruction never quotes a superseded value.
 
-A value becomes a slot in four ways: a `http.result` mapping over a backend response; a slot tool recording a fact the caller said (2.8); the arguments of any tool call, stored as `<tool>.args.<k>`; and the business data an outbound call was placed with, seeded as `userData.<k>`.
+A value becomes a slot in five ways: a `http.result` mapping over a backend response; a slot tool recording a fact the caller said (2.8); the arguments of any tool call, stored as `<tool>.args.<k>`; a `collect` list over an HTTP tool's calls (2.6.1); and the business data an outbound call was placed with, seeded as `userData.<k>`.
 
 | Slot | Value |
 | --- | --- |
 | `<slot>` | What a slot tool (2.8) recorded. |
 | `<tool>.args.<k>` | The scalar arguments of the tool's **last** call. Replaced wholesale on every call, so an argument left out this time is not read from the time before. Strings are cut to 256 characters; objects and arrays are not stored. |
+| `<collect.slot>`, `<collect.slot>.count` | What a tool's `collect` list (2.6.1) holds, joined with `, `, and how many values it holds. |
 | `userData.<k>` | Business data the call was placed with. Read-only: the model cannot write it. Nested objects are flattened with dots (`userData.order.id`); arrays are skipped. |
+
+#### 2.6.1 `collect`: a list of values across calls
+
+Every other slot keeps only the latest value, so "which orders did the caller look up?" would be left to the model's memory of the conversation, which recalls numbers that were not found, or never asked. An HTTP tool can instead declare a `collect` rule, and the engine keeps the list:
+
+```json
+"collect": {
+  "slot": "repair_status.foundOrders",
+  "value": "{args.rma}",
+  "when": { "slot": "result.found", "op": "EQ", "value": "1" }
+}
+```
+
+After the tool's result is recorded (`result.*`, `<tool>.<field>`, `<tool>.calls`, `<tool>.args.*`), and before any transition is evaluated, so a condition or the re-rendered instruction already sees the new list:
+
+1. Nothing happens unless the call succeeded (`result.ok` is `"1"`).
+2. If `when` is present it is evaluated like a transition condition against the slots (`result.*` included); the value is skipped when it does not hold.
+3. `value` is rendered like an `http.body` string (`{args.x}`, `{slots.y}`) and trimmed; an empty result is skipped.
+4. It is appended unless an equal value (exact match after trimming) is already in the list; the first occurrence keeps its place.
+5. Bounds: at most 20 values (a new value is dropped, and logged, once the list is full, so the first 20 are kept) and each value at most 256 characters (`MaxSlotValueLen`; a longer one is cut, and logged).
+
+`{slots.<slot>}` renders the values joined with `, `, and renders empty while nothing was collected. `<slot>.count` is the number of values (0 at the start), so a transition can say `"slot": "repair_status.foundOrders.count", "op": "GTE", "value": 2`. Both exist from the start of the call.
+
+Rendering the list is not enough on its own. On live calls (qwen, issue #116) a model handed the list and told "one order: answer it; several: ask which" still counted from the conversation and offered a number that was not found. Let the flow do the counting: branch the phase on `<slot>.count`, so each phase's instruction states one case without a condition. The seed `mobile_support` flow stays in `repair_report` ("the order they mean is {slots.repair_status.foundOrders}") while one order was found, and moves to `repair_report_multi` ("ask which of these") once `count` reaches 2. Word the rule about the list as a rule about answering, not looking up: "choose only from the orders found" made a model refuse to look up a new number.
+
+Checked at load: only an HTTP tool may declare it; `slot` is required and made of letters, digits and underscores (dots allowed between segments); neither `slot` nor `<slot>.count` may be a name something else writes (the engine's own slots, `result.*`, `userData.*`, `<tool>.calls`, `<tool>.ok`, `<tool>.args.*`, a tool's `http.result` field, `<node>.visits`, a slot tool's slot, another tool's `collect`); `value` is required, every `{args.x}` in it must be a declared parameter of the tool and every `{slots.y}` a slot the flow writes; `when` must use known operators and slots the flow writes.
 
 ### 2.7 Built-in tools
 
@@ -197,7 +225,7 @@ Other slots you can read back:
 - **`<tool>.args.<k>`** exists for every tool, built-in ones included. It is readable in a template or condition **only for arguments the tool declares** in its `parameters.properties` (a slot tool declares `value`). Referencing anything else is a load error.
 - **`userData.<k>`** is accepted for any `k`, because the keys come from whoever placed the call.
 
-**Declared-slot rule, checked at load.** `{slots.x}` in an `instruction`, an `announce` or an `http.body`, and the `slot` of a transition condition, must name something the flow can write, or the flow does not load (a typo would otherwise be heard on a call as an empty gap). The accepted names are: `caller`, `entry`, `did`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `noInput.count`; `userData.<k>`; a slot tool's `slot`; `<node>.visits` for a phase of the flow; `<tool>.calls` and `<tool>.ok`; `<tool>.<field>` where `field` is a key of that HTTP tool's `http.result`; `<tool>.args.<k>` where `k` is a declared parameter; and `result.<field>` for a field some tool maps (`ok` included). `persona` and `rules` are not rendered, so they are not checked.
+**Declared-slot rule, checked at load.** `{slots.x}` in an `instruction`, an `announce` or an `http.body`, and the `slot` of a transition condition, must name something the flow can write, or the flow does not load (a typo would otherwise be heard on a call as an empty gap). The accepted names are: `caller`, `entry`, `did`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `noInput.count`; `userData.<k>`; a slot tool's `slot`; a `collect` list's `slot` and `<slot>.count`; `<node>.visits` for a phase of the flow; `<tool>.calls` and `<tool>.ok`; `<tool>.<field>` where `field` is a key of that HTTP tool's `http.result`; `<tool>.args.<k>` where `k` is a declared parameter; and `result.<field>` for a field some tool maps (`ok` included). `persona` and `rules` are not rendered, so they are not checked.
 
 **Providers.** A slot is engine state, so it is exact in templates and HTTP bodies on every engine. How soon the *model* is re-told differs: the Realtime engines (OpenAI, Qwen, the gateway) re-pin at once; **Doubao and Gemini re-pin best effort**. Gemini cannot change its instructions mid-call, and they reach the model with the next tool result or turn that carries something; Doubao's frame is sent but its effect on a call in progress is not measured. Do not depend on an instant re-pin there: keep the "never ask a recorded question again" rule cheap to obey, and carry a fact that must not be lost in an HTTP body rather than only in the prompt.
 
@@ -393,7 +421,7 @@ Say these to the business rather than working around them in the prompt.
 
 | Need | Status |
 | --- | --- |
-| **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Supported: a slot tool records the fact, see 2.8. Tool arguments are also kept as `<tool>.args.<k>`, and an outbound call's business data as `userData.<k>` (2.6). Still absent: a list of values (the slot keeps only the latest, so "all the orders looked up" needs your backend's memory), and a start-of-call lookup (issue [#84](https://github.com/rasonyang/ai-native-callcenter/issues/84)). Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
+| **Facts the caller states.** "I'm calling about order 1234", "my budget is 200". | Supported: a slot tool records the fact, see 2.8. Tool arguments are also kept as `<tool>.args.<k>`, and an outbound call's business data as `userData.<k>` (2.6). A list of values derived from a tool's calls ("all the orders looked up") is a `collect` list on that tool (2.6.1). Still absent: a list of values the caller merely said (a slot tool keeps only the latest), and a start-of-call lookup (issue [#84](https://github.com/rasonyang/ai-native-callcenter/issues/84)). Issue [#13](https://github.com/rasonyang/ai-native-callcenter/issues/13). |
 | **Collecting digits, a keypad menu, masked secrets.** | Not supported. Keypad input is not a flow event. Today each key reaches the model as a text cue (`(The caller pressed 5 on their keypad.)`), interrupts the bot, and asks for a reply; the model assembles the digits and follows your prompt. That is not deterministic, and digits pass through the model, the transcript and the logs. Do not collect PINs or card numbers this way. Issue [#91](https://github.com/rasonyang/ai-native-callcenter/issues/91). |
 | **Knowledge retrieval as a platform feature.** | Not provided. A knowledge tool is an ordinary HTTP tool (4.2) against a service you run. A neutral contract and store templates are planned in issue [#92](https://github.com/rasonyang/ai-native-callcenter/issues/92). |
 | **Testing a flow with a model in the loop.** | `aicc flowsim` replays scripted scenarios deterministically (8). Tier 2 (a text model as the bot and another as the caller) is opt-in and spends money (8). |
@@ -573,6 +601,7 @@ A ticket's first `plan_status` is `PROCESSING` with an `eta`; every later one is
 - Is every business rule in the backend, with the flow branching on a field?
 - Is every fact the bot may state coming from a tool result? Is anything long pasted into `persona`, `rules` or an `instruction`?
 - Does each phase allow only the tools it needs, and does each tool's `description` say when to call it?
+- Does the instruction ever ask the model to recall "all the X so far" from the conversation? Use a `collect` list (2.6.1) so the engine holds them.
 - Does every decision value the backend can return have a transition, and is there a fallback with a higher `priority` number?
 - Does an operation that can exceed 5 seconds, or that a bot should not complete alone, have a submit-and-check, callback or hand-over path?
 - Does every terminal phase have an `announce`, and does `closingTarget` name one of them?

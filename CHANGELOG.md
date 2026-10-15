@@ -9,6 +9,12 @@ carries the one-line installer's files.
 
 ### Added
 
+- Flow tools can keep a list across their calls: `collect` on an HTTP tool
+  appends a rendered value (`{args.x}`, `{slots.y}`) to a list slot after each
+  successful call for which its optional `when` condition holds, without
+  duplicates and at most 20 values. `{slots.<slot>}` renders the list and
+  `<slot>.count` its size, so a transition can branch on it. Checked at load
+  (`docs/flow-authoring.md` 2.6.1) (#116).
 - Post-call transcription of recordings with `qwen-audio-3.1-asr-flash`, off by
   default (`AICC_POSTCALL_TRANSCRIBE_ENABLED`, plus an HTTPS endpoint and
   `ALIYUN_API_KEY`). A finished call's stereo recording is split into its two
@@ -104,6 +110,11 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- The `mobile_support` flow no longer asks for the order number again, or says
+  it did not hear it, when the caller asks about "my order" after looking up
+  several. It keeps the orders found, answers for the only one directly, and
+  asks which one, naming only those, once two were found; a number that was
+  not found is never offered (#116).
 - The browser phone's widget no longer shows on administrators' pages or the
   sign-in page, where it read "Not connected / Not configured" as if a phone
   were broken. The page declares that only a page with a phone shows it; agents

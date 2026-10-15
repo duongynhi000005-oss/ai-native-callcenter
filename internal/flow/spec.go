@@ -263,8 +263,38 @@ type Tool struct {
 	// Enum, when set on a slot tool, is the only values it accepts, and is
 	// passed to the model as the enum of "value".
 	Enum []string `json:"enum,omitempty"`
+	// Collect, on an HTTP tool, keeps a list of values across its calls (see
+	// Collect). Absent leaves the tool as it was.
+	Collect *Collect `json:"collect,omitempty"`
 
 	name string
+}
+
+// MaxCollectedValues bounds one collect list. A value beyond it is not added
+// (the first MaxCollectedValues are kept) and the engine logs that.
+const MaxCollectedValues = 20
+
+// Collect is an opt-in list slot fed by an HTTP tool. Slots otherwise keep
+// only the latest tool result, so "the orders looked up in this call" would
+// have to be recalled by the model from its history; a collect rule makes the
+// engine remember them.
+//
+// After a call whose result is recorded with ok=1 (and, if When is set, only
+// while it holds), Value is rendered ({args.x}, {slots.y}), trimmed, and
+// appended to the list unless an equal value is already there. At most
+// MaxCollectedValues values are kept, each cut to MaxSlotValueLen characters.
+// The slot named by Slot renders ({slots.<Slot>}) as the values joined by
+// ", " and is empty while nothing was collected; "<Slot>.count" holds how
+// many there are. Both are written before the call's transitions are
+// evaluated.
+type Collect struct {
+	// Slot is the list's name; it may contain dots, as <tool>.<field> does.
+	Slot string `json:"slot"`
+	// Value is the template for one value.
+	Value string `json:"value"`
+	// When, if present, must hold against the slots (result.* included) for
+	// the value to be collected.
+	When *Condition `json:"when,omitempty"`
 }
 
 // Name is the tool's key in the flow.

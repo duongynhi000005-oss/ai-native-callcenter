@@ -199,6 +199,9 @@ func (d declaredSlots) has(name string) bool {
 		if tool.Kind == ToolKindSlot && tool.Slot == name {
 			return true
 		}
+		if c := tool.Collect; c != nil && (c.Slot == name || c.Slot+collectCountSuffix == name) {
+			return true
+		}
 	}
 	if id, ok := strings.CutSuffix(name, ".visits"); ok {
 		_, isNode := d.spec.Nodes[id]
@@ -253,3 +256,50 @@ func toolArgNames(tool Tool) []string {
 	}
 	return slices.Collect(maps.Keys(schema.Properties))
 }
+
+// collectCountSuffix names the counter that goes with a collect list.
+const collectCountSuffix = ".count"
+
+// collect applies a tool's collect rule after its result is recorded. It
+// runs only for a successful call, so a refused or failed one adds nothing.
+func (e *Engine) collect(toolName string, args, result map[string]any) {
+	tool, ok := e.spec.Tools[toolName]
+	rule := tool.Collect
+	if !ok || rule == nil || asString(result["ok"]) != "1" {
+		return
+	}
+	if rule.When != nil {
+		holds, err := evaluate(rule.When, e.slots)
+		if err != nil {
+			e.log.Error("collect condition could not be evaluated", "tool", toolName, "slot", rule.Slot, "error", err)
+			return
+		}
+		if !holds {
+			return
+		}
+	}
+	value := strings.TrimSpace(asString(renderString(rule.Value, args, e.slots)))
+	if value == "" {
+		return
+	}
+	if utf8.RuneCountInString(value) > MaxSlotValueLen {
+		e.log.Warn("collected value cut to the slot value limit", "tool", toolName, "slot", rule.Slot, "limit", MaxSlotValueLen)
+		value = strings.TrimSpace(truncateRunes(value, MaxSlotValueLen))
+	}
+	values := e.collected[rule.Slot]
+	if slices.Contains(values, value) {
+		return
+	}
+	if len(values) >= MaxCollectedValues {
+		e.log.Warn("collect list is full; value not added", "tool", toolName, "slot", rule.Slot, "limit", MaxCollectedValues)
+		return
+	}
+	values = append(values, value)
+	e.collected[rule.Slot] = values
+	e.slots[rule.Slot] = strings.Join(values, ", ")
+	e.slots[rule.Slot+collectCountSuffix] = len(values)
+}
+
+// collectSlotPattern is what a collect list may be called: dotted segments,
+// like the engine's own <tool>.<field> names.
+var collectSlotPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$`)

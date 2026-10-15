@@ -22,9 +22,33 @@
         {"call": "repair_status", "args": {"rma": "RMA0000"}, "expect": {"phase": "welcome", "result": {"found": "0"}}},
         {"call": "repair_status", "args": {"rma": "RMA1002"}, "expect": {"phase": "repair_report", "result": {"found": "1"}}},
         {"call": "repair_status", "args": {"rma": "RMA0001"}, "expect": {"phase": "repair_report", "result": {"found": "0"}}},
-        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {"phase": "repair_report", "result": {"found": "1"}}}
+        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {"phase": "repair_report_multi", "result": {"found": "1"}}}
       ],
-      "expect": {"path": ["welcome", "repair_report"]}
+      "expect": {"path": ["welcome", "repair_report", "repair_report_multi"]}
+    },
+    {
+      "name": "the report names the latest order and says when it was not found",
+      "description": "The engine keeps the orders found (collect), so a miss after a hit stays out of the list and the one-order phase answers for that order; a second order found moves the call to the phase that asks which one (#116).",
+      "lang": "zh",
+      "caller": "13800008888",
+      "steps": [
+        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {"phase": "repair_report",
+          "instructionContains": ["单号 RMA1001,found=1", "星讯 X1 手机"]}},
+        {"call": "repair_status", "args": {"rma": "RMA9999"}, "expect": {"phase": "repair_report",
+          "slots": {"repair_status.foundOrders": "RMA1001", "repair_status.foundOrders.count": 1},
+          "instructionContains": ["本通电话查到的维修单只有一张:RMA1001。", "单号 RMA9999,found=0", "说的就是 RMA1001"]}},
+        {"call": "repair_status", "args": {"rma": "RMA1002"}, "expect": {"phase": "repair_report_multi",
+          "slots": {"repair_status.foundOrders": "RMA1001, RMA1002", "repair_status.foundOrders.count": 2},
+          "instructionContains": ["本通电话查到的维修单有 2 张:RMA1001, RMA1002。", "单号 RMA1002,found=1", "星讯 Air 手机",
+            "“您这通电话查到了 RMA1001, RMA1002,请问是哪一张?”"]}},
+        {"call": "repair_status", "args": {"rma": "RMA9999"}, "expect": {"phase": "repair_report_multi",
+          "slots": {"repair_status.foundOrders": "RMA1001, RMA1002", "repair_status.foundOrders.count": 2},
+          "instructionContains": ["查到的维修单有 2 张:RMA1001, RMA1002。最近一次查询:单号 RMA9999,found=0"]}},
+        {"call": "repair_status", "args": {"rma": "RMA1001"}, "expect": {"phase": "repair_report_multi",
+          "slots": {"repair_status.foundOrders": "RMA1001, RMA1002", "repair_status.foundOrders.count": 2},
+          "instructionContains": ["最近一次查询:单号 RMA1001,found=1"]}}
+      ],
+      "expect": {"path": ["welcome", "repair_report", "repair_report_multi"]}
     },
     {
       "name": "three unknown order numbers hand the caller to a person",

@@ -133,6 +133,9 @@ func (s *Spec) validate() error {
 				report("tool %q has parameters that are not valid JSON", name)
 			}
 		case ToolKindSlot:
+			if tool.Collect != nil {
+				report("tool %q is a slot tool and must not declare collect, which only an http tool has", name)
+			}
 			s.validateSlotTool(name, tool, slotOwners, report)
 		default:
 			report("tool %q has unknown kind %q; it is %q or %q", name, tool.Kind, ToolKindHTTP, ToolKindSlot)
@@ -153,6 +156,7 @@ func (s *Spec) validate() error {
 			checkBody(declared, "tool "+name, tool.HTTP.Body, report)
 		}
 	}
+	s.validateCollects(declared, report)
 
 	if len(problems) > 0 {
 		return &ValidationError{FlowID: s.ID, Problems: problems}
@@ -358,24 +362,31 @@ func checkBody(d declaredSlots, where string, body map[string]any, report func(s
 }
 
 func checkConditions(d declaredSlots, where string, rules []Transition, report func(string, ...any)) {
-	var walk func(i int, c *Condition)
-	walk = func(i int, c *Condition) {
-		if c == nil {
-			return
-		}
-		if len(c.All) > 0 || len(c.Any) > 0 {
-			for _, sub := range append(slices.Clone(c.All), c.Any...) {
-				walk(i, &sub)
-			}
-			return
-		}
-		if c.Slot != "" && !d.has(c.Slot) {
-			report("%s transition %d tests slot %q, which nothing in this flow writes", where, i, c.Slot)
-		}
-	}
 	for i, rule := range rules {
-		walk(i, rule.Condition)
+		for _, slot := range conditionSlots(rule.Condition) {
+			if !d.has(slot) {
+				report("%s transition %d tests slot %q, which nothing in this flow writes", where, i, slot)
+			}
+		}
 	}
+}
+
+// conditionSlots lists the slots a condition tests, nested ones included.
+func conditionSlots(c *Condition) []string {
+	if c == nil {
+		return nil
+	}
+	if len(c.All) > 0 || len(c.Any) > 0 {
+		var slots []string
+		for _, sub := range append(slices.Clone(c.All), c.Any...) {
+			slots = append(slots, conditionSlots(&sub)...)
+		}
+		return slots
+	}
+	if c.Slot == "" {
+		return nil
+	}
+	return []string{c.Slot}
 }
 
 // slotRefs lists the names of the {slots.x} references in a template.
@@ -385,4 +396,99 @@ func slotRefs(template string) []string {
 		names = append(names, m[1])
 	}
 	return names
+}
+
+// validateCollects checks every tool's collect rule. Only an http tool may
+// have one (a slot tool is reported where it is validated), its slot must not
+// be a name something else writes, and what it reads must exist.
+func (s *Spec) validateCollects(d declaredSlots, report func(string, ...any)) {
+	names := make([]string, 0, len(s.Tools))
+	for name, tool := range s.Tools {
+		if tool.Collect != nil && tool.Kind != ToolKindSlot {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		rule := s.Tools[name].Collect
+		switch {
+		case rule.Slot == "":
+			report("tool %q collect names no slot", name)
+		case !collectSlotPattern.MatchString(rule.Slot):
+			report("tool %q collects into slot %q, which is not a name of letters, digits and underscores, with dots between segments", name, rule.Slot)
+		default:
+			for _, written := range []string{rule.Slot, rule.Slot + collectCountSuffix} {
+				if reason := s.collectCollision(d, name, written); reason != "" {
+					report("tool %q collects into slot %q, but %q is %s", name, rule.Slot, written, reason)
+				}
+			}
+		}
+		if strings.TrimSpace(rule.Value) == "" {
+			report("tool %q collect has no value", name)
+		}
+		args := toolArgNames(s.Tools[name])
+		for _, m := range templateReference.FindAllStringSubmatch(rule.Value, -1) {
+			switch {
+			case m[1] == "args" && !slices.Contains(args, m[2]):
+				report("tool %q collect value references {args.%s}, which is not a declared parameter of the tool", name, m[2])
+			case m[1] == "slots" && !d.has(m[2]):
+				report("tool %q collect value references {slots.%s}, which nothing in this flow writes", name, m[2])
+			}
+		}
+		if err := validateCondition(rule.When); err != nil {
+			report("tool %q collect when: %v", name, err)
+		}
+		for _, slot := range conditionSlots(rule.When) {
+			if !d.has(slot) {
+				report("tool %q collect when tests slot %q, which nothing in this flow writes", name, slot)
+			}
+		}
+	}
+}
+
+// collectCollision says what already owns a slot name a collect list would
+// write, or returns an empty string when the name is free.
+func (s *Spec) collectCollision(d declaredSlots, owner, written string) string {
+	if slices.Contains(engineSlots, written) {
+		return "written by the engine"
+	}
+	for _, root := range []string{"result", "userData", "noInput"} {
+		if written == root || strings.HasPrefix(written, root+".") {
+			return "in the namespace of " + root + ", which the engine owns"
+		}
+	}
+	if id, ok := strings.CutSuffix(written, ".visits"); ok {
+		if _, isNode := s.Nodes[id]; isNode {
+			return "the visit counter of phase " + id
+		}
+	}
+	for _, toolName := range d.toolNames() {
+		rest, ok := strings.CutPrefix(written, toolName+".")
+		if !ok {
+			continue
+		}
+		if rest == "calls" || rest == "ok" || strings.HasPrefix(rest, "args.") {
+			return "written by the engine for tool " + toolName
+		}
+		if tool, isFlowTool := s.Tools[toolName]; isFlowTool {
+			if tool.HTTP != nil {
+				if _, mapped := tool.HTTP.Result[rest]; mapped {
+					return "a result field of tool " + toolName
+				}
+			}
+		} else if d.resultKeys[rest] {
+			return "a result field of built-in tool " + toolName
+		}
+	}
+	for name, tool := range s.Tools {
+		if tool.Kind == ToolKindSlot && tool.Slot == written {
+			return "the slot of slot tool " + name
+		}
+		if c := tool.Collect; c != nil && name != owner {
+			if c.Slot == written || c.Slot+collectCountSuffix == written {
+				return "also written by the collect of tool " + name
+			}
+		}
+	}
+	return ""
 }

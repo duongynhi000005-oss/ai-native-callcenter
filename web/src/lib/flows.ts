@@ -75,6 +75,16 @@ export interface FlowTool {
   slot?: string
   /** The only values a kind "slot" tool accepts, when set. */
   enum?: string[]
+  /**
+   * An opt-in list slot fed by an HTTP tool's calls: `value` (a template) is
+   * appended to `slot` after each successful call for which `when` holds.
+   * Keep it when a spec is read and written back.
+   */
+  collect?: {
+    slot?: string
+    value?: string
+    when?: { slot?: string; op?: string; value?: unknown }
+  }
   description?: FlowText
   parameters?: {
     properties?: Record<string, FlowParameter>
