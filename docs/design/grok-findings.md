@@ -118,19 +118,129 @@ One session each (ids: p1 `4ca4ab2a5dc74d5db36157f8c1529f0c`, p2
 | 7 | `audio.input.transcription.model = "grok-transcribe"` | MEASURED: echoed as `input_audio_transcription: {model: "grok-transcribe"}`. Events: `conversation.item.input_audio_transcription.updated` (cumulative, `你们的` then `你们的客服几点下班？`) and `conversation.item.input_audio_transcription.completed` repeated with `status: "in_progress"` before a final one with `status: "completed"` (the in-progress ones carry text too). Note: **without** configuring a transcription model (`input_audio_transcription: null`) a single `conversation.item.input_audio_transcription.completed` (`status: "completed"`, full text) still arrived in every session. |
 | 8 | G.711 pcmu 8 kHz in and out | MEASURED: works both ways (section 2). Reply to the hours question: 38243 bytes = 4780 ms at 8 bytes/ms for a 27-character answer, consistent with the reported `output_audio_seconds`. |
 
-## 5. NOT MEASURED
+## 5. Trait measurements (issue #226, 2026-10-15)
+
+Four arms in `live_grok_test.go` (`TestLiveGrokBargeIn`, `TestLiveGrokResponseOverride`,
+`TestLiveGrokTerminalLine`, `TestLiveGrokTemperature`, `TestLiveGrokTranscription`),
+3 sessions per arm unless stated, 44 sessions in all. Same wire as sections 1 to 4
+(pcmu in and out, `server_vad`, voice `eve`). The probe frames are the repo client's
+own: `SayExactly(line, "zh")` from `realtime.go`, the `speakRequest` frame, a
+`function_call_output` built with `MergeHint`, `userTextItem`, and
+`response.cancel`. Labels as above: MEASURED on 2026-10-15.
+
+### 5.1 CancelsResponseItself
+
+Setup: instructions ask for a very long answer (at least twenty sentences); the
+first caller clip starts the answer; as soon as the first audio delta arrives
+the second clip (`q_hours`) is queued, so speech reaches the server while the
+response is still generating. Event order and offsets are from dial time.
+
+| Arm | Result |
+|---|---|
+| a. no `response.cancel` sent (3 sessions) | MEASURED 3/3: the server ends the response itself, at the same millisecond and immediately before `input_audio_buffer.speech_started`. Audio deltas stop (0 after `speech_started`), `response.done` arrives with `status: "completed"` (not `cancelled`), `output: []`, and there is **no** `response.output_audio_transcript.done`, `response.output_audio.done` or `response.output_item.done` for it. `usage.output_audio_seconds` was 5.84, 6.48 and 11.92 while about 1.2 s of audio had been streamed to the client, so generation runs at several times real time and the figure is not what the caller heard. Example (a#1): first audio 3258 ms, last audio 4436 ms, `response.done` and `speech_started` at 4549 ms, `speech_stopped` 5574 ms, new `response.created` 5699 ms. |
+| b. `response.cancel` sent on `speech_started` (3 sessions) | MEASURED: in 2 of 3 the response had been cut by the server in the same way (b#1, b#3); the cancel, sent 11 to 20 ms later, was answered 229 and 280 ms after `speech_started` by `error` `code: invalid_request_error`, `Cancellation failed: no active response found` (non-fatal, session continues and answers the barge-in). In b#2 the answer simply finished 570 ms before the speech (`transcript.done` and `response.done` completed), the same error followed. So a late cancel is always refused with that message and never harmful. |
+| c. `response.cancel` mid-response, no caller speech (3 sessions) | MEASURED 3/3: accepted, no error. `response.done` with `status: "cancelled"` 40 to 90 ms after the cancel (4231, 4394, 4475 ms), audio deltas stop, no item completed. |
+
+The earlier probe (4) was ambiguous because `speech_started` and the end of the
+response look simultaneous; here the response is cut with audio still being
+generated, and the cut is attributable to the speech because (c) shows the same
+generation is still running at that moment. The cut response carries status
+`completed`, not `cancelled`, so a client must not infer a cancel from the status.
+
+Recommendation: **`CancelsResponseItself = true`.** The client then sends no cancel on speech (it
+would draw the `no active response found` error every time) and still flushes its own queue and
+sends `conversation.item.truncate`, which section 4 row 5 showed is acknowledged. If the error
+code `invalid_request_error` is not in the client's expected-refusal list
+(`isAnsweredCancel` looks for `invalid_value` and `response_cancel_not_active`), a profile-level
+cancel would log a WARN, which is a second reason not to send it. A cancel for non-speech reasons
+(a deployment's own interrupt) is accepted and ends in `cancelled`.
+
+### 5.2 RequiresTerminalAnnounce
+
+The line was `感谢您致电 NovaNet，祝您生活愉快，再见。`. Scoring from the output transcript:
+VERBATIM (equal after stripping punctuation), CONTAINS, NEAR (Levenshtein ratio at least 0.9), MISS.
+
+| Variant | Result |
+|---|---|
+| (a) after two caller turns, `response.create` with `response.instructions = SayExactly(line)` and nothing else (the client's `speakRequest`) | MEASURED 0/3, and not a wrong sentence: **no response at all**. No `response.created`, no error, only the 10 s `ping`s, for the whole 30 s wait. Reproduced in 2 more sessions with one caller turn (also with `modalities: ["audio"]` added): 0/2. The same frame on an **empty** conversation works: 1/1 VERBATIM (this is the opening line path). So a per-response override alone is silently dropped once the conversation has a turn in it. |
+| (a2) as (a), but the same direction first put in the conversation as a caller message (`userTextItem`), then the override (the `NeedsDirectedLineInConversation` closing path) | MEASURED 3/3 VERBATIM. Also 1/1 VERBATIM with the caller message and a bare `response.create`. |
+| (b) tool result carrying the line as its hint (`MergeHint(output, SayExactly(line))`, then a bare `response.create`), after `lookup_order` was called (3/3 sessions called it, `{"order_id":"12345"}`) | MEASURED 3/3 VERBATIM, sim 1.00. |
+
+Recommendation: **`RequiresTerminalAnnounce = false`.** The engine does take text cues, and the
+tool-result hint (b) is exact, 3/3. For a line asked for outside a tool result (dead air, session
+limit, a phase announce after the first turn) the per-response override alone must not be used: it
+produced nothing, 0/5. Set **`NeedsDirectedLineInConversation = true`** (or put the direction in
+the conversation for every mid-call line, not only closing ones, since a silent drop is worse than
+the history cost): the user-item-plus-override form is 3/3. The opening line is the one place the
+override alone works (empty conversation). Caveat: this is a strong dependency on the exact
+frame; re-run `TestLiveGrokResponseOverride` when the model version changes. The silent drop
+also means the client's turn bookkeeping (`isResponseRequested`) would wait forever on a
+`response.create` that never produces `response.created`.
+
+### 5.3 AcceptsTemperature
+
+| What | Result |
+|---|---|
+| Range accepted in `session.update` (one session, values in turn) | MEASURED: 0, 0.2, 1.5, 2, 2.5, 5, -0.5 and 100 are all acknowledged by `session.updated` and echoed unchanged; nothing is clamped or rejected. A string (`"hot"`) draws a non-fatal `error` `Invalid event received`, and the session keeps working afterwards (a following valid update is acknowledged). No out-of-range value killed the session. |
+| Effect on output, prompt "random fruit and a number 1 to 100", 3 fresh sessions per value | MEASURED: temperature 0: `苹果 37`, `苹果 42`, `苹果 42` (2 distinct of 3); temperature 2: `苹果 42` x3 (1 distinct). Mode-collapsed prompt, no usable signal. |
+| Effect on output, prompt "one-sentence cat story opening", 3 sessions per value | MEASURED: 0: 3 distinct of 3; 2: 3 distinct of 3; 100: 3 distinct of 3. All different sentences at every value, so no visible difference in variety between 0 and 100 at N=3. |
+
+So the field is accepted everywhere but no effect was observed: neither determinism at 0 nor more
+variety at 2 or 100. Absence of an effect at N=3 is not proof that it is ignored; the echo proves
+only that it is stored.
+
+Recommendation: **`AcceptsTemperature = false`** (leave it off). The value is accepted but nothing
+observable follows from it, there is no documented range to validate against, and a value a deployment
+sets would be one nothing demonstrably reads. Turn it on only after a measurement that shows an effect
+(many samples of one prompt at 0 and at the high end, compared by edit distance).
+
+### 5.4 Transcription: default versus `grok-transcribe`
+
+Three sessions per mode, each with three clips in turn: `q_hours` (zh), `q_order` (zh, with digits)
+and `q_en_hours` (en, `say -v Samantha` converted to mu-law 8 kHz). Final transcript compared with the
+known text (Chinese numerals normalised to digits).
+
+| | default (nothing configured, echo `input_audio_transcription: null`) | `audio.input.transcription.model = "grok-transcribe"` |
+|---|---|---|
+| Caller words delivered | MEASURED 9/9 clips exact (`你们的客服几点下班？`, `我想查一下我的订单状态，订单号是12345。`, `What are your opening hours?`) | MEASURED 9/9 clips, identical final text |
+| Events per utterance | exactly one `conversation.item.input_audio_transcription.completed` (`status: "completed"`, `transcript`, `item_id`); `conversation.item.added` of the user item also carries the transcript in its `content[].transcript` | `...transcription.updated` (cumulative `transcript`, no status; long ones end in `...`), `...completed` with `status: "in_progress"` (partial text, repeated), then one `...completed` with `status: "completed"` |
+| Timing | arrives 175 to 290 ms after `speech_stopped`, 50 to 180 ms after `response.created` (9/9) | partials start while the caller is still speaking (for the 10 s clip, first one 3.7 s before `speech_stopped`); final 160 to 270 ms after `speech_stopped` |
+| Sample (trimmed) | `{"item_id":"8d55…","status":"completed","transcript":"你们的客服几点下班？","type":"conversation.item.input_audio_transcription.completed"}` | `{"item_id":"514c…","transcript":"你们的客服几点","type":"…transcription.updated"}`, `{"status":"in_progress","transcript":"你们的客服几点下班？","type":"…completed"}`, `{"status":"completed","transcript":"你们的客服几点下班？","type":"…completed"}` |
+
+Chinese was exercised with the existing qwen-TTS clips (two utterances) and English with one
+synthesized clip; both modes were exact on all of them. Accuracy on real telephone speech, accents
+and noisy lines is not measured.
+
+Recommendation: **leave `TranscribeModel` empty** for the transcript and CDR. The default delivers
+the caller's words with one event per utterance and the same final text, with no configuration to
+carry. If a client takes `TranscribeModel`, it must key on `status == "completed"` for
+`...transcription.completed` and ignore `in_progress` (the same event type repeats), and drop
+`.updated`. `grok-transcribe` is worth setting only for a live caption or for early intent
+detection, since its partials arrive during speech; that is not a call-center-recorder need. Note this
+differs from OpenAI's profile, where transcription must be requested.
+
+### 5.5 Surprises
+
+- A per-response `instructions` override after the first turn is silently ignored (5.2). The opening
+  line works only because the conversation is empty.
+- The server ends its own response on speech, but marks it `completed` with an empty `output`,
+  not `cancelled` (5.1); the audio generated (up to 11.9 s) is far more than was streamed.
+- A `response.cancel` that loses the race is refused with `invalid_request_error` rather than the
+  codes the client already recognises as an answered cancel.
+- `temperature` accepts anything numeric and visibly does nothing.
+
+## 6. NOT MEASURED
 
 - Whether `silence_duration_ms: 500` changes when a turn ends (only that it is
   accepted and echoed); `threshold` is not echoed.
-- Whether `temperature` changes replies.
 - A second update that contradicts the first, many updates in one call, and a
   slot value the model must recall verbatim; obedience of a style directive is
   the easiest kind to check.
 - Whether audio sent before the ack is the whole story (versus a particular
   moment); the deafness mechanism itself.
-- Barge-in with `response.cancel` sent by the client while a response streams,
-  and whether the server ends its own response on detected speech (ordering in
-  probe 4 is ambiguous).
+- Whether `temperature` has any effect at all (5.3 saw none at N=3), and whether
+  a longer wait before a mid-call override would change the silent drop (5.2 waited 1 s and 0.3 s).
+- Transcription accuracy on real telephone speech; `grok-transcribe` language options.
 - Behaviour on a long call (connection cap, idle `ping` handling, reconnect).
 - Voices other than `eve`; the REST `session` shape beyond what is above.
 - Latency and cost: not measured and not claimed.

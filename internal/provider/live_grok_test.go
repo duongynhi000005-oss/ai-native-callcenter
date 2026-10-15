@@ -129,6 +129,20 @@ type grokConn struct {
 	audioBytes map[string]int
 	amu        sync.Mutex
 	upgrade    *http.Response
+	// t0 is the dial time; tl is every event next() returned, with its offset.
+	t0 time.Time
+	tl []grokTL
+}
+
+// grokTL is one logged event: its offset from dial, type, response id,
+// response.done status, the event's own status/error text and any transcript.
+type grokTL struct {
+	off    time.Duration
+	typ    string
+	rid    string
+	status string
+	extra  string
+	text   string
 }
 
 func grokDial(t *testing.T, key, label string) *grokConn {
@@ -147,7 +161,7 @@ func grokDial(t *testing.T, key, label string) *grokConn {
 	}
 	g := &grokConn{t: t, label: label, c: c, events: make(chan grokEvent, 4096),
 		stop: make(chan struct{}), done: make(chan struct{}), closed: make(chan struct{}),
-		seen: map[string]bool{}, audioBytes: map[string]int{}, upgrade: resp}
+		seen: map[string]bool{}, audioBytes: map[string]int{}, upgrade: resp, t0: time.Now()}
 	var ids []string
 	for _, k := range []string{"X-Request-Id", "X-Xai-Request-Id", "Cf-Ray", "Request-Id"} {
 		if v := resp.Header.Get(k); v != "" {
@@ -260,6 +274,10 @@ func (g *grokConn) next(d time.Duration) (grokEvent, bool) {
 	select {
 	case ev := <-g.events:
 		g.log(ev)
+		g.tl = append(g.tl, grokTL{off: ev.At.Sub(g.t0), typ: ev.Type,
+			rid:    firstNonEmpty(ev.str("response_id"), ev.str("response", "id")),
+			status: ev.str("response", "status"), extra: ev.str("status") + ev.str("error", "message"),
+			text: firstNonEmpty(ev.str("transcript"), ev.str("text"))})
 		return ev, true
 	case <-time.After(d):
 		return grokEvent{}, false
@@ -619,4 +637,456 @@ func TestLiveGrokProtocol(t *testing.T) {
 			t.Errorf("no audio came back for a pcmu session: %+v", tr)
 		}
 	})
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// ---------------------------------------------------------------------------
+// Trait probes (issue #226). Each arm opens 3 sessions. Assertions are limited
+// to "the session worked"; what the server did is logged, and recorded in
+// docs/design/grok-findings.md section 6.
+// ---------------------------------------------------------------------------
+
+const (
+	grokLongPersona = "你是 NovaNet 的电话客服。请用中文回答，回答必须非常详细，至少说二十句话，不要中途停下来。"
+	grokBye         = "感谢您致电 NovaNet，祝您生活愉快，再见。"
+)
+
+// grokSimilarity is 1 - levenshtein/len over normalized runes.
+func grokSimilarity(a, b string) float64 {
+	x, y := []rune(grokNormalize(a)), []rune(grokNormalize(b))
+	if len(x) == 0 && len(y) == 0 {
+		return 1
+	}
+	prev := make([]int, len(y)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(x); i++ {
+		cur := make([]int, len(y)+1)
+		cur[0] = i
+		for j := 1; j <= len(y); j++ {
+			c := 1
+			if x[i-1] == y[j-1] {
+				c = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+c)
+		}
+		prev = cur
+	}
+	return 1 - float64(prev[len(y)])/float64(max(len(x), len(y)))
+}
+
+// grokScore classifies a transcript against the line asked for.
+func grokScore(got, want string) string {
+	g, w := grokNormalize(got), grokNormalize(want)
+	switch {
+	case g == w:
+		return "VERBATIM"
+	case strings.Contains(g, w):
+		return "CONTAINS"
+	case grokSimilarity(got, want) >= 0.9:
+		return "NEAR"
+	}
+	return "MISS"
+}
+
+func short(id string) string {
+	if len(id) > 6 {
+		return id[:6]
+	}
+	return id
+}
+
+// timeline renders tl[from:] compactly: runs of one delta type collapse to a
+// count with first and last offsets.
+func (g *grokConn) timeline(from int) string {
+	var parts []string
+	for i := from; i < len(g.tl); {
+		e := g.tl[i]
+		if strings.HasSuffix(e.typ, ".delta") {
+			j := i
+			for j < len(g.tl) && g.tl[j].typ == e.typ && g.tl[j].rid == e.rid {
+				j++
+			}
+			parts = append(parts, fmt.Sprintf("%s x%d [%d..%dms] r=%s", e.typ, j-i, e.off.Milliseconds(), g.tl[j-1].off.Milliseconds(), short(e.rid)))
+			i = j
+			continue
+		}
+		s := fmt.Sprintf("%dms %s", e.off.Milliseconds(), e.typ)
+		if e.rid != "" {
+			s += " r=" + short(e.rid)
+		}
+		if e.status != "" {
+			s += " status=" + e.status
+		}
+		if e.extra != "" {
+			s += " " + e.extra
+		}
+		parts = append(parts, s)
+		i++
+	}
+	return strings.Join(parts, "\n    ")
+}
+
+// bargeSummary: for the first response, when its audio started and ended,
+// when speech_started came, how many audio deltas arrived after it, and how
+// the response ended.
+func (g *grokConn) bargeSummary() string {
+	var rid string
+	first, last := time.Duration(-1), time.Duration(-1)
+	speechAt, doneAt := time.Duration(-1), time.Duration(-1)
+	doneStatus := ""
+	after := 0
+	for _, e := range g.tl {
+		switch {
+		case e.typ == "response.output_audio.delta" && (rid == "" || e.rid == rid):
+			if rid == "" {
+				rid = e.rid
+				first = e.off
+			}
+			last = e.off
+			if speechAt >= 0 {
+				after++
+			}
+		case e.typ == "input_audio_buffer.speech_started" && rid != "" && speechAt < 0:
+			speechAt = e.off
+		case e.typ == "response.done" && e.rid == rid && doneAt < 0:
+			doneAt, doneStatus = e.off, e.status
+		}
+	}
+	mid := speechAt >= 0 && (doneAt < 0 || speechAt < doneAt)
+	return fmt.Sprintf("first audio %dms, last audio %dms, speech_started %dms, response.done %dms status=%q, audio deltas after speech_started=%d, speech_started BEFORE response.done=%v",
+		first.Milliseconds(), last.Milliseconds(), speechAt.Milliseconds(), doneAt.Milliseconds(), doneStatus, after, mid)
+}
+
+// TestLiveGrokBargeIn measures CancelsResponseItself: caller speech arrives
+// while a very long answer is still being generated.
+//
+//	a: no response.cancel is sent; does the server end the response itself?
+//	b: response.cancel is sent the moment speech_started arrives mid-response.
+//	c: response.cancel is sent mid-response with no caller speech at all.
+func TestLiveGrokBargeIn(t *testing.T) {
+	key := grokSkip(t)
+	broadband, hours := grokClip(t, "broadband"), grokClip(t, "hours")
+	for _, arm := range []string{"a-no-cancel", "b-cancel-on-speech", "c-cancel-no-speech"} {
+		t.Run(arm, func(t *testing.T) {
+			for run := 1; run <= 3; run++ {
+				label := fmt.Sprintf("barge-%s#%d", arm[:1], run)
+				g := grokOpen(t, key, label, grokLongPersona, false, nil)
+				g.say(broadband)
+				if _, ok := g.waitType(25*time.Second, "response.output_audio.delta"); !ok {
+					t.Errorf("[%s] no reply started", label)
+					g.close()
+					continue
+				}
+				mark := len(g.tl) - 1
+				switch arm[:1] {
+				case "a", "b":
+					g.say(hours)
+				case "c":
+					time.Sleep(1 * time.Second)
+					t.Logf("[%s] sending response.cancel at %dms", label, time.Since(g.t0).Milliseconds())
+					_ = g.send(map[string]any{"type": "response.cancel"})
+				}
+				cancelled := false
+				dones := 0
+				end := time.Now().Add(25 * time.Second)
+				for time.Now().Before(end) {
+					ev, ok := g.next(time.Until(end))
+					if !ok {
+						break
+					}
+					if ev.Type == "input_audio_buffer.speech_started" && arm[:1] == "b" && !cancelled {
+						cancelled = true
+						t.Logf("[%s] speech_started at %dms; sending response.cancel", label, ev.At.Sub(g.t0).Milliseconds())
+						_ = g.send(map[string]any{"type": "response.cancel"})
+					}
+					if ev.Type == "response.done" {
+						dones++
+						if dones >= 2 || arm[:1] == "c" {
+							break
+						}
+					}
+				}
+				g.drain(1 * time.Second)
+				t.Logf("[%s] SUMMARY %s", label, g.bargeSummary())
+				t.Logf("[%s] TIMELINE\n    %s", label, g.timeline(mark))
+				g.close()
+			}
+		})
+	}
+}
+
+// TestLiveGrokTerminalLine measures RequiresTerminalAnnounce: can a line be
+// made to come out verbatim (a) by a response.create carrying the client's
+// SayExactly as a per-response override, and (b) by a tool result whose hint
+// is that direction (what the client sends when the trait is false)?
+func TestLiveGrokTerminalLine(t *testing.T) {
+	key := grokSkip(t)
+	hours, price, order := grokClip(t, "hours"), grokClip(t, "price"), grokClip(t, "order")
+	direction := SayExactly(grokBye, "zh")
+
+	t.Run("a-response-create-override", func(t *testing.T) {
+		score := map[string]int{}
+		for run := 1; run <= 3; run++ {
+			label := fmt.Sprintf("line-a#%d", run)
+			g := grokOpen(t, key, label, grokPersona, false, nil)
+			for _, c := range [][]byte{hours, price} {
+				g.say(c)
+				if _, ok := g.reply(30 * time.Second); !ok {
+					t.Errorf("[%s] no reply", label)
+				}
+				g.drain(300 * time.Millisecond)
+			}
+			_ = g.send(speakRequest(direction))
+			tr, ok := g.reply(30 * time.Second)
+			sc := grokScore(tr.text, grokBye)
+			score[sc]++
+			t.Logf("[%s] ok=%v %s sim=%.2f said=%q", label, ok, sc, grokSimilarity(tr.text, grokBye), tr.text)
+			g.close()
+		}
+		t.Logf("[line-a] RESULT %v", score)
+	})
+
+	// a2 is the closing path of a profile with NeedsDirectedLineInConversation:
+	// the same direction as a caller message first, then the override.
+	t.Run("a2-user-item-plus-override", func(t *testing.T) {
+		score := map[string]int{}
+		for run := 1; run <= 3; run++ {
+			label := fmt.Sprintf("line-a2#%d", run)
+			g := grokOpen(t, key, label, grokPersona, false, nil)
+			for _, c := range [][]byte{hours, price} {
+				g.say(c)
+				if _, ok := g.reply(30 * time.Second); !ok {
+					t.Errorf("[%s] no reply", label)
+				}
+				g.drain(300 * time.Millisecond)
+			}
+			_ = g.send(userTextItem(direction))
+			_ = g.send(speakRequest(direction))
+			tr, ok := g.reply(30 * time.Second)
+			sc := grokScore(tr.text, grokBye)
+			score[sc]++
+			t.Logf("[%s] ok=%v %s sim=%.2f said=%q", label, ok, sc, grokSimilarity(tr.text, grokBye), tr.text)
+			g.close()
+		}
+		t.Logf("[line-a2] RESULT %v", score)
+	})
+
+	t.Run("b-tool-result-hint", func(t *testing.T) {
+		score := map[string]int{}
+		noTool := 0
+		for run := 1; run <= 3; run++ {
+			label := fmt.Sprintf("line-b#%d", run)
+			g := grokOpen(t, key, label, grokPersona+grokToolPhase, true, nil)
+			g.say(hours)
+			if _, ok := g.reply(30 * time.Second); !ok {
+				t.Errorf("[%s] no reply to hours", label)
+			}
+			g.drain(300 * time.Millisecond)
+			g.say(order)
+			tr, _ := g.reply(30 * time.Second)
+			if len(tr.tools) == 0 {
+				noTool++
+				t.Logf("[%s] no tool call: %+v", label, tr)
+				g.close()
+				continue
+			}
+			call := tr.tools[0]
+			output := MergeHint(`{"status":"已发货，预计明天送达"}`, direction)
+			t.Logf("[%s] tool %s %s; output=%s", label, call.name, call.args, output)
+			_ = g.send(map[string]any{"type": "conversation.item.create", "item": map[string]any{
+				"type": "function_call_output", "call_id": call.callID, "output": output}})
+			_ = g.send(map[string]any{"type": "response.create"})
+			after, ok := g.reply(30 * time.Second)
+			sc := grokScore(after.text, grokBye)
+			score[sc]++
+			t.Logf("[%s] ok=%v %s sim=%.2f said=%q", label, ok, sc, grokSimilarity(after.text, grokBye), after.text)
+			g.close()
+		}
+		t.Logf("[line-b] RESULT %v, sessions without a tool call %d", score, noTool)
+	})
+}
+
+// TestLiveGrokTemperature measures AcceptsTemperature: the accepted range, and
+// whether a low and a high value change how varied identical prompts come out.
+func TestLiveGrokTemperature(t *testing.T) {
+	key := grokSkip(t)
+	t.Run("range", func(t *testing.T) {
+		g := grokOpen(t, key, "temp-range", grokPersona, false, nil)
+		defer func() { g.close() }()
+		for _, v := range []any{0.0, 0.2, 1.5, 2.0, 2.5, 5.0, -0.5, 100.0, "hot"} {
+			_ = g.send(map[string]any{"type": "session.update", "session": map[string]any{"temperature": v}})
+			ev, ok := g.waitType(4*time.Second, "session.updated", "error")
+			echo := "<none>"
+			if ok && ev.Type == "session.updated" {
+				if s, isMap := ev.Raw["session"].(map[string]any); isMap {
+					echo = fmt.Sprint(s["temperature"])
+				}
+			}
+			t.Logf("[temp-range] value=%v -> ok=%v type=%s echo=%s err=%s", v, ok, ev.Type, echo, ev.str("error", "message"))
+			// is the session still usable?
+			_ = g.send(map[string]any{"type": "session.update", "session": map[string]any{"temperature": 0.8}})
+			ev2, ok2 := g.waitType(4*time.Second, "session.updated", "error")
+			t.Logf("[temp-range]   afterwards alive=%v type=%s", ok2, ev2.Type)
+			if !ok2 {
+				t.Logf("[temp-range]   session dead after %v; reopening", v)
+				g.close()
+				g = grokOpen(t, key, "temp-range-b", grokPersona, false, nil)
+			}
+		}
+	})
+
+	for _, pr := range []struct{ name, ask string }{
+		{"fruit", "请随机说出一种水果和一个一到一百之间的数字，只说这两个词，不要说别的。"},
+		{"story", "用一句话编一个关于一只猫的小故事的开头，要有创意。"},
+	} {
+		for _, tc := range []struct {
+			name string
+			temp float64
+		}{{"low", 0.0}, {"high", 2.0}, {"extreme", 100.0}} {
+			if pr.name == "fruit" && tc.name == "extreme" {
+				continue
+			}
+			t.Run("variety-"+pr.name+"-"+tc.name, func(t *testing.T) {
+				var said []string
+				for run := 1; run <= 3; run++ {
+					label := fmt.Sprintf("temp-%s-%s#%d", pr.name, tc.name, run)
+					g := grokOpen(t, key, label, "你是一个简短回答的助手，用中文。", false, map[string]any{"temperature": tc.temp})
+					_ = g.send(userTextItem(pr.ask))
+					_ = g.send(map[string]any{"type": "response.create"})
+					tr, ok := g.reply(30 * time.Second)
+					t.Logf("[%s] ok=%v said=%q", label, ok, tr.text)
+					said = append(said, grokNormalize(tr.text))
+					g.close()
+				}
+				distinct := map[string]bool{}
+				for _, x := range said {
+					distinct[x] = true
+				}
+				t.Logf("[temp-%s-%s] temperature=%v RESULT %d distinct of 3: %q", pr.name, tc.name, tc.temp, len(distinct), said)
+			})
+		}
+	}
+}
+
+// TestLiveGrokTranscription compares the default (nothing configured) with
+// grok-transcribe: do both deliver the caller's words, in what shape and when.
+func TestLiveGrokTranscription(t *testing.T) {
+	key := grokSkip(t)
+	clips := []struct {
+		name, want string
+		pcm        []byte
+	}{
+		{"hours-zh", "你们的客服几点下班？", grokClip(t, "hours")},
+		{"order-zh", "我想查一下我的订单状态，订单号是一二三四五。", grokClip(t, "order")},
+		{"hours-en", "What are your opening hours?", grokClip(t, "en_hours")},
+	}
+	digits := strings.NewReplacer("一", "1", "二", "2", "三", "3", "四", "4", "五", "5")
+	for _, mode := range []string{"default", "grok-transcribe"} {
+		t.Run(mode, func(t *testing.T) {
+			ok, total := 0, 0
+			for run := 1; run <= 3; run++ {
+				label := fmt.Sprintf("tr-%s#%d", mode, run)
+				var extra map[string]any
+				if mode != "default" {
+					extra = map[string]any{"audio": map[string]any{
+						"input": map[string]any{"format": map[string]any{"type": "audio/pcmu", "rate": 8000},
+							"transcription": map[string]any{"model": mode}},
+						"output": map[string]any{"format": map[string]any{"type": "audio/pcmu", "rate": 8000}}}}
+				}
+				g := grokOpen(t, key, label, grokPersona, false, extra)
+				for _, c := range clips {
+					mark := len(g.tl)
+					g.say(c.pcm)
+					if _, got := g.reply(30 * time.Second); !got {
+						t.Errorf("[%s] %s: no complete reply", label, c.name)
+					}
+					g.drain(1500 * time.Millisecond)
+					var kinds []string
+					text := ""
+					firstSeen, finalAt, createdAt, stoppedAt := time.Duration(-1), time.Duration(-1), time.Duration(-1), time.Duration(-1)
+					for _, e := range g.tl[mark:] {
+						switch {
+						case e.typ == "input_audio_buffer.speech_stopped" && stoppedAt < 0:
+							stoppedAt = e.off
+						case e.typ == "response.created" && createdAt < 0:
+							createdAt = e.off
+						case strings.HasPrefix(e.typ, "conversation.item.input_audio_transcription"):
+							if firstSeen < 0 {
+								firstSeen = e.off
+							}
+							kind := strings.TrimPrefix(e.typ, "conversation.item.input_audio_transcription.")
+							if e.extra != "" {
+								kind += ":" + e.extra
+							}
+							kinds = append(kinds, fmt.Sprintf("%s@%dms", kind, e.off.Milliseconds()))
+							if e.text != "" {
+								text = e.text
+							}
+							if e.typ == "conversation.item.input_audio_transcription.completed" && e.extra != "in_progress" {
+								finalAt = e.off
+							}
+						}
+					}
+					sim := grokSimilarity(digits.Replace(text), digits.Replace(c.want))
+					total++
+					if sim >= 0.9 {
+						ok++
+					}
+					t.Logf("[%s] %s: want %q got %q sim=%.2f; events %v; speech_stopped %dms, first transcription event %dms, final %dms, response.created %dms",
+						label, c.name, c.want, text, sim, kinds, stoppedAt.Milliseconds(), firstSeen.Milliseconds(), finalAt.Milliseconds(), createdAt.Milliseconds())
+				}
+				g.close()
+			}
+			t.Logf("[tr-%s] RESULT final transcript sim>=0.9: %d/%d clips", mode, ok, total)
+		})
+	}
+}
+
+// TestLiveGrokResponseOverride isolates why a per-response instructions
+// override produced nothing after two caller turns (TestLiveGrokTerminalLine
+// arm a): one session per variant.
+func TestLiveGrokResponseOverride(t *testing.T) {
+	key := grokSkip(t)
+	hours := grokClip(t, "hours")
+	direction := SayExactly(grokBye, "zh")
+	variants := []struct {
+		name    string
+		history bool
+		send    func(g *grokConn)
+	}{
+		{"empty-conversation-override", false, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
+		{"after-turn-override", true, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
+		{"after-turn-override-modalities", true, func(g *grokConn) {
+			_ = g.send(map[string]any{"type": "response.create", "response": map[string]any{
+				"instructions": direction, "modalities": []string{"audio"}}})
+		}},
+		{"after-turn-user-item-then-bare", true, func(g *grokConn) {
+			_ = g.send(userTextItem(direction))
+			_ = g.send(map[string]any{"type": "response.create"})
+		}},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			g := grokOpen(t, key, "ovr-"+v.name, grokPersona, false, nil)
+			defer g.close()
+			if v.history {
+				g.say(hours)
+				if _, ok := g.reply(30 * time.Second); !ok {
+					t.Fatal("no first reply")
+				}
+				g.drain(1 * time.Second)
+			}
+			v.send(g)
+			tr, ok := g.reply(20 * time.Second)
+			t.Logf("[ovr-%s] ok=%v %s said=%q errs=%v", v.name, ok, grokScore(tr.text, grokBye), tr.text, tr.errs)
+		})
+	}
 }
