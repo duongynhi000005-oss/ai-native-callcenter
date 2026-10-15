@@ -139,6 +139,12 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- The phone setup card no longer stays up with "Allow this site" unticked
+  when an agent reaches the cockpit by typing its address. Chrome had
+  prerendered the page, and web-sip-phone up to 1.1.1 withdrew from a
+  prerendered page for good. The fix is in the extension and needs
+  web-sip-phone 1.1.2 or later; requirement R10 in
+  `docs/web-sip-phone-protocol.md` records it (web-sip-phone#30).
 - The `mobile_support` flow no longer asks for the order number again, or says
   it did not hear it, when the caller asks about "my order" after looking up
   several. It keeps the orders found, answers for the only one directly, and
