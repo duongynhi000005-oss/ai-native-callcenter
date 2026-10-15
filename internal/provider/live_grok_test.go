@@ -1090,3 +1090,44 @@ func TestLiveGrokResponseOverride(t *testing.T) {
 		})
 	}
 }
+
+// TestLiveGrokOverrideDisambiguation asks what exactly the engine drops once
+// the conversation has a turn (grok-findings 5.2): is it the per-response
+// override specifically, or any response.create that comes with no new caller
+// item after the last assistant item? Two sessions per arm.
+//
+//	AICC_LIVE_PROVIDER_TEST=1 go test -count=1 -run LiveGrokOverrideDisambiguation -v ./internal/provider/
+func TestLiveGrokOverrideDisambiguation(t *testing.T) {
+	key := grokSkip(t)
+	hours := grokClip(t, "hours")
+	direction := SayExactly(grokBye, "zh")
+	arms := []struct {
+		name string
+		wait time.Duration
+		send func(g *grokConn)
+	}{
+		// (i) a bare response.create: no override, no new item.
+		{"bare-create-no-item", time.Second, func(g *grokConn) {
+			_ = g.send(map[string]any{"type": "response.create"})
+		}},
+		// (iii) the override after a long wait instead of 0.3 to 1 s.
+		{"override-after-3s", 3 * time.Second, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
+	}
+	for _, arm := range arms {
+		for n := 1; n <= 2; n++ {
+			t.Run(fmt.Sprintf("%s-%d", arm.name, n), func(t *testing.T) {
+				g := grokOpen(t, key, fmt.Sprintf("disamb-%s-%d", arm.name, n), grokPersona, false, nil)
+				defer g.close()
+				g.say(hours)
+				if _, ok := g.reply(30 * time.Second); !ok {
+					t.Fatal("no first reply")
+				}
+				g.drain(arm.wait)
+				arm.send(g)
+				tr, ok := g.reply(15 * time.Second)
+				t.Logf("[disamb-%s-%d] answered=%v %s said=%q errs=%v",
+					arm.name, n, ok, grokScore(tr.text, grokBye), tr.text, tr.errs)
+			})
+		}
+	}
+}

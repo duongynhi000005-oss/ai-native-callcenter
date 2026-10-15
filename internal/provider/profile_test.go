@@ -120,7 +120,7 @@ func TestAnUnknownProviderNamesTheOnesThereAre(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown provider started anyway")
 	}
-	for _, name := range []string{NameOpenAI, NameQwen, NameGateway, NameDoubao} {
+	for _, name := range []string{NameOpenAI, NameGrok, NameQwen, NameGateway, NameDoubao} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the refusal does not mention %q: %v", name, err)
 		}
@@ -136,7 +136,7 @@ func TestTheRemovedGeminiProviderIsRefusedWithTheAcceptedValues(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%q started anyway", name)
 		}
-		want := "(openai, qwen, gateway, doubao)"
+		want := "(openai, grok, gateway, qwen, doubao)"
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal = %v, want it to list %s", err, want)
 		}
@@ -196,6 +196,7 @@ func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 	}{
 		{OpenAIProfile(), false},
 		{QwenProfile(), false},
+		{GrokProfile(), false},
 		{GatewayProfile(), false},
 		{DoubaoProfile(), true},
 	} {
@@ -219,6 +220,7 @@ func TestTheSessionUpdateCarriesTheFlowsTemperatureOnlyWhereItIsAccepted(t *test
 	}{
 		{"qwen", QwenProfile(), true},
 		{"openai", OpenAIProfile(), false},
+		{"grok", GrokProfile(), false},
 		{"gateway", GatewayProfile(), false},
 	}
 	for _, tc := range cases {
@@ -241,7 +243,7 @@ func TestTheSessionUpdateCarriesTheFlowsTemperatureOnlyWhereItIsAccepted(t *test
 		})
 	}
 	if tc := QwenProfile(); !tc.AcceptsTemperature || OpenAIProfile().AcceptsTemperature ||
-		GatewayProfile().AcceptsTemperature || DoubaoProfile().AcceptsTemperature {
+		GatewayProfile().AcceptsTemperature || GrokProfile().AcceptsTemperature || DoubaoProfile().AcceptsTemperature {
 		t.Error("AcceptsTemperature is not qwen only")
 	}
 }

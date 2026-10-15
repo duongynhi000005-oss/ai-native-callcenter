@@ -429,12 +429,14 @@ func (r *Realtime) claimFloorLocked() {
 // conversation as a caller message first. The item goes strictly before the
 // request, so the turn the request makes is made with it in view.
 //
-// Only a closing line is put in the conversation. The item stays in the
-// history, and what a caller message saying "repeat this sentence" does to the
-// turns after it has not been measured — a call that is ending has no turns
-// after it to spoil. A line in a phase the conversation goes on from keeps
-// the override alone, for the reason answerToolCall keeps such a line out of
-// a tool result.
+// Where the engine ignores the override alone once the conversation has a turn
+// (IgnoresOverrideOnceTalking), every line is put in the conversation. Where
+// only NeedsDirectedLineInConversation is set, just a closing line is: the item
+// stays in the history, and what a caller message saying "repeat this
+// sentence" does to the turns after it has not been measured — a call that is
+// ending has no turns after it to spoil. A line in a phase the conversation
+// goes on from keeps the override alone there, for the reason answerToolCall
+// keeps such a line out of a tool result.
 //
 // Both of SpeakText's ways to the floor end here — asked at once, or asked when
 // the turn that held it has ended — so a line is steered the same way whichever
@@ -443,7 +445,8 @@ func (r *Realtime) claimFloorLocked() {
 func (r *Realtime) askForLine(text, language string, isClosing bool) error {
 	direction := sayExactly(text, language)
 	err := func() error {
-		if isClosing && r.profile.NeedsDirectedLineInConversation {
+		if r.profile.IgnoresOverrideOnceTalking ||
+			(isClosing && r.profile.NeedsDirectedLineInConversation) {
 			if err := r.sendEvent(userTextItem(direction)); err != nil {
 				return err
 			}
@@ -802,9 +805,14 @@ const cancelAnswerWindow = 5 * time.Second
 // new response is requested before the refusal arrives, which is exactly what
 // a keypress or a spoken line does right after an interruption.
 func (r *Realtime) isAnsweredCancel(err *wireError) bool {
-	// qwen answers "invalid_value"; OpenAI names the code after the cancel.
-	if (err.Code != "invalid_value" && err.Code != "response_cancel_not_active") ||
-		!strings.Contains(strings.ToLower(err.Message), "no active response") {
+	// The code differs by vendor: qwen "invalid_value", OpenAI
+	// "response_cancel_not_active", Grok the generic "invalid_request_error".
+	switch err.Code {
+	case "invalid_value", "response_cancel_not_active", "invalid_request_error":
+	default:
+		return false
+	}
+	if !strings.Contains(strings.ToLower(err.Message), "no active response") {
 		return false
 	}
 	r.mu.Lock()
@@ -858,6 +866,9 @@ func (r *Realtime) buildSessionUpdate(cfg SessionConfig, isReduced bool) map[str
 
 		session["type"] = "realtime"
 		session["audio"] = map[string]any{"input": input, "output": output}
+		if r.profile.AcceptsTemperature && cfg.Temperature != nil && !isReduced {
+			session["temperature"] = *cfg.Temperature
+		}
 		return map[string]any{"type": "session.update", "session": session}
 	}
 
@@ -1027,8 +1038,25 @@ func (r *Realtime) handle(event *wireEvent) {
 	case "conversation.item.input_audio_transcription.delta":
 		r.emit(Event{Type: EventTypeInputTranscript, Text: event.Delta})
 
+	case "conversation.item.input_audio_transcription.updated":
+		// A cumulative running text of the same utterance (Grok). Nothing
+		// downstream reads partial caller text, and re-emitting the whole
+		// string per update would be read as new speech; the final .completed
+		// carries the line.
+		return
+
 	case "conversation.item.input_audio_transcription.completed":
+		// Some vendors repeat .completed with status "in_progress" before the
+		// final one. Only the final counts, so a caller utterance is exactly one
+		// transcript line. An absent status is final (OpenAI never sends one).
+		if event.Status != "" && event.Status != "completed" {
+			return
+		}
 		r.emit(Event{Type: EventTypeInputTranscript, Text: event.Transcript, IsFinal: true})
+
+	case "ping":
+		// A keep-alive some vendors send every few seconds. No state, no log.
+		return
 
 	case "response.function_call_arguments.done":
 		r.finishCall(event.ItemID, event.CallID)

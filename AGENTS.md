@@ -41,7 +41,7 @@ deploy/dev/restart.sh                             # build web/dist and /tmp/aicc
 go run ./cmd/aicc-mockbackend                     # business APIs the reference flows call (127.0.0.1:8770); the app uses it when AICC_BOT_BACKEND_BASE points there
 # logs: stderr and logs/aicc-<starttime>.log (read the file to analyse a run)
 
-# live provider tests: real money (OPENAI_/ALIYUN_/DOUBAO_API_KEY)
+# live provider tests: real money (OPENAI_/XAI_/ALIYUN_/DOUBAO_API_KEY)
 AICC_LIVE_PROVIDER_TEST=1 go test -count=1 -run Live -v ./internal/provider/...
 
 cd web && npm run dev                             # Vite on 5173
@@ -65,7 +65,7 @@ AICC_TEST_DATABASE_URL='postgres://aicc:aicc@127.0.0.1:5432/aicc?sslmode=disable
 
 ## Config
 
-`AICC_*` environment variables; `.env` in the working directory is loaded and the real environment wins. `.env.example` is the registry of every setting with its real default, kept in step with `internal/config/config.go`. An empty value means unset, so a non-empty default cannot be blanked. There is no inline-comment syntax. Provider API keys are not `AICC_*`: `OPENAI_API_KEY`, `ALIYUN_API_KEY`, `REALTIME_API_KEY` (gateway), `DOUBAO_API_KEY`. ESL is at `127.0.0.1:18021`, not the stock 8021.
+`AICC_*` environment variables; `.env` in the working directory is loaded and the real environment wins. `.env.example` is the registry of every setting with its real default, kept in step with `internal/config/config.go`. An empty value means unset, so a non-empty default cannot be blanked. There is no inline-comment syntax. Provider API keys are not `AICC_*`: `OPENAI_API_KEY`, `XAI_API_KEY` (grok), `ALIYUN_API_KEY`, `REALTIME_API_KEY` (gateway), `DOUBAO_API_KEY`. ESL is at `127.0.0.1:18021`, not the stock 8021.
 
 ## API contract: spec-first (mandatory)
 
@@ -95,9 +95,9 @@ Two telephony paths in one process; the AI path can be switched off (`AICC_BOT_E
 
 ### Providers (`docs/provider-extension.md`)
 
-- **One provider per deployment, chosen at startup** (A1): `AICC_PROVIDER` = `openai` | `qwen` | `gateway` | `doubao`, with `AICC_PROVIDER_ENDPOINT` / `AICC_PROVIDER_MODEL`, resolved once by `provider.ProfileFor`. A call's `language` sets the greeting and the prompt language; it never selects the provider or the voice. A language→provider mapping is a regression.
+- **One provider per deployment, chosen at startup** (A1): `AICC_PROVIDER` = `openai` | `grok` | `qwen` | `gateway` | `doubao`, with `AICC_PROVIDER_ENDPOINT` / `AICC_PROVIDER_MODEL`, resolved once by `provider.ProfileFor`. A call's `language` sets the greeting and the prompt language; it never selects the provider or the voice. A language→provider mapping is a regression.
 - **The extension point is the wire protocol, not Go** (A6). A new engine on the OpenAI Realtime protocol is a new `Profile` and a new `AICC_PROVIDER` value, never a new client; `gateway` (a separate service composing ASR + LLM + TTS behind Realtime events) attached that way. Cascade never enters this repo.
-- Only a new protocol earns a client. There are two: `provider.Realtime` (openai, qwen, gateway) and `internal/provider/doubao` (reasons in `docs/design/doubao-findings.md`). A new client lives in its own sub-package behind `provider.VoiceSession` and shares only transport and audio plumbing (`wsconn`, `Watchdog`, `MergeHint`, `SayExactly`, `pacer`), never a protocol event, decoder or dispatch. Do not generalise `VoiceSession`. The name→client choice is in `cmd/aicc/wiring.go`.
+- Only a new protocol earns a client. There are two: `provider.Realtime` (openai, grok, qwen, gateway) and `internal/provider/doubao` (reasons in `docs/design/doubao-findings.md`). A new client lives in its own sub-package behind `provider.VoiceSession` and shares only transport and audio plumbing (`wsconn`, `Watchdog`, `MergeHint`, `SayExactly`, `pacer`), never a protocol event, decoder or dispatch. Do not generalise `VoiceSession`. The name→client choice is in `cmd/aicc/wiring.go`.
 
 ### Events
 

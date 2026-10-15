@@ -79,6 +79,29 @@ type Profile struct {
 	// already pays: the direction enters the history as caller text.
 	NeedsDirectedLineInConversation bool
 
+	// IgnoresOverrideOnceTalking means that once the conversation holds a turn,
+	// a response.create carrying only a per-response instructions override
+	// (speakRequest, SayExactly) is silently dropped: no response.created, no
+	// error, nothing for as long as anyone waits. Measured on grok 0 of 5 after
+	// one or two caller turns, against 3 of 3 verbatim when the same direction
+	// is first put in the conversation as a caller message and the override
+	// follows (docs/design/grok-findings.md section 5.2). The opening line is
+	// unaffected: on an empty conversation the override alone works.
+	//
+	// Where it is true, every mid-call line asked for with SpeakText, closing or
+	// not, puts its direction in the conversation first, the mechanism
+	// NeedsDirectedLineInConversation applies to closing lines only. The item
+	// stays in the history; a silent drop is worse than that cost. It reaches
+	// no transcript: the caller-side transcript is built from input audio
+	// transcription events, which a text item never produces.
+	//
+	// Not NeedsDirectedLineInConversation: that one records that the override
+	// loses to the conversation (the model answers the last caller message
+	// instead) and is applied to closing lines because a call that is ending has
+	// no later turns to spoil. This one records that the override is not heard
+	// at all, so no line can do without the item.
+	IgnoresOverrideOnceTalking bool
+
 	// RequiresTerminalAnnounce says the engine speaks only words it is handed:
 	// no text this client sends makes it take a turn, so a phase the call does
 	// not leave has to carry its own words (a flow without them is refused at
@@ -287,12 +310,62 @@ func DoubaoProfile() Profile {
 	}
 }
 
+// GrokProfile is xAI's Grok Voice, reached over the OpenAI Realtime protocol in
+// its GA shape: a profile on the one Realtime client, never a client of its own
+// (phase1-decisions A6). What was measured on the wire is in
+// docs/design/grok-findings.md.
+//
+// Telephone audio passes through untouched ("audio/pcmu" / "audio/pcma", 8 kHz,
+// both ways). One ordering rule is new: audio sent before the session
+// configuration is acknowledged leaves the session deaf, with no error. The
+// client's Start already returns only after session.updated, and aicall starts
+// pumping caller audio after Start returns.
+func GrokProfile() Profile {
+	return Profile{
+		Name:      NameGrok,
+		Endpoint:  "wss://api.x.ai/v1/realtime",
+		Model:     "grok-voice-3.0",
+		APIKeyEnv: "XAI_API_KEY",
+		Style:     styleGA,
+		// One of xAI's voices (eve, ara, rex, sal, leo); the one the live
+		// measurement ran with. A flow's global.voice still wins.
+		Voice:        "eve",
+		AcceptsG711:  true,
+		LinearInput:  media.PCM16Format(media.RateProviderOut),
+		LinearOutput: media.PCM16Format(media.RateProviderOut),
+		// No TranscribeModel: this engine transcribes the caller in every
+		// session even when unasked (grok-findings 4, probe 7), and 5.4 measured
+		// both modes exact on 9 of 9 clips with one event per utterance by
+		// default. "grok-transcribe" adds only partials during speech.
+		TranscribeModel: "",
+		// Measured (grok-findings 5.1, 3 of 3): the server ends its own
+		// response immediately before speech_started, so no cancel is sent on
+		// speech (it would draw "no active response found" every time).
+		CancelsResponseItself: true,
+		// Measured 0 of 5 (grok-findings 5.2): a per-response override alone is
+		// silently dropped once the conversation has a turn. Every mid-call
+		// line therefore travels as a caller item first, then the override.
+		IgnoresOverrideOnceTalking: true,
+		// Measured: response.create on an empty conversation greets from the
+		// instructions (grok-findings §4, probe 3).
+		NeedsCueForFirstTurn: false,
+		// Measured (grok-findings 5.2): the engine takes text cues, and a tool
+		// result carrying the line as its hint was verbatim 3 of 3.
+		RequiresTerminalAnnounce: false,
+		// Measured (grok-findings 5.3): any number is accepted and echoed, but
+		// no effect on output was seen at 3 samples per value; off until one is.
+		AcceptsTemperature: false,
+	}
+}
+
 // Provider names this build can run. A deployment runs exactly one of them,
-// chosen at startup: qwen or doubao inside mainland China, openai
+// chosen at startup: qwen or doubao inside mainland China, openai or grok
 // elsewhere, gateway for a self-hosted service behind the Realtime protocol.
 const (
 	NameOpenAI = "openai"
 	NameQwen   = "qwen"
+	// NameGrok is xAI's Grok Voice, a dialect of the Realtime protocol.
+	NameGrok = "grok"
 	// NameGateway is not a vendor but a service of our own composing one
 	// behind this protocol; it is chosen the same way for the same reason.
 	NameGateway = "gateway"
@@ -337,13 +410,15 @@ func ProfileFor(name string, override Override) (Profile, error) {
 		profile = OpenAIProfile()
 	case NameQwen:
 		profile = QwenProfile()
+	case NameGrok:
+		profile = GrokProfile()
 	case NameGateway:
 		profile = GatewayProfile()
 	case NameDoubao:
 		profile = DoubaoProfile()
 	default:
-		return Profile{}, fmt.Errorf("provider: unknown provider %q (%s, %s, %s, %s)",
-			name, NameOpenAI, NameQwen, NameGateway, NameDoubao)
+		return Profile{}, fmt.Errorf("provider: unknown provider %q (%s, %s, %s, %s, %s)",
+			name, NameOpenAI, NameGrok, NameGateway, NameQwen, NameDoubao)
 	}
 	if override.Endpoint != "" {
 		profile.Endpoint = override.Endpoint

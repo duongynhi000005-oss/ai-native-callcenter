@@ -7,10 +7,10 @@ The extension point is the wire protocol, not Go.
 speaks that protocol means adding a profile and a name for `AICC_PROVIDER` —
 never a second client, never an interface with two implementations behind it.
 
-This is not an accident of the current code. Three engines already ship that way
-(OpenAI, Qwen and the Realtime gateway) and they differ only in values: an
+This is not an accident of the current code. Four engines already ship that way
+(OpenAI, Grok, Qwen and the Realtime gateway) and they differ only in values: an
 endpoint, a model, a dialect of the session payload, and a handful of
-behavioural traits discovered by calling them. A fourth that speaks the same
+behavioural traits discovered by calling them. A fifth that speaks the same
 protocol differs in exactly the same way.
 
 Only a different **protocol** earns another client, and one has. `doubao` is
@@ -54,13 +54,14 @@ Every field of `provider.Profile` exists because a vendor forced it to
 | `APIKeyEnv` | The environment variable the credential comes from — the vendor's own name for it, not an `AICC_*` setting |
 | `Style` | `GA` nests audio settings under `session.audio.input/output`; `BETA` is the older flat shape. Both are in the wild. |
 | `Voice` | The profile's default voice, used only when the flow does not name one |
-| `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours). False on openai (the GA `session` object has no such field), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
+| `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours). False on openai (the GA `session` object has no such field), grok (accepted and echoed for any number, but no effect on output was seen at 3 samples per value, grok-findings 5.3), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
 | `AcceptsG711` | Whether telephone audio passes through untouched. True removes conversion from the hot path entirely. |
 | `LinearInput` / `LinearOutput` | The PCM formats used when it does not. Fixed by the vendor, not negotiated. |
 | `CancelsResponseItself` | Whether it stops generating when it hears the caller, or has to be told |
 | `NeedsCueForFirstTurn` | Whether it refuses to speak into an empty conversation. Our bot greets first, so those providers need a synthetic cue. |
 | `NeedsDirectedLineInConversation` | Whether a mid-call line that *ends the call* (`SpeakText(text, isClosing=true)`) must also be put in the conversation as a caller message carrying the same `SayExactly` direction, ahead of the request that carries it as a per-response override. True on qwen, where the override alone lost to the conversation already there (qwen-findings W-Q1). A line the call goes on from keeps the override alone on every profile. |
-| `RequiresTerminalAnnounce` | Whether the engine speaks only words it is handed: *no* text will make it take a turn. Stronger than the row above: a cue is something a client can invent, and this says there is no cue at all, so a phase the call stops at must carry its own words or the caller hears silence, and a publish is refused otherwise (`flow.RequireTerminalAnnounce`, `TERMINAL_ANNOUNCE_REQUIRED`). The same capability decides how the closing line travels. Where it is true (doubao) a tool result that moves the call into a terminal phase carries the phase's instruction and the line is said with `SpeakText`, which is exact by construction; the session limit also has no cue to ask for a goodbye or handover with. Where it is false (openai, qwen, gateway) the tool result carries the line as its hint (`SayExactly`), so the turn the result produces is the line, because a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). |
+| `IgnoresOverrideOnceTalking` | Whether a `response.create` carrying only a per-response `instructions` override is silently dropped once the conversation holds a turn: no `response.created`, no error. True on grok (0 of 5; grok-findings 5.2). Every mid-call line asked for with `SpeakText`, closing or not, then goes into the conversation as a caller message first and the override follows (3 of 3 verbatim) — the mechanism `NeedsDirectedLineInConversation` applies to closing lines only. The opening line is exempt: the override alone works on an empty conversation. |
+| `RequiresTerminalAnnounce` | Whether the engine speaks only words it is handed: *no* text will make it take a turn. Stronger than the row above: a cue is something a client can invent, and this says there is no cue at all, so a phase the call stops at must carry its own words or the caller hears silence, and a publish is refused otherwise (`flow.RequireTerminalAnnounce`, `TERMINAL_ANNOUNCE_REQUIRED`). The same capability decides how the closing line travels. Where it is true (doubao) a tool result that moves the call into a terminal phase carries the phase's instruction and the line is said with `SpeakText`, which is exact by construction; the session limit also has no cue to ask for a goodbye or handover with. Where it is false (openai, grok, qwen, gateway; grok measured in grok-findings 5.2, where a tool-result hint was verbatim 3 of 3) the tool result carries the line as its hint (`SayExactly`), so the turn the result produces is the line, because a line asked for on top of the result lost to it on qwen (qwen-findings W-Q1). |
 
 The last five are the interesting ones. They are not configuration in any
 meaningful sense — they are findings. Each was written down after a live call
@@ -103,8 +104,46 @@ Tools: `好的，王先生，我先去系统里查一下这个订单的状态。
 So an instructions-only update is a sufficient phase change on openai, mid-reply
 included, and tools survive it. NOT MEASURED, as on qwen: conflicting or repeated
 updates, a slot value recalled verbatim, an update late in a long call. Run
-with `-count=1`. Every engine this repository ships (openai, qwen, gateway, doubao) applies a
+with `-count=1`. Every engine this repository ships (openai, grok, qwen, gateway, doubao) applies a
 mid-call instruction change at once; the provider layer assumes it.
+
+## Grok (xAI Grok Voice)
+
+`AICC_PROVIDER=grok`, key `XAI_API_KEY`, `wss://api.x.ai/v1/realtime`, model
+`grok-voice-3.0`: a profile on the Realtime client (issue #226). Evidence:
+[grok-findings](design/grok-findings.md). How it differs from the openai row:
+
+| Trait | Value | Why |
+|---|---|---|
+| `Style`, `AcceptsG711` | GA, true | `audio/pcmu` / `audio/pcma` at 8 kHz pass through both ways |
+| `Voice` | `eve` | one of `eve`, `ara`, `rex`, `sal`, `leo`; `global.voice` wins |
+| `NeedsCueForFirstTurn` | false | `response.create` on an empty conversation greets from the instructions |
+| `TranscribeModel` | empty | the engine transcribes the caller unasked, 9 of 9 clips exact; `grok-transcribe` gave the same text plus partials during speech (5.4) |
+| `CancelsResponseItself` | true | the server ends its response itself just before `speech_started`, 3 of 3 (5.1); a late cancel is refused with `invalid_request_error` |
+| `IgnoresOverrideOnceTalking` | true | a per-response override alone is dropped once the conversation has a turn, 0 of 5; item-then-override 3 of 3 (5.2) |
+| `RequiresTerminalAnnounce` | false | text cues work; tool-result hint verbatim 3 of 3 (5.2) |
+| `AcceptsTemperature` | false | accepted and echoed, no effect seen at N=3 (5.3) |
+
+Its dialect is absorbed by the shared client, with no branch on the profile's
+name: the `ping` event is ignored; `...input_audio_transcription.updated` is
+cumulative and is not a transcript line; `...transcription.completed` is final
+only when its `status` is absent or `completed` (a repeat with `in_progress` is
+dropped), so a caller utterance is exactly one line; a refused `response.cancel`
+("no active response found", code `invalid_request_error`) within the cancel
+window of one this client sent is not an error; a `conversation.item.truncate` on
+an unknown id gets no answer at all.
+
+The silent drop has a consequence this client does not recover from: a
+`response.create` that never yields `response.created` leaves
+`isResponseRequested` set, and the watchdog only watches an open response.
+Hence the trait above rather than a retry.
+
+One ordering rule is new: audio sent before the session configuration is
+acknowledged leaves the session deaf, with no error. `Start` returns only after
+`session.updated`, and `aicall.Session.Start` starts the caller-audio pump after
+`model.Start` returns (`TestNoCallerAudioReachesTheModelBeforeItsStartReturns`).
+As on gateway and doubao, set `AICC_TRANSCRIBE_PROVIDER` when live transcription
+of the human phase is on: xAI has no recogniser client here.
 
 ## The steps
 

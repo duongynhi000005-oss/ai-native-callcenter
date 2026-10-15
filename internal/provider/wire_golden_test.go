@@ -59,10 +59,11 @@ func goldenProfiles() []struct {
 } {
 	openai := OpenAIProfile()
 	qwen := QwenProfile()
+	grok := GrokProfile()
 	return []struct {
 		name    string
 		profile Profile
-	}{{"openai", openai}, {"qwen", qwen}}
+	}{{"openai", openai}, {"qwen", qwen}, {"grok", grok}}
 }
 
 // A whole call, frame by frame: the session is configured, the caller is
@@ -175,7 +176,7 @@ func TestTheFramesOfAWholeCallAreWhatTheyWere(t *testing.T) {
 				t.Fatalf("speak text: %v", err)
 			}
 			sent++
-			if profile.NeedsDirectedLineInConversation {
+			if profile.NeedsDirectedLineInConversation || profile.IgnoresOverrideOnceTalking {
 				// The same direction as a caller message first (W-Q1),
 				// because the line ends the call.
 				sent++
