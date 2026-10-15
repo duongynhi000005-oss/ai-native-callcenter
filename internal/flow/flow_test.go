@@ -632,7 +632,7 @@ func TestTheTurnsWithoutToolWallCountsOnlyRepliesToTheCaller(t *testing.T) {
 	if got, _ := e.Slot("turnsWithoutTool"); got != 1 {
 		t.Fatalf("turnsWithoutTool = %v, want 1", got)
 	}
-	// Two finals for one utterance (gemini) still earn one reply.
+	// Two finals for one utterance still earn one reply.
 	e.OnCallerSpoke("no")
 	e.OnCallerSpoke("no thanks")
 	e.OnBotTurnDone(false, false)
@@ -652,7 +652,7 @@ func TestTheTurnsWithoutToolWallResetsOnAToolCall(t *testing.T) {
 	reply(e)
 	reply(e)
 
-	// Transcript first (gemini, doubao): the utterance leads to a tool call.
+	// Transcript first (doubao): the utterance leads to a tool call.
 	e.OnCallerSpoke("check my balance")
 	e.OnToolResult("take_message", nil, map[string]any{"ok": "1"}) // matches no rule in welcome
 	if e.OnBotTurnDone(true, false) {

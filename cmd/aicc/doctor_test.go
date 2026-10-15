@@ -470,6 +470,9 @@ func TestTheProviderChecks(t *testing.T) {
 		{"no key", func(h *harness) {
 			h.deps.getenv = func(string) string { return "" }
 		}, DoctorStateFail, DoctorStateSkip},
+		{"AICC_PROVIDER names a provider that was removed", func(h *harness) {
+			h.deps.cfg.Provider = "gemini"
+		}, DoctorStateFail, DoctorStateSkip},
 		{"--skip-provider", func(h *harness) { h.opts.skipProvider = true }, DoctorStatePass, DoctorStateSkip},
 		{"the AI leg is off", func(h *harness) { h.deps.cfg.IsBotEnabled = false }, DoctorStateSkip, DoctorStateSkip},
 	}

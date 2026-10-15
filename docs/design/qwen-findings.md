@@ -4,12 +4,11 @@
 (`internal/provider/realtime.go`) — a name, an endpoint, a model and a dialect,
 exactly as `docs/provider-extension.md` describes a profile. There is no
 `internal/provider/qwen`, and `internal/provider/pacer` is **not** on this path:
-it is imported by `internal/provider/doubao/pacer.go:10` and
-`internal/provider/gemini/pacer.go:10` and by nothing else.
+it is imported by `internal/provider/doubao/pacer.go` and by nothing else.
 
-So this document is not a third peer to [doubao-findings](doubao-findings.md)
-and [gemini-findings](gemini-findings.md). Those two record what a protocol
-turned out to be. This one records what happened on one afternoon of telephone
+So this document is not a peer to [doubao-findings](doubao-findings.md),
+which records what a protocol turned out to be (as did a record for a Google
+Live client, since removed). This one records what happened on one afternoon of telephone
 calls against a profile that already existed, and nothing else.
 
 **Every figure in this document stays in this document.** Eight calls, one
@@ -78,8 +77,8 @@ The eight calls:
 
 ## 3. Method for the audio measurements
 
-The same method as `gemini-findings.md` §3.1, so that the two records can be
-read against each other. Two-channel 8 kHz captures, channel 0 the caller and
+The same method as the removed Google Live client's record used, so that the
+records could be read against each other. Two-channel 8 kHz captures, channel 0 the caller and
 channel 1 what the caller heard — exact digital zero when nothing is queued,
 which is **71 %** of windows — read on **20 ms RMS envelopes**. A **cut** is
 caller onset → channel 1 falling to zero. Bot-speech runs were merged across
@@ -122,14 +121,14 @@ describes.
 **Zero misses.** No bot run of ≥1 s containing ≥400 ms of sustained
 above-threshold caller energy went uncut.
 
-**The acceptance gate is MET** — the same gate the doubao and gemini clients
+**The acceptance gate is MET** — the same gate the doubao and the removed Google Live clients
 were held to, and the first time it has been met by anything: ≥10 interruptions
 (20), cut p50 ≤ 1.0 s (360 ms), cut p90 ≤ 1.5 s (420 ms), zero misses.
 
 **`playedMs` against the measured run length**: median **+100 ms**, range
 **−80…+260 ms**. The sub-100 ms gap merge in §3 contributes error of its own, so
-this is not a clean refutation of the 1–3 frame agreement `gemini-findings.md`
-§3.1 reports for a different path; it is a looser agreement measured with a
+this is not a clean refutation of the 1–3 frame agreement the Google Live
+record reported for a different path; it is a looser agreement measured with a
 looser instrument.
 
 **Trailing silence**, last bot audio frame → end of recording, all eight calls:
@@ -138,14 +137,13 @@ looser instrument.
 **Metrics after the run.**
 `aicc_provider_sessions_started_total{provider="qwen"}` 8;
 `aicc_provider_ws_errors_total` absent;
-`aicc_provider_sessions_expired_total` absent;
 `aicc_provider_first_audio_ms` sum 44416 / count 31.
 
 **Uplink: not one slow-write, dropped-frame or backlog warning.** Worth
 recording because this box's DNS answers for `dashscope.aliyuncs.com` come from
 a local mihomo proxy's fake-ip range (198.18.0.82), and the obvious reading of
 that is a proxied path. The TLS handshake measured **65 ms**, which is a direct
-domestic path. So the uplink confound that dominates `gemini-findings.md` §3.0
+domestic path. So the uplink confound that dominated the Google Live measurements
 does **not** apply to this run.
 
 **Total WARN and ERROR across the whole process log: 4.** Two provider errors —
@@ -163,17 +161,16 @@ pre-existing qwen behaviour was 8.000 s parks (`doubao-findings.md` §10, W-D5).
 (`wsconn`), `94e6b44` (`Watchdog`), `08795f9` (`MergeHint`) and `07911de`
 (`SayExactly`): 8 of 8 calls bridged with `isPassthrough=false`,
 `toProvider=PCM16@16000`, `fromProvider=PCM16@24000`; no socket fault and no
-watchdog misfire. Those four are exactly what this client shares with the
-gemini one, and `wsconn`, `Watchdog` and `MergeHint` are what it shares with
+watchdog misfire. Those four are exactly what this client shared with the
+Google Live one, and `wsconn`, `Watchdog` and `MergeHint` are what it shares with
 doubao as well, so each piece those commits moved has now been exercised over
 real calls from both sides of the move. The pacer is the one shared component
-qwen never takes, and it stays covered by doubao and gemini alone.
+qwen never takes, and it stays covered by doubao alone.
 
 **`518130a` is unreachable on qwen by design — a confirmed negative.** No
 Realtime-client code sets a `FailureCause`, so a failure on this profile would
 still record `MEDIA_OR_PROVIDER_FAILURE`, and
-`aicc_provider_sessions_expired_total` never appeared. That is what was expected
-and it is recorded so that its absence is not later read as a gap in coverage.
+The Google Live client's lifetime-cap failure never appeared, as expected on a profile that cannot produce it.
 
 **The highest-risk path held.** The feared sequence was `SpeakText` pre-empting a
 turn, `handleResponseDone` emitting `INTERRUPTED{SYSTEM}`, and `Realtime.Interrupt`
@@ -222,8 +219,8 @@ free and after a pre-empted turn ends: the opening turn's double steering,
 applied to a closing line. A line in a phase the call goes on from keeps the
 override alone, because the item stays in the history and what it does to the
 turns after it is unmeasured; a call that is ending has none. Pre-emption is
-unchanged; openai and gateway stay on the override alone; doubao and gemini are
-other clients. **Confirmed on two live calls**, 2026-09-23, both
+unchanged; openai and gateway stay on the override alone; doubao is
+another client. **Confirmed on two live calls**, 2026-09-23, both
 `mobile_support` on DID 95012 — three silences, the move to `finish`, then
 "感谢来电,再见。" said and the BYE: `01a0cbc9-ad0f-7797-b98b-6edab0eec8fe`
 (before the item was scoped to closing lines) and
@@ -568,20 +565,20 @@ under `ProfileFor("openai")` (GA, `gpt-realtime-2.1`), `buildSessionUpdate` with
 `output_modalities: ["text"]` added, and one audio session per treatment; the
 caller's "拜拜。"/"Bye." a text item, as on qwen; today's sequence the qwen probe's
 (turn asked, cancelled on `response.created`, `speakRequest` on `response.done`).
-gemini and doubao: each package's own `Session`, opened by `Start` with the
+The Google Live client (since removed) and doubao: each package's own `Session`, opened by `Start` with the
 welcome line, fed room noise and a synthesised "拜拜。"/"Bye." as caller audio,
 since doubao takes no text turn; the tool answered through `SendToolResult` and
 then `UpdateInstructions`, and today's sequence adds `SpeakText(line)` right
 after, as `afterMove` does. Doubao's today is `speech_text_buffer.commit` and
 exact by construction, so it has no baseline row. Thirty-nine sessions: openai 13,
-gemini 11, doubao 15.
+Google Live 11, doubao 15.
 
 | Provider | Treatment | zh | en | What was said instead |
 |---|---|---|---|---|
 | openai | today | 3 / 3, audio 1 / 1 | 1 / 1 | — |
 | openai | A5c | 5 / 5, audio 1 / 1 | 2 / 2 | — |
-| gemini | today | 3 / 3 | 1 / 1 | — |
-| gemini | A5c | 5 / 5 | 2 / 2 | — |
+| Google Live | today | 3 / 3 | 1 / 1 | — |
+| Google Live | A5c | 5 / 5 | 2 / 2 | — |
 | doubao | A5c | 5 / 5 | 2 / 2 | — |
 
 **Nothing missed, on either path, on any of the three.** Every model called
@@ -601,7 +598,7 @@ openai the same race would still be logged at WARN. In 2 of 13 sessions the
 model spoke before calling `hangup`, in the same response ("好的，我处理一下结束通话的流程。",
 "好的，我先按流程结束通话。").
 
-**gemini.** Today's `SpeakText` reaches the server microseconds after the tool
+**Google Live.** Today's `SpeakText` reaches the server microseconds after the tool
 response, and one turn followed, the line — no interrupted turn, no audio from a
 continuation of the tool response. So on this client today's path and A5c
 produce the same single turn; A5c differs only in not adding the direction to
@@ -627,7 +624,7 @@ counted en sessions the model's
 so the client reports the line's final transcript with no turn open.
 
 Samples of seven per client, so no rate. For a later implementation: on openai
-and gemini, like qwen, the line is a direction to a model whichever path carries
+and Google Live, like qwen, the line is a direction to a model whichever path carries
 it, and A5c said it as often as today's path while sending one request fewer and
 no cancel. On doubao, today's `speech_text_buffer.commit` is the only path that
 is verbatim by construction, and 7 of 7 does not make the model's continuation
@@ -641,10 +638,10 @@ result's hint — the new phase's preamble and instruction — with
 ending, and only then answers the tool; no `SpeakText` follows, so the turn the
 result produces is the line. The gate is a new profile capability,
 `PutsTerminalAnnounceInToolResult`: true on the Realtime profiles only — openai,
-qwen and gateway. Doubao and gemini keep today's path exactly (the phase's
+qwen and gateway. Doubao and Google Live (then a client) kept today's path exactly (the phase's
 instruction as the hint, the answer, the instructions, then `SpeakText`), for
 different reasons. Doubao's `SpeakText` is exact by construction, which a
-direction to a model is not. Gemini is excluded pending gemini-findings W-G6: its
+direction to a model is not. Google Live was excluded pending its own W-G6: its
 model sometimes never answers a tool result (6 times on 4 live calls), today's
 `SpeakText` right after the tool response still produces the line then, and under
 A5c such a silent continuation would complete with no audio and the armed ending
@@ -659,7 +656,7 @@ speaking can no longer fire the ending while the line is still to come; that
 applies on every client. Covered by
 `TestAToolThatEndsTheCallCarriesTheClosingLineOnARealtimeProfile`,
 `TestAClosingLineCutShortEndsTheCallOnlyAtTheCap`,
-`TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore`,
+`TestAToolThatEndsTheCallOnDoubaoSpeaksTheLineAsBefore` (since renamed),
 `TestAToolThatMovesIntoALineThatIsNotTheEndIsUnchanged` and
 `TestACutShortTurnIsNotTheClosingLine` in `internal/aicall/orchestrator_test.go`,
 and `TestOnlyTheRealtimeProfilesPutTheClosingLineInTheToolResult` in

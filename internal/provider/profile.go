@@ -110,12 +110,7 @@ type Profile struct {
 	// per-response override (docs/design/qwen-findings.md, W-Q1).
 	//
 	// False on doubao, whose SpeakText commits text the engine synthesises and
-	// is exact by construction; a direction to a model is not. False on gemini
-	// for now, for a different reason: that model sometimes answers a tool
-	// result with nothing (gemini-findings W-G6), and the SpeakText that
-	// follows the result is what rescues the line. With the line in the result
-	// instead, such a turn would complete without audio and the armed ending
-	// would release the caller without it. Revisit when W-G6 is fixed.
+	// is exact by construction; a direction to a model is not.
 	//
 	// Not RequiresTerminalAnnounce: that one says whether a flow may leave a
 	// terminal phase wordless, this one says how the words it did write reach
@@ -326,71 +321,8 @@ func DoubaoProfile() Profile {
 	}
 }
 
-// GeminiProfile is the second provider here that is not the Realtime protocol,
-// and the third client this build can put on a call.
-//
-// It leaves the same fields at zero as the doubao profile does, for the same
-// reason: Style, TranscribeModel, CancelsResponseItself,
-// NeedsCueForFirstTurn, NeedsDirectedLineInConversation and the two
-// semantic-turn fields are read by the Realtime client alone, and the client
-// that answers for this name (internal/provider/gemini) reads none of them.
-// What it reads is the name, the endpoint, the credential, any extra Headers,
-// the voice and the two audio formats. Model is
-// informational: the model name is a constant inside that client — its
-// lifecycle is what the client knows how to hold a conversation with — so
-// AICC_PROVIDER_MODEL is ignored here and the value is kept only so a
-// deployment reading this profile can see which model it is talking to.
-//
-// RequiresTerminalAnnounce is false, which is the difference from doubao and
-// not an oversight: this engine does take words from the client, so a closing
-// line reaches the caller the way it does on openai and qwen — by instruction,
-// best effort, rather than as audio we have synthesised.
-// PutsTerminalAnnounceInToolResult is nevertheless false: this model sometimes
-// answers a tool result with nothing (gemini-findings W-G6), and until that is
-// fixed the SpeakText that follows the result is what makes the line happen.
-func GeminiProfile() Profile {
-	return Profile{
-		Name: NameGemini,
-		// The version is part of the path. A deployment behind a proxy or on a
-		// regional host says so with AICC_PROVIDER_ENDPOINT, as everywhere else.
-		Endpoint: "wss://generativelanguage.googleapis.com/ws/" +
-			"google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
-		// Pinned by the client, kept here so that a deployment reading this
-		// profile can see which model it is talking to.
-		Model:     "gemini-3.8-live",
-		APIKeyEnv: "GEMINI_API_KEY",
-		// One of the vendor's own prebuilt voice names. A flow that wants
-		// another says so in global.voice, and the names are this vendor's
-		// alone.
-		Voice: "Kore",
-		// Telephone audio is refused: this endpoint takes linear 16-bit PCM at
-		// 16 kHz up and returns it at 24 kHz, both fixed rather than
-		// negotiated, so both directions convert.
-		AcceptsG711:              false,
-		LinearInput:              media.PCM16Format(media.RateProviderIn),
-		LinearOutput:             media.PCM16Format(media.RateProviderOut),
-		RequiresTerminalAnnounce: false,
-		// setup.generationConfig.temperature, documented range [0.0, 2.0];
-		// the Live model's default is undocumented.
-		AcceptsTemperature: true,
-		// Held back until W-G6 is fixed: a tool result the model leaves
-		// unanswered would end the call without the line, where SpeakText
-		// after the result still says it.
-		PutsTerminalAnnounceInToolResult: false,
-		// No TranscribeModel, and as on qwen that is the finding rather than an
-		// omission — with one honest limit on it. What was measured is that the
-		// transcript of the BOT's own audio arrives whether or not the setup asks
-		// for it. The caller's transcript has been asked for in every session
-		// this client has opened, so whether it too would arrive unrequested is
-		// not known. Either way there is nothing for a deployment to set: the
-		// client sends both transcription configs itself, and this field is read
-		// by nothing.
-		TranscribeModel: "",
-	}
-}
-
 // Provider names this build can run. A deployment runs exactly one of them,
-// chosen at startup: qwen or doubao inside mainland China, openai or gemini
+// chosen at startup: qwen or doubao inside mainland China, openai
 // elsewhere, gateway for a self-hosted service behind the Realtime protocol.
 const (
 	NameOpenAI = "openai"
@@ -403,9 +335,6 @@ const (
 	// choice is made in the composition root, not here: a client in a
 	// sub-package of this one cannot be built from inside it.
 	NameDoubao = "doubao"
-	// NameGemini is the second such name, selecting the third client for the
-	// third wire protocol, and chosen in the same place for the same reason.
-	NameGemini = "gemini"
 )
 
 // Override replaces where the deployment's provider is reached and which model
@@ -446,11 +375,9 @@ func ProfileFor(name string, override Override) (Profile, error) {
 		profile = GatewayProfile()
 	case NameDoubao:
 		profile = DoubaoProfile()
-	case NameGemini:
-		profile = GeminiProfile()
 	default:
-		return Profile{}, fmt.Errorf("provider: unknown provider %q (%s, %s, %s, %s, %s)",
-			name, NameOpenAI, NameQwen, NameGateway, NameDoubao, NameGemini)
+		return Profile{}, fmt.Errorf("provider: unknown provider %q (%s, %s, %s, %s)",
+			name, NameOpenAI, NameQwen, NameGateway, NameDoubao)
 	}
 	if override.Endpoint != "" {
 		profile.Endpoint = override.Endpoint

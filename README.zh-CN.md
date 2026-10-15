@@ -60,11 +60,10 @@ CDR、一份对话文本、一个录音文件，而不是三段碎片。录音�
 S3 的对象存储。
 
 **中英双语，并且明确告诉你在用哪个厂商。** 界面和机器人都支持中英文。一套部署只用
-一个语音厂商，启动时选定：中国大陆用 `qwen` 或 `doubao`，其他地区用 `openai` 或
-`gemini`，也可以用 `gateway` 指向自建的 Realtime 网关（例如
+一个语音厂商，启动时选定：中国大陆用 `qwen` 或 `doubao`，其他地区用 `openai`，也可以用 `gateway` 指向自建的 Realtime 网关（例如
 [cascade-realtime-gateway](https://github.com/rasonyang/cascade-realtime-gateway)）。
 **通话的语言永远不会用来选择厂商。** 其中三个是同一套协议的不同 profile；`doubao`
-和 `gemini` 各自走另一套协议，各有自己的客户端
+走另一套协议，有自己的客户端
 （见[如何接入一个语音厂商](docs/provider-extension.md)）。
 
 ## 结构

@@ -619,8 +619,8 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			case EventTypeFailed:
 				// The conversation cannot continue; the caller still can.
 				log.Warn("conversation failed, rescuing the caller",
-					"reason", event.Text, "cause", event.FailureCause)
-				recorder.markFailed(hangupCauseFor(event.FailureCause))
+					"reason", event.Text)
+				recorder.markFailed(hangupCauseMediaOrProvider)
 				actions.rescueCaller()
 				return
 
@@ -645,22 +645,9 @@ func (o *Orchestrator) reportUnbackedClaim(turn int, c claim, recorder *callReco
 	recorder.markUnbackedClaim(c.kind)
 }
 
-// hangupCauseMediaOrProvider is what a failed AI call has always been released
-// with: the bot could not go on, and nothing said which half of it broke.
+// hangupCauseMediaOrProvider is what a failed AI call is released with: the
+// bot could not go on, and nothing says which half of it broke.
 const hangupCauseMediaOrProvider = "MEDIA_OR_PROVIDER_FAILURE"
-
-// hangupCauseFor is what the CDR says about a failure.
-//
-// A provider that named its own cause is taken at its word — the whole point of
-// naming one is that it reaches whoever reads the call afterwards — and a
-// failure nobody could explain is still a failure of the media or the provider,
-// which is what this path has always recorded and what it records now.
-func hangupCauseFor(cause provider.FailureCause) string {
-	if cause == "" {
-		return hangupCauseMediaOrProvider
-	}
-	return string(cause)
-}
 
 // answerToolCall runs a tool the model asked for, answers it, and follows up
 // whatever phase change the result caused. A result that stays in the phase
@@ -682,15 +669,13 @@ func hangupCauseFor(cause provider.FailureCause) string {
 // other path on openai (docs/design/qwen-findings.md, W-Q1).
 //
 // Doubao keeps its own SpeakText, because that is exact by construction and a
-// direction to a model is not. Gemini keeps it for now: that model sometimes
-// answers a tool result with nothing (gemini-findings W-G6), and the SpeakText
-// after the result is what still says the line then. A phase that is not
-// terminal keeps it on every client: the direction would stay in the history
-// and nobody has measured what it does to the turns after it.
+// direction to a model is not. A phase that is not terminal keeps it on every
+// client: the direction would stay in the history and nobody has measured what
+// it does to the turns after it.
 //
 // That SpeakText waits for the batch: the call belongs to a response that may
 // ask for more tools, and a line pre-empts. Said now, it would cancel the
-// response before its later calls arrived, and on doubao and gemini, which
+// response before its later calls arrived, and on doubao, which
 // wait for every call's answer, it would go out while one was still owed.
 // closeToolBatch says it once the response is over and every call answered.
 func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *toolBatch,

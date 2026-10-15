@@ -18,9 +18,7 @@
 //
 // What a client tunes is how deep the queue is and how many frames leave on one
 // tick. An engine that reads its uplink as a clock takes one frame per tick and
-// calls a burst an error; an engine that takes audio as fast as it is given
-// wants a deep queue drained whole after a write stall, which is
-// DrainEverything. Both are the same loop.
+// calls a burst an error.
 //
 // Goroutines: one. Run is it, started and owned by the client that built the
 // pacer, and it ends when the channel that client passed as Stopping is closed.
@@ -32,13 +30,6 @@ import (
 	"sync"
 	"time"
 )
-
-// DrainEverything is a MaxPerTick that writes the whole queue on one tick.
-//
-// It is for a client whose engine takes audio faster than real time, where the
-// queue absorbs a write that stalled rather than pacing anything, and where
-// holding the backlog back a frame per tick would only make the stall longer.
-const DrainEverything = 0
 
 // Stats is what the uplink did, for the line a client logs when a session ends.
 // A call with drops in it sounded clipped to the engine.
@@ -71,8 +62,9 @@ type Config struct {
 	// client chooses it for its own engine; the frames past it are ones the
 	// conversation has already moved beyond.
 	Depth int
-	// MaxPerTick is how many frames one tick writes. DrainEverything, or any
-	// value below it, writes the whole queue.
+	// MaxPerTick is how many frames one tick writes. A value below one
+	// writes the whole queue rather than nothing, so a mis-set count cannot
+	// leave a call in silence.
 	MaxPerTick int
 	// IdleTicks is how many consecutive empty ticks count as the caller's side
 	// having gone quiet. Zero means a client that has nothing to say about it.
@@ -242,7 +234,7 @@ func (p *Pacer) tick() {
 	}
 
 	count := p.cfg.MaxPerTick
-	if count <= DrainEverything || count > len(p.queue) {
+	if count < 1 || count > len(p.queue) {
 		count = len(p.queue)
 	}
 	p.batch = append(p.batch[:0], p.queue[:count]...)

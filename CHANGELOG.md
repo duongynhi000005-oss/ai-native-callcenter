@@ -108,6 +108,23 @@ carries the one-line installer's files.
   or neither) now use the time index under a generic query plan too. Results
   are unchanged: `from` is inclusive, `to` exclusive (#63).
 
+### Removed
+
+- The Gemini voice provider. `AICC_PROVIDER` now accepts `openai`, `qwen`,
+  `gateway` and `doubao`. Gemini could not apply a mid-call instruction change,
+  which every other engine does at once (measured live on 2026-10-15), so the
+  provider and the machinery that existed only for it are deleted: the client,
+  the `PROVIDER_SESSION_EXPIRED` failure cause and its handling, the
+  `aicc_provider_sessions_expired_total` metric and `AICC_GEMINI_STRICT_TESTS`.
+  Migration: a deployment with `AICC_PROVIDER=gemini` no longer starts and must
+  choose another value (`openai`, `qwen`, `gateway` or `doubao`) together with
+  that provider's key; `GEMINI_API_KEY` is ignored, and the installer no longer
+  offers `--provider gemini`. New calls no longer end with hangup cause
+  `PROVIDER_SESSION_EXPIRED`, and the metric is no longer produced; call records
+  written earlier keep that cause and are still listed and reported as before.
+  The evidence record is now an archive note,
+  `docs/design/gemini-findings.md` (#224).
+
 ### Fixed
 
 - The `mobile_support` flow no longer asks for the order number again, or says

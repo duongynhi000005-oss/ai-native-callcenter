@@ -120,9 +120,25 @@ func TestAnUnknownProviderNamesTheOnesThereAre(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown provider started anyway")
 	}
-	for _, name := range []string{NameOpenAI, NameQwen, NameGateway, NameDoubao, NameGemini} {
+	for _, name := range []string{NameOpenAI, NameQwen, NameGateway, NameDoubao} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the refusal does not mention %q: %v", name, err)
+		}
+	}
+}
+
+// The removed provider is an unknown name like any other, and the refusal names
+// every value that does run. An .env left over from that deployment must stop
+// startup with this message.
+func TestTheRemovedGeminiProviderIsRefusedWithTheAcceptedValues(t *testing.T) {
+	for _, name := range []string{"gemini", " Gemini "} {
+		_, err := ProfileFor(name, Override{})
+		if err == nil {
+			t.Fatalf("%q started anyway", name)
+		}
+		want := "(openai, qwen, gateway, doubao)"
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %v, want it to list %s", err, want)
 		}
 	}
 }
@@ -139,8 +155,6 @@ func TestTheLinearProfilesReachTheCallerBothWays(t *testing.T) {
 	}{
 		{NameGateway, "REALTIME_API_KEY", media.PCM16Format(24000), media.PCM16Format(24000)},
 		{NameDoubao, "DOUBAO_API_KEY",
-			media.PCM16Format(media.RateProviderIn), media.PCM16Format(media.RateProviderOut)},
-		{NameGemini, "GEMINI_API_KEY",
 			media.PCM16Format(media.RateProviderIn), media.PCM16Format(media.RateProviderOut)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -174,8 +188,7 @@ func TestTheLinearProfilesReachTheCallerBothWays(t *testing.T) {
 // publish. Only the Realtime profiles answer a tool result that ends the call
 // with the closing line itself (W-Q1, A5c): off for a Realtime profile puts the
 // line back in a turn of its own, which qwen measured at 0 of 7; on for doubao
-// trades an exact line for a best-effort one; on for gemini before W-G6 is fixed
-// lets an unanswered tool result end the call without the line.
+// trades an exact line for a best-effort one.
 func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 	for _, tt := range []struct {
 		profile                            Profile
@@ -185,7 +198,6 @@ func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 		{QwenProfile(), false, true},
 		{GatewayProfile(), false, true},
 		{DoubaoProfile(), true, false},
-		{GeminiProfile(), false, false},
 	} {
 		if got := tt.profile.RequiresTerminalAnnounce; got != tt.requiresAnnounce {
 			t.Errorf("%s: RequiresTerminalAnnounce = %v, want %v",
@@ -233,8 +245,7 @@ func TestTheSessionUpdateCarriesTheFlowsTemperatureOnlyWhereItIsAccepted(t *test
 		})
 	}
 	if tc := QwenProfile(); !tc.AcceptsTemperature || OpenAIProfile().AcceptsTemperature ||
-		GatewayProfile().AcceptsTemperature || DoubaoProfile().AcceptsTemperature ||
-		!GeminiProfile().AcceptsTemperature {
-		t.Error("AcceptsTemperature is not qwen and gemini only")
+		GatewayProfile().AcceptsTemperature || DoubaoProfile().AcceptsTemperature {
+		t.Error("AcceptsTemperature is not qwen only")
 	}
 }

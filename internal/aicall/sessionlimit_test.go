@@ -278,8 +278,7 @@ func TestTheLimitSaysGoodbyeWhereTheFlowHasNoClosingPhase(t *testing.T) {
 }
 
 // A bot that kept the floor past the backstop cannot be asked for a goodbye:
-// the cue asks for a turn over its own, which the providers refuse (gemini cuts
-// the bot off). With no line of the flow's own the hangup runs at once.
+// the cue asks for a turn over its own, which the providers refuse. With no line of the flow's own the hangup runs at once.
 func TestAForcedLimitHangsUpAtOnceWithoutAskingForAGoodbye(t *testing.T) {
 	h := newLimitHarness(t, limitSetup{})
 

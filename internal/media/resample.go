@@ -9,7 +9,7 @@ const (
 	// RateTelephone is the rate on the wire: G.711 is always 8 kHz.
 	RateTelephone = 8000
 	// RateProviderIn is the linear input rate of the providers that take
-	// 16 kHz (qwen, doubao, gemini); see each provider.Profile.
+	// 16 kHz (qwen, doubao); see each provider.Profile.
 	RateProviderIn = 16000
 	// RateProviderOut is the linear rate those providers speak back at, and
 	// the rate the gateway takes and returns in both directions.

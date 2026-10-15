@@ -199,8 +199,8 @@ arrival-driven rather than clocked, so the pacer is this client's own:
 
 > **2026-09-19**: the *mechanism* is no longer this client's own — the queue,
 > the ticker, the drop-oldest policy and the idle hook moved to
-> `internal/provider/pacer` when the gemini client needed the same loop with the
-> opposite policy (`gemini-findings.md` §2.5). The numbers below are unchanged
+> `internal/provider/pacer` when a second client (since removed) needed the same loop with the
+> opposite policy. The numbers below are unchanged
 > and are now this client's parameters; the mute and unmute frames, being the
 > only things in this list that are about what the frames *say*, stayed here.
 
@@ -352,7 +352,7 @@ this branch — the description above stays as the record of what was found.
 
 ## 11. Live regression, 2026-09-20
 
-**Why.** The Gemini client landed after §10 and touched what every client
+**Why.** A second client (since removed) landed after §10 and touched what every client
 shares — `provider.Event.FailureCause`, `aicall.Session.fail`, the
 orchestrator's hangup cause, `ProfileFor`, `cmd/aicc/wiring.go` — so the doubao
 path was walked again on `main` at `667c1dc`.
@@ -481,8 +481,8 @@ appears in no log from 2026-09-18. One occurrence; the cause is **not known**.
 **What the shared-code changes did to this client.** Nothing a caller can hear.
 Two things an operator can read, filed together as **W-D8**: this client names no
 `FailureCause`, so every fatal ending — the ten-minute release included — is
-`MEDIA_OR_PROVIDER_FAILURE` in the CDR and
-`aicc_provider_sessions_expired_total` cannot move; and the one failed call above
+`MEDIA_OR_PROVIDER_FAILURE` in the CDR with
+no lifetime-cap cause; and the one failed call above
 counted **twice** in `aicc_provider_ws_errors_total`, because a provider error
 frame and the session end that follows it are both fatal events and
 `aicall.Session` counts at the one place both arrive.
@@ -506,10 +506,9 @@ it is deferred rather than done because the right shape of it is clearer with a
 third protocol in hand than with a second, and because doing it in the same
 commit as the second client would have mixed a refactor into an addition.
 
-> **2026-09-19 — the condition is met and this item moves.** The third protocol
-> is in hand (`AICC_PROVIDER=gemini`), so the deferral's own reason is
-> discharged. It is now tracked as **W-G1** in `gemini-findings.md`, with the
-> requirements three clients made visible.
+> **2026-09-19 — the condition was met and this item moved** to the record of a
+> third client. That client was removed on 2026-10-15 (issue #224), so the item
+> is open again.
 
 **W-D2 — `internal/provider/realtime.go` can lose the final `CLOSED`.** Found
 while building this client, in the existing one: `emit` selects on the events
@@ -618,8 +617,8 @@ deterministically first.
 
 **W-D8 — what an operator reads about a doubao failure.** Two small things from
 §11. The client sets no `provider.Event.FailureCause`; whether code `45000003`
-(§6) should be named `PROVIDER_SESSION_EXPIRED` is a judgement — it is an idle
-release and not a lifetime cap — but today the CDR cannot tell it from a fault.
+(§6) should get a cause of its own is a judgement — it is an idle release and not a
+lifetime cap — but today the CDR cannot tell it from a fault.
 And `aicc_provider_ws_errors_total` counts a failed doubao session twice, once
 for the error frame and once for the session end it causes; one session that
 ended badly should be one.
@@ -680,7 +679,7 @@ reply and keeps them over the following turn. A phase change by appended
 paragraph takes effect at once, including when sent mid-reply. Whether a slot
 value rendered into the instructions is then recalled verbatim was not measured
 (below). The slot is still exact for templates and HTTP bodies, as before.
-Gemini (gemini-findings §2.6) is the client where the re-pin is genuinely late.
+Every engine now applies a mid-call instruction change at once (qwen-findings W-Q7, `provider-extension.md`).
 
 **NOT MEASURED**: a long or conflicting instruction (a second update that
 contradicts the first), many updates in one session, an update that carries a

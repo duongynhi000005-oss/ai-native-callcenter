@@ -216,33 +216,8 @@ func TestAFullQueueDropsItsOldestAndNeverCatchesUpInABurst(t *testing.T) {
 	u.counted(3, 3)
 }
 
-// A client whose engine takes audio faster than real time keeps its queue to
-// survive a write that stalled, not to pace anything. Holding the backlog back a
-// frame per tick would only make the stall longer, so the whole queue goes at
-// once — in the order it arrived.
-func TestDrainingEverythingClearsTheBacklogOnOneTickInOrder(t *testing.T) {
-	t.Parallel()
-	u := newUplink(t, Config{Depth: 8, MaxPerTick: DrainEverything})
-
-	for _, marker := range []string{"01", "02", "03", "04", "05"} {
-		u.push(marker)
-	}
-	u.tick()
-	u.wrote("frame 01", "frame 02", "frame 03", "frame 04", "frame 05")
-	u.counted(5, 0)
-
-	// The queue is empty again, so the next tick has nothing to drain.
-	u.tick()
-	u.wrote("frame 01", "frame 02", "frame 03", "frame 04", "frame 05")
-
-	u.push("06")
-	u.tick()
-	u.wrote("frame 01", "frame 02", "frame 03", "frame 04", "frame 05", "frame 06")
-	u.counted(6, 0)
-}
-
-// A negative count means the same thing as DrainEverything rather than nothing
-// at all: a pacer that wrote no frames would be a call in silence.
+// A count below one writes the whole queue rather than nothing at all: a pacer
+// that wrote no frames would be a call in silence.
 func TestANonsensicalFrameCountDrainsRatherThanStalls(t *testing.T) {
 	t.Parallel()
 	u := newUplink(t, Config{Depth: 4, MaxPerTick: -1})

@@ -671,9 +671,15 @@ func checkProvider(ctx context.Context, d doctorDeps, opts doctorOptions) []doct
 	}
 	profile, err := voiceProfile(d.cfg)
 	if err != nil {
-		// The app refuses to start on this, so the app check has failed too.
+		// The app refuses to start on this: a configuration error, reported as
+		// one rather than skipped (a .env left over from a removed provider
+		// lands here).
 		msg := "AICC_PROVIDER: " + oneLine(err.Error())
-		return []doctorResult{skip(DoctorCheckProviderKey, msg), skip(DoctorCheckProviderSession, msg)}
+		return []doctorResult{
+			fail(DoctorCheckProviderKey, msg,
+				"set AICC_PROVIDER to one of the values listed above in .env and recreate the app container"),
+			skip(DoctorCheckProviderSession, "no valid provider to open a session with"),
+		}
 	}
 
 	discard := slog.New(slog.DiscardHandler)
