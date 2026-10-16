@@ -148,8 +148,11 @@ type fakeModel struct {
 	spokenClosing []bool
 	interrupts    []interrupt
 	sendErr       error
-	isClosed      bool
-	closeOnce     sync.Once
+	// textErr, when set, fails SendUserText alone: an engine that takes no
+	// text cue (doubao's ErrTextCueUnsupported).
+	textErr   error
+	isClosed  bool
+	closeOnce sync.Once
 
 	// startCfg is the configuration the session was started with, which is
 	// where the call's opening line travels.
@@ -200,6 +203,9 @@ func (m *fakeModel) SendAudio(audio []byte) error {
 func (m *fakeModel) SendUserText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.textErr != nil {
+		return m.textErr
+	}
 	m.userText = append(m.userText, text)
 	m.calls = append(m.calls, "SendUserText")
 	return nil

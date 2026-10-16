@@ -139,6 +139,11 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- A silent caller on an engine that takes no text cue (Doubao) is now closed. The
+  reprompt after the first dead-air NO_INPUT failed, no turn followed, and
+  nothing watched the silence again, so the NO_INPUT count stayed at one and
+  neither the flow's rule nor `global.closingTarget` could fire (#228). A
+  failed reprompt now restarts the dead-air watch.
 - The phone setup card no longer stays up with "Allow this site" unticked
   when an agent reaches the cockpit by typing its address. Chrome had
   prerendered the page, and web-sip-phone up to 1.1.1 withdrew from a
