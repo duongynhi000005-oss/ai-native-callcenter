@@ -5,10 +5,135 @@ under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
 run them together. From v0.2.0 on, the GitHub release of the same tag also
 carries the one-line installer's files.
 
-## Unreleased
+## v0.5.0 - 2026-10-16
+
+### Upgrade notes
+
+- Upgrade both images together. The switch image changes `aicc_outbound.lua`
+  (it stamps and exports `aicc_did` on the outbound trunk leg, which the DID
+  line limit counts). The application adds migrations 00035 to 00041, which run
+  at startup: post-call transcription, the do-not-call list, campaigns and
+  their contacts and attempts, the CDR's `campaign_id`, the DID's
+  `max_outbound_channels`, and a data correction that clears `has_recording` on
+  CDR rows no stored recording backs (#196). Nothing is dropped or narrowed.
+- Breaking: the Gemini provider is removed. A deployment with
+  `AICC_PROVIDER=gemini` no longer starts; choose `openai`, `grok`, `qwen`,
+  `gateway` or `doubao` and set that provider's key before upgrading (see
+  Removed).
+- Flows are re-validated at the start of every call. A flow that names a slot
+  nothing in it writes no longer loads, so its calls are refused until it is
+  fixed; check each custom flow with `aicc flowadd` before moving traffic (see
+  Changed).
+- The server now refuses to start when `AICC_OUTBOUND_ENDPOINT` is set to
+  anything but a `sofia/` dial string holding exactly one `%s`, when
+  `AICC_TRANSCRIBE_MODEL` names a model the qwen client does not accept, and
+  when any of the new settings below is malformed or out of range.
+- API contract: new operations for campaigns (`/campaigns`, `/campaigns/settings`,
+  `/campaigns/{campaignId}` and its `start`, `pause`, `resume`, `cancel`,
+  `contacts` and `attempts`), the do-not-call list (`/dnc-numbers`) and
+  post-call transcription (`/calls/{callId}/transcription`), under the new
+  scopes `campaigns:read`, `campaigns:write`, `dnc:read` and `dnc:write`. The
+  CDR gains `campaignId`, the DID gains `maxOutboundChannels` and
+  `isCampaignReady`, `POST /calls` gains the refusals `NUMBER_ON_DNC`,
+  `DID_NOT_OUTBOUND` and `DID_CHANNELS_EXHAUSTED`, and the event stream gains
+  `CAMPAIGN_UPDATED`. Nothing was removed. A call that ends without a stored
+  recording no longer reports `hasRecording: true`.
+- New settings, all optional: `AICC_BOT_NO_INPUT_TIMEOUT`,
+  `AICC_OUTBOUND_RING_TIMEOUT`, `AICC_OUTBOUND_SIP_HEADERS`,
+  `AICC_DEFAULT_COUNTRY_CODE`, `AICC_OUTBOUND_DIAL_FORM`,
+  `AICC_OUTBOUND_HOURS`, `AICC_OUTBOUND_MAX_RINGING`,
+  `AICC_CAMPAIGN_FREQUENCY_WINDOW`, `AICC_TRUNK_BREAKER_COUNT`,
+  `AICC_PROVIDER_BREAKER_COUNT`, `AICC_BOT_INBOUND_RESERVE`,
+  `AICC_OVERFLOW_HOLD`, `AICC_OVERFLOW_TIGHTEN_RATE`,
+  `AICC_OVERFLOW_STOP_RATE`, the `AICC_POSTCALL_TRANSCRIBE_*` family and
+  `XAI_API_KEY`. `.env.example` lists each with its default. A deployment that
+  keeps a do-not-call list and dials national numbers should set
+  `AICC_DEFAULT_COUNTRY_CODE`; `aicc doctor` warns when it is empty and the
+  list is not.
+- An outbound call that rings past the 60 second answer window is now hung up
+  when it answers late, and every outbound leg rings for at most
+  `AICC_OUTBOUND_RING_TIMEOUT` (default 45 s).
 
 ### Added
 
+- Campaigns: AI outbound campaigns. A campaign dials an imported contact list
+  from one DID, every answered call talks to that DID's flow, and each contact
+  yields a structured lead. The customer is dialled first and the bot leg
+  exists only once they answer, so an unanswered call costs no bot session.
+  Campaigns are AI-only: a flow that can `transfer_to_agent` is refused on
+  create and start, and while a running or paused campaign dials from its DID
+  (`CAMPAIGN_FLOW_HAS_TRANSFER`, `CAMPAIGN_DID_NOT_OUTBOUND`). A campaign has a
+  calling window checked against the callee's time zone (per contact, else the
+  campaign's) and the deployment's outer hours, a ring timeout, a retry policy,
+  and a state machine of DRAFT, RUNNING, PAUSED, COMPLETED and CANCELLED, with
+  racing transitions decided by the database. The dialer writes each attempt
+  before it dials, classifies the outcome (busy, no answer, answered,
+  transient and originate failures, bot failures) and schedules retries.
+  Consecutive trunk failures or bot failures pause a campaign
+  (`AICC_TRUNK_BREAKER_COUNT`, `AICC_PROVIDER_BREAKER_COUNT`). After one
+  campaign reaches a number, no other campaign dials it for
+  `AICC_CAMPAIGN_FREQUENCY_WINDOW`. Contacts are imported up to 5000 per
+  request with a result per row, numbers canonicalised to E.164. API:
+  `/campaigns` with `campaigns:read` and `campaigns:write`; the SPA has the
+  campaign, do-not-call and line-limit screens. Design:
+  `docs/design/10-campaigns.md` (#89, #154, #163, #164).
+- Campaigns keep bot capacity for inbound and bound the over-dial: admission
+  counts the answers a campaign's ringing legs are expected to bring instead
+  of one bot slot per leg, and stops short of `AICC_BOT_INBOUND_RESERVE`
+  slots (unset keeps a small default share free). An answered outbound call
+  that finds no free bot slot is held for `AICC_OVERFLOW_HOLD` (default
+  1500 ms) and then hung up as `OVERFLOW`; a campaign whose answered calls
+  overflow beyond `AICC_OVERFLOW_TIGHTEN_RATE` plans more cautiously, and above
+  `AICC_OVERFLOW_STOP_RATE` stops over-dialing until the rate falls
+  (`AICC_OUTBOUND_MAX_RINGING` bounds the legs ringing at once) (#158, #165).
+- Do-not-call list: `GET`/`POST /dnc-numbers` and `DELETE /dnc-numbers/{number}`
+  (scopes `dnc:read`, `dnc:write`). A destination on the list is refused with
+  `422 NUMBER_ON_DNC` on every outbound path, click-to-dial included, and no
+  CDR is written; the campaign dialer checks it before every call. A national
+  number is compared after completing it with `AICC_DEFAULT_COUNTRY_CODE`;
+  with that empty it cannot be matched and the call goes through, so set it on
+  a deployment that keeps a list. A customer who asks not to be called is added
+  by the flow (`record_lead` with `DO_NOT_CALL`) (#162).
+- Flow tool `record_lead` on campaign calls: the bot records the call's
+  conclusion (`intent` `HIGH`, `MEDIUM`, `LOW`, `NONE` or `DO_NOT_CALL`, and
+  notes) on the call's attempt. At the end of the call `DO_NOT_CALL` adds the
+  number to the do-not-call list and `HIGH` files one callback on the
+  campaign's follow-up queue. A campaign call is offered neither
+  `transfer_to_agent` nor `take_message`. The seed gains the
+  `campaign_lead_followup` flow on 95061 (English) and 95062 (Chinese); no
+  campaign is seeded (#166).
+- Campaign reporting: the CDR carries `campaignId` and `GET /cdrs` filters on
+  it, a webhook subscription can filter on `campaignId`, and `CAMPAIGN_UPDATED`
+  events on the stream tell supervisors when a campaign moved (#167).
+- `maxOutboundChannels` on a DID (`/dids`): how many outbound calls the number
+  may carry at once, as the carrier sells lines per number. Unset is no limit.
+  A single call or click-to-dial over the limit answers
+  `409 DID_CHANNELS_EXHAUSTED` with no CDR, and a campaign waits. The switch
+  stamps the DID on the trunk leg (`aicc_did`) so hand-dialled legs count too
+  (#160, #165).
+- The campaign contact importer in the web app reads Excel workbooks (`.xlsx`)
+  as well as CSV, with the same mapping, preview and rejected-rows download
+  (#192; thanks @javayou13131).
+- `aicc flowsim`: replays a scripted scenario against a flow on the real flow
+  engine with no telephony and no model, and `go test ./internal/flowsim` runs
+  it for every seed flow. A second tier lets text models play the bot and the
+  caller. Every seed flow ships with scenarios. Guide:
+  `docs/flow-authoring.md` section 8 (#85).
+- `AICC_OUTBOUND_RING_TIMEOUT` (default `45s`, at least `5s` and below the
+  60 second answer window): how long an outbound leg, AI outbound or
+  click-to-dial, rings before the switch gives up. A single call used to ring
+  for as long as the carrier allowed, and an answer after the window was
+  bridged to nobody and left parked; it is now hung up (`ALLOTTED_TIMEOUT`)
+  (#155).
+- `AICC_OUTBOUND_DIAL_FORM`: how the campaign dialer writes a number to the
+  trunk, `E164` (default), `E164_NO_PLUS` or `NATIONAL`, for a trunk that
+  refuses the default. Campaigns store and compare E.164 whatever it is
+  (#164).
+- `AICC_DEFAULT_COUNTRY_CODE` completes a national number for the do-not-call
+  check and contact import. The compose stack sets it to `86`; the
+  application's own default is empty. `aicc doctor` gains a `WARN` status and a
+  `dnc_country_code` check that uses it; a `WARN` does not change the exit
+  status (#162).
 - `AICC_PROVIDER=grok`: xAI Grok Voice (`grok-voice-3.0`, key in `XAI_API_KEY`)
   as a profile on the Realtime client, with G.711 passed through untouched. The
   client now ignores the `ping` event, treats cumulative
@@ -19,8 +144,8 @@ carries the one-line installer's files.
   Grok drops a per-response instruction override once the conversation has a
   turn, so on that profile every mid-call spoken line is first put in the
   conversation as a caller message (profile trait `IgnoresOverrideOnceTalking`).
-  `aicc doctor` and the installer (`--provider grok`) know the provider. Live
-  measurements: `docs/design/grok-findings.md` (#226).
+  `aicc doctor` and the installer (`--provider grok`) know the provider. Findings:
+  `docs/design/grok-findings.md` (#226).
 - Flow tools can keep a list across their calls: `collect` on an HTTP tool
   appends a rendered value (`{args.x}`, `{slots.y}`) to a list slot after each
   successful call for which its optional `when` condition holds, without
@@ -56,8 +181,9 @@ carries the one-line installer's files.
 - `global.temperature` in a flow sets the model's sampling temperature, in
   `0 <= t < 2`, published and versioned with the persona like `global.voice`.
   Absent keeps the provider's default, so existing flows are unchanged. The
-  qwen and gemini clients send it; openai, gateway and doubao have no such
-  field and ignore it, and the server logs that once. The bot detail page
+  qwen client sends it; openai, grok, gateway and doubao do not (grok accepts
+  the field but it showed no effect) and ignore it, and the server logs that
+  once. The bot detail page
   shows the value (#11).
 - Slot tools: a flow tool with `"kind": "slot"` records a fact the caller
   states into a declared slot (`slot`, optional `enum`), so it survives the
@@ -90,6 +216,25 @@ carries the one-line installer's files.
 
 ### Changed
 
+- Recovery: on start and on every reconnect to the switch, the application
+  reads the switch's live channels and adopts the ones it does not own. A ringing
+  outbound leg is re-armed for what is left of its answer window; a leg whose
+  window is spent, an answered leg still parked, and a customer leg bridged to
+  the bot with no session in this process are hung up. Outbound admission opens
+  after the first pass, so a placement made during startup answers `503
+  SWITCH_DOWN` if the switch never reports (#157).
+- An originate that never made a channel is now recorded with its cause: the
+  application consumes the switch's background-job result, so a refused or
+  failed dial is a CDR with a reason instead of a call that silently vanished
+  (#156).
+- An answered AI outbound call reserves its bot slot before it is bridged, and
+  waits for a free one instead of being bridged into a refused session (#158).
+- Providers: the code kept only for Gemini is gone from the provider
+  interface, with no change to any call: the unused tool-result hint, the
+  greeting cue, semantic turn detection and its qwen `smart_turn` hold, and two
+  event fields nothing read. Every call already used the fixed `server_vad` turn
+  detection, and `RequiresTerminalAnnounce` and the tool-result variant of it
+  became one capability (#225).
 - A flow whose `{slots.x}` (in an instruction, an announce or an HTTP body) or
   transition condition names a slot nothing in the flow writes no longer
   loads. Such a reference used to render as empty or never match. The
@@ -122,14 +267,14 @@ carries the one-line installer's files.
 
 ### Removed
 
-- The Gemini voice provider. `AICC_PROVIDER` now accepts `openai`, `qwen`,
-  `gateway` and `doubao`. Gemini could not apply a mid-call instruction change,
+- The Gemini voice provider. `AICC_PROVIDER` now accepts `openai`, `grok`,
+  `qwen`, `gateway` and `doubao`. Gemini could not apply a mid-call instruction change,
   which every other engine does at once (measured live on 2026-10-15), so the
   provider and the machinery that existed only for it are deleted: the client,
   the `PROVIDER_SESSION_EXPIRED` failure cause and its handling, the
   `aicc_provider_sessions_expired_total` metric and `AICC_GEMINI_STRICT_TESTS`.
   Migration: a deployment with `AICC_PROVIDER=gemini` no longer starts and must
-  choose another value (`openai`, `qwen`, `gateway` or `doubao`) together with
+  choose another value (`openai`, `grok`, `qwen`, `gateway` or `doubao`) together with
   that provider's key; `GEMINI_API_KEY` is ignored, and the installer no longer
   offers `--provider gemini`. New calls no longer end with hangup cause
   `PROVIDER_SESSION_EXPIRED`, and the metric is no longer produced; call records
@@ -139,6 +284,17 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- Post-call transcription of a click-to-dial recording no longer swaps the
+  speakers: the recording is made on the agent's leg, so the agent's speech
+  is labelled as the agent's, as the live transcript labels it (#161).
+- An outbound call whose callee declined (`USER_BUSY`) is recorded as
+  `BUSY` instead of `NO_ANSWER`. Earlier rows are not rewritten (#180).
+- The browser phone's widget is withdrawn whenever the page stops having a
+  phone, not only on sign-out: an expired or revoked session, or a role change,
+  used to leave a dead phone on the sign-in page or a blank tab. A page whose
+  session is gone goes to `/login` (#217).
+- A dialled number with a leading `+` (E.164) is accepted by click-to-dial and
+  `POST /calls` instead of being refused as not dialable (#159).
 - AI outbound calls (`kind: AI_OUTBOUND`, and so every campaign attempt) are
   now recorded when their DID records. The answered customer leg had been
   bridged straight to the bot with no recording started, while the CDR still
