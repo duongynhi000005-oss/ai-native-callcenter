@@ -23,6 +23,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
 	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
+	"github.com/rasonyang/ai-native-callcenter/internal/recording"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
@@ -33,6 +34,9 @@ type Switch interface {
 	TransferToExtension(channelID, extension, context string) error
 	Hangup(channelID, cause string) error
 	SetVariable(channelID, name, value string) error
+	// StartCallRecording starts the call's stereo recording on an answered
+	// channel, filed under key (recording.Key).
+	StartCallRecording(channelID, key string) error
 	Endpoint(extensionNumber string) string
 }
 
@@ -164,6 +168,9 @@ type Service struct {
 	now       func() time.Time // the clock; replaced in tests
 	// onAnswered, when set, hears every answered AI outbound leg.
 	onAnswered func(callID uuid.UUID)
+	// callStart says when the registry's call began, the instant the
+	// recording's key date must come from (the CDR ingest files by it too).
+	callStart func(callID uuid.UUID) (time.Time, bool)
 
 	// Originates awaiting their BACKGROUND_JOB result (jobs.go), guarded by mu.
 	jobs      map[string]*trackedJob // by Job-UUID
@@ -854,7 +861,7 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		return Placement{}, err
 	}
 
-	s.arm(customerLeg.String(), s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To,
+	s.arm(customerLeg.String(), s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To, did.IsRecordingEnabled,
 		campaignRef{campaignID: req.CampaignID, attemptID: req.AttemptID}))
 
 	s.attachJob(job, jobID) // after arming, for the same reason as click-to-dial
@@ -874,10 +881,37 @@ type campaignRef struct{ campaignID, attemptID uuid.UUID }
 // before the service is used.
 func (s *Service) SetAnswerObserver(f func(callID uuid.UUID)) { s.onAnswered = f }
 
+// SetCallStart installs the lookup of a call's start time (the registry's
+// CallTimeline). The recording of an AI outbound call is filed under the UTC
+// date of that instant, the same one the CDR ingest computes; without a
+// lookup, or for a call it does not know, the answer time is used. Set before
+// the service is used.
+func (s *Service) SetCallStart(f func(callID uuid.UUID) (time.Time, bool)) { s.callStart = f }
+
+// startRecording records the answered customer leg of an AI call, before the
+// bridge to the bot, so one stereo file (customer left, then bot and agent on
+// the right) follows the call through any transfer. A failure is logged and
+// never stops the call: a call without a recording beats a dropped call, and
+// has_recording stays false because only a stored object sets it.
+func (s *Service) startRecording(callID uuid.UUID, customerLeg string) {
+	at, ok := time.Time{}, false
+	if s.callStart != nil {
+		at, ok = s.callStart(callID)
+	}
+	if !ok || at.IsZero() {
+		at = s.now()
+	}
+	key := recording.Key(at, callID.String())
+	if err := s.sw.StartCallRecording(customerLeg, key); err != nil {
+		s.log.Warn("ai outbound recording not started; the call goes on unrecorded",
+			"callId", callID, "key", key, "error", err)
+	}
+}
+
 // bridgeToBot is what an answered AI outbound leg does: transfer into a bridge
 // to the bot gateway with the correlation headers an inbound call carries.
 // Placing a call and adopting one that outlived a restart arm the same thing.
-func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string, ref campaignRef) func() {
+func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language, to string, record bool, ref campaignRef) func() {
 	return func() {
 		// The first stage of the time to the first word starts here.
 		obs.OutboundAnswered(callID, time.Now())
@@ -887,6 +921,9 @@ func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language
 		key := callID.String()
 		if s.cfg.Slots != nil && !s.takeSlot(callID, customerLeg, to) {
 			return
+		}
+		if record {
+			s.startRecording(callID, customerLeg)
 		}
 		botLeg := uuid.New()
 		bridgeVars := map[string]string{

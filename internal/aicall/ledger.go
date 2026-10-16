@@ -354,7 +354,8 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 		// not because the platform's time limit made it.
 		IsContained: status == store.CDRStatusAnswered && endReason == "HANGUP" &&
 			!isSessionLimited,
-		HasRecording:   call.isRecordingEnabled,
+		// Never intent: only an ingested object (MarkRecorded) sets it.
+		HasRecording:   false,
 		UnbackedClaims: unbackedClaims,
 		UserData:       userData,
 		Tech:           call.tech,
@@ -390,7 +391,6 @@ type callFacts struct {
 	did                string
 	flowID             *uuid.UUID
 	flowSlug           string
-	isRecordingEnabled bool
 	tech               map[string]any
 	// userData is business data the request attached when it placed the call.
 	userData map[string]any

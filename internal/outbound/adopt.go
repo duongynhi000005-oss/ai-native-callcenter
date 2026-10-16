@@ -317,7 +317,7 @@ func (s *Service) recoverRinging(ctx context.Context, ch telephony.LiveChannel, 
 		if language == "" {
 			language = did.Language
 		}
-		onAnswer = s.bridgeToBot(ch.CallID, ch.ChannelID, did.Number, language, ch.PlacedTo, campaignRefOf(ch))
+		onAnswer = s.bridgeToBot(ch.CallID, ch.ChannelID, did.Number, language, ch.PlacedTo, did.IsRecordingEnabled, campaignRefOf(ch))
 	case telephony.PlacedByDial:
 		if !isDialable(ch.Destination) {
 			s.log.Warn("recovery: click-to-dial leg has no destination to go on to; hanging up",

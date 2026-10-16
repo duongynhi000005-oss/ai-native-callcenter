@@ -3,6 +3,7 @@
 package telephony
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -334,6 +335,41 @@ func (a *Adapter) Originate(partyID uuid.UUID, endpoint string, vars map[string]
 // StartRecording and StopRecording control a call's recording.
 func (a *Adapter) StartRecording(channelID, path string) error {
 	return a.exec("uuid_record %s start %s", channelID, path)
+}
+
+// RecordingsDir is where the switch files recordings: the global variable
+// aicc_recordings_dir, falling back to recordings_dir, exactly as the Lua
+// dialplan resolves it. It may be a directory or an http(s) URL (mod_http_cache
+// in front of the object store), so callers treat it as opaque.
+func (a *Adapter) RecordingsDir() (string, error) {
+	for _, name := range []string{"aicc_recordings_dir", "recordings_dir"} {
+		reply, err := a.cmd.API("global_getvar " + name)
+		if err != nil {
+			return "", fmt.Errorf("global_getvar %s: %w", name, err)
+		}
+		v := strings.TrimSpace(reply)
+		if v != "" && !strings.HasPrefix(v, "-ERR") && v != "_undef_" {
+			return v, nil
+		}
+	}
+	return "", errors.New("the switch has no recordings directory (aicc_recordings_dir, recordings_dir)")
+}
+
+// StartCallRecording starts the call's one continuous stereo recording on a
+// live, answered channel, filed under key (recording.Key). It sets what the
+// Lua dialplan sets before record_session: stereo, follow-the-transfer so a
+// later hand-off stays in one file, and aicc_recording_started so
+// aicc_queue.lua does not start a second recording.
+func (a *Adapter) StartCallRecording(channelID, key string) error {
+	dir, err := a.RecordingsDir()
+	if err != nil {
+		return err
+	}
+	if err := a.exec("uuid_setvar_multi %s RECORD_STEREO=true;recording_follow_transfer=true;"+
+		"media_bug_answer_req=true;aicc_recording_started=true", channelID); err != nil {
+		return err
+	}
+	return a.StartRecording(channelID, strings.TrimRight(dir, "/")+"/"+key)
 }
 
 func (a *Adapter) StopRecording(channelID, path string) error {

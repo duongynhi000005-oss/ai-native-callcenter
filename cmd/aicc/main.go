@@ -327,6 +327,11 @@ func run() error {
 			return err == nil
 		}, slog.Default()).WithDNC(st.DNC())
 
+	outboundSvc.SetCallStart(func(callID uuid.UUID) (time.Time, bool) {
+		createdAt, _, ok := registry.CallTimeline(callID)
+		return createdAt, ok
+	})
+
 	// Nothing is dialled until the switch has been read for the calls that
 	// outlived a restart (internal/outbound/adopt.go).
 	outboundSvc.HoldUntilReconciled()

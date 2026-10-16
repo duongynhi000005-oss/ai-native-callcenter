@@ -49,7 +49,6 @@ func testFacts() *callFacts {
 	return &callFacts{
 		callType: callTypeInbound, language: "zh", fromNumber: "13800138000",
 		did: "95012", flowID: &flowID, flowSlug: "novanet_support",
-		isRecordingEnabled: true,
 	}
 }
 
@@ -108,6 +107,11 @@ func TestAHangupCallWritesAContainedCDRAndTheTranscript(t *testing.T) {
 
 	if len(ledger.cdrs) != 1 {
 		t.Fatalf("wrote %d cdrs, want 1", len(ledger.cdrs))
+	}
+	// A bot call never claims a recording: only an ingested object (the
+	// telephony path's MarkRecorded) sets the flag, whatever the DID intends.
+	if ledger.cdrs[0].HasRecording {
+		t.Error("the bot ledger wrote HasRecording = true; only a stored object may set it")
 	}
 	cdr := ledger.cdrs[0]
 	if cdr.CallID != callID || cdr.CallType != "INBOUND" || cdr.Language != "zh" {

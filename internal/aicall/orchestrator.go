@@ -356,7 +356,6 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		did:                didNumber,
 		flowID:             did.FlowID,
 		flowSlug:           spec.ID,
-		isRecordingEnabled: did.IsRecordingEnabled,
 		tech: map[string]any{
 			"sipCallId":     dialog.CallID,
 			"codec":         dialog.RTP.Law().String(),
