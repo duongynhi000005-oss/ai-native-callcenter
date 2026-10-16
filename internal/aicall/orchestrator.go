@@ -916,6 +916,13 @@ func (o *Orchestrator) handleDeadAir(session *Session, runtime *flow.Runtime,
 	}
 	if err := session.SendCue(cue); err != nil {
 		log.Warn("could not prompt a silent caller", "error", err)
+		// No turn will follow, so no playback ends and nothing would watch
+		// the silence again: the count would stay here and neither the
+		// flow's NO_INPUT rule nor the closing target could ever fire (#228).
+		// An armed ending has its own cap and needs no watch.
+		if !actions.isArmed() {
+			session.RewatchDeadAir()
+		}
 	}
 }
 

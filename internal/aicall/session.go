@@ -246,6 +246,10 @@ type Session struct {
 	// playbackDone is signalled when a turn's audio has finished generating and
 	// the queue should be watched until it drains.
 	playbackDone chan playbackMarker
+	// rearm asks the playback watcher for a fresh dead-air watch after one
+	// fired and no turn followed (RewatchDeadAir). Buffered to one and sent to
+	// without blocking; only the watcher reads it, so a timer is never doubled.
+	rearm chan struct{}
 	// afterPlaybackDone, set only by tests, runs right after PLAYBACK_DONE is
 	// published and before the dead-air watch starts.
 	afterPlaybackDone func()
@@ -295,6 +299,7 @@ func New(leg Leg, model provider.VoiceSession, profile provider.Profile,
 		playBuffer:   make([]byte, 0, 8*media.FrameSamples),
 		events:       make(chan Event, 128),
 		playbackDone: make(chan playbackMarker, 8),
+		rearm:        make(chan struct{}, 1),
 		done:         make(chan struct{}),
 	}, nil
 }
@@ -1013,7 +1018,50 @@ func (s *Session) watchPlayback() {
 		if s.afterPlaybackDone != nil {
 			s.afterPlaybackDone()
 		}
-		next, hasNext = s.awaitCallerOrDeadAir(idleGeneration)
+		s.drainRearm()
+		var fired bool
+		next, hasNext, fired = s.awaitCallerOrDeadAir(idleGeneration)
+
+		// The watch fired and nothing followed. Normally the reprompt starts a
+		// turn and the next marker restarts the cycle; when the reprompt could
+		// not be sent (an engine that takes no text cue), nothing ever would,
+		// and the call sat silent with its NO_INPUT count stuck. RewatchDeadAir
+		// asks for the same watch again, honoured only while the caller has
+		// still said nothing since the one that fired.
+		for fired && !hasNext {
+			select {
+			case <-s.done:
+				return
+			case marker := <-s.playbackDone:
+				next, hasNext = marker, true
+			case <-s.rearm:
+				if !s.isCurrentIdle(idleGeneration) {
+					continue
+				}
+				next, hasNext, fired = s.awaitCallerOrDeadAir(idleGeneration)
+			}
+		}
+	}
+}
+
+// RewatchDeadAir asks for another dead-air watch after a NO_INPUT whose
+// reprompt could not be sent, so that a caller who stays silent is reported
+// again instead of being left on a line nobody is watching. It never blocks,
+// and does nothing once the session has closed, when the caller has spoken
+// since the watch fired, or when a turn is on its way (the turn restarts the
+// watch itself).
+func (s *Session) RewatchDeadAir() {
+	select {
+	case s.rearm <- struct{}{}:
+	default:
+	}
+}
+
+// drainRearm drops a re-arm request left over from an earlier cycle.
+func (s *Session) drainRearm() {
+	select {
+	case <-s.rearm:
+	default:
 	}
 }
 
@@ -1061,10 +1109,12 @@ func (s *Session) awaitDrained(generation uint64) (uint64, bool) {
 // playback must be followed from the moment it ends, not from whenever a
 // timeout nobody is waiting for any more happens to expire. Leaving the marker
 // in the channel put seconds of silence in front of every armed transfer.
-func (s *Session) awaitCallerOrDeadAir(generation uint64) (playbackMarker, bool) {
+//
+// The last result says the watch fired and reported NO_INPUT.
+func (s *Session) awaitCallerOrDeadAir(generation uint64) (playbackMarker, bool, bool) {
 	timeout := s.noInputAfter()
 	if timeout <= 0 {
-		return playbackMarker{}, false
+		return playbackMarker{}, false, false
 	}
 
 	timer := time.NewTimer(timeout)
@@ -1073,17 +1123,18 @@ func (s *Session) awaitCallerOrDeadAir(generation uint64) (playbackMarker, bool)
 	select {
 	case <-s.done:
 	case marker := <-s.playbackDone:
-		return marker, true
+		return marker, true, false
 	case <-timer.C:
 		// A stale timer recognises itself rather than being stopped, which
 		// removes the race between cancelling and firing entirely.
 		if !s.isCurrentIdle(generation) {
-			return playbackMarker{}, false
+			return playbackMarker{}, false, false
 		}
 		s.log.Info("dead air", "afterMs", timeout.Milliseconds())
 		s.emit(Event{Type: EventTypeNoInput})
+		return playbackMarker{}, false, true
 	}
-	return playbackMarker{}, false
+	return playbackMarker{}, false, false
 }
 
 // cancelDeadAirWatch invalidates any timer waiting on the caller. It touches
