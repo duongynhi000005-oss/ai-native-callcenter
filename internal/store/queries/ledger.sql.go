@@ -380,7 +380,8 @@ INSERT INTO cdrs (
     missed_reason = EXCLUDED.missed_reason,
     disposition = EXCLUDED.disposition,
     is_contained = EXCLUDED.is_contained,
-    has_recording = EXCLUDED.has_recording,
+    -- An object stored by MarkRecorded outlives a later rewrite of the row.
+    has_recording = cdrs.has_recording OR EXCLUDED.has_recording,
     user_data = EXCLUDED.user_data,
     tech = EXCLUDED.tech,
     legs = EXCLUDED.legs,

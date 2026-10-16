@@ -380,3 +380,43 @@ func TestOriginateKeepsAPlusInTheEndpointAndInVariables(t *testing.T) {
 		t.Errorf("command = %q, want %q", c.last(), want)
 	}
 }
+
+// The AI outbound path starts its recording with the variables the Lua
+// dialplan sets, then uuid_record to the switch's recordings directory.
+func TestStartCallRecordingSetsTheStereoVariablesThenRecords(t *testing.T) {
+	cmd := &fakeCommander{up: true, replyFor: func(c string) (string, error) {
+		if c == "global_getvar aicc_recordings_dir" {
+			return "http://filer:8888/aicc/", nil
+		}
+		return "", nil
+	}}
+	a := NewAdapter(cmd, "aicc")
+	if err := a.StartCallRecording("leg-1", "2026/10/12/call-1.wav"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"global_getvar aicc_recordings_dir",
+		"uuid_setvar_multi leg-1 RECORD_STEREO=true;recording_follow_transfer=true;media_bug_answer_req=true;aicc_recording_started=true",
+		"uuid_record leg-1 start http://filer:8888/aicc/2026/10/12/call-1.wav",
+	}
+	if strings.Join(cmd.sent, "\n") != strings.Join(want, "\n") {
+		t.Errorf("sent\n%s\nwant\n%s", strings.Join(cmd.sent, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestRecordingsDirFallsBackAndRefusesWhenNoneIsSet(t *testing.T) {
+	cmd := &fakeCommander{up: true, replyFor: func(c string) (string, error) {
+		if c == "global_getvar recordings_dir" {
+			return "/var/lib/freeswitch/recordings\n", nil
+		}
+		return "\n", nil // an unset global variable answers with nothing
+	}}
+	a := NewAdapter(cmd, "aicc")
+	if dir, err := a.RecordingsDir(); err != nil || dir != "/var/lib/freeswitch/recordings" {
+		t.Errorf("RecordingsDir() = %q, %v", dir, err)
+	}
+	none := NewAdapter(&fakeCommander{up: true, reply: "\n"}, "aicc")
+	if err := none.StartCallRecording("leg-1", "k.wav"); err == nil {
+		t.Error("a switch with no recordings directory started a recording")
+	}
+}

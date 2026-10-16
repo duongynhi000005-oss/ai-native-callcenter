@@ -123,6 +123,21 @@ type fakeSwitch struct {
 	transfers  []transferred
 	hangups    []hungUp
 	vars       [][3]string
+	// order is every recording start and bridge, in the order the switch
+	// received them; recordings are the starts alone.
+	order      []string
+	recordings []recorded
+	recordErr  error
+}
+
+type recorded struct{ channelID, key string }
+
+func (f *fakeSwitch) StartCallRecording(channelID, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, "record")
+	f.recordings = append(f.recordings, recorded{channelID, key})
+	return f.recordErr
 }
 
 type hungUp struct{ channelID, cause string }
@@ -170,6 +185,7 @@ func (f *fakeSwitch) BridgeToEndpoint(channelID string, _ uuid.UUID, endpoint st
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bridges = append(f.bridges, bridged{channelID, endpoint, vars})
+	f.order = append(f.order, "bridge")
 	return nil
 }
 

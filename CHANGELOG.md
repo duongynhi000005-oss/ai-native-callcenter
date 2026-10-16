@@ -139,6 +139,14 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- AI outbound calls (`kind: AI_OUTBOUND`, and so every campaign attempt) are
+  now recorded when their DID records. The answered customer leg had been
+  bridged straight to the bot with no recording started, while the CDR still
+  said `hasRecording: true`. The recording now starts on that leg before the
+  bridge: one stereo file, the customer on the left and the bot and then any
+  agent on the right, filed under the call's start date. `hasRecording` now
+  means a recording was stored. The bot ledger no longer writes the DID's
+  setting, and a later CDR write cannot clear the flag (#196).
 - A silent caller on an engine that takes no text cue (Doubao) is now closed. The
   reprompt after the first dead-air NO_INPUT failed, no turn followed, and
   nothing watched the silence again, so the NO_INPUT count stayed at one and
@@ -230,7 +238,9 @@ carries the one-line installer's files.
 - Upgrade both images together. The switch image builds `mod_audio_stream`
   from our fork (see Changed), forwards the call type on a bot overflow in
   `aicc_queue.lua`, and takes the new optional `PSTN_GATEWAY_PROXY` setting.
-  There are no new migrations; the database schema is unchanged.
+  The database schema is unchanged. One migration corrects data: it clears
+  `cdrs.has_recording` on every call that has no stored recording, so the CDR
+  list stops offering recordings that cannot be played (#196).
 - API contract: `POST /agent/login` no longer accepts `extensionNumber`. The
   body is optional and a body carrying any property is refused with
   `VALIDATION_FAILED` (422); the agent is always signed in at the extension
