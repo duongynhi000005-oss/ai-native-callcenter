@@ -36,6 +36,8 @@ func main() {
 	deltaAudio := flag.Duration("delta-audio", 100*time.Millisecond, "audio per delta")
 	deltaPace := flag.Duration("delta-pace", 0,
 		"wait between deltas; 0 delivers a turn as fast as the socket takes it, as real providers do")
+	scenarioFile := flag.String("scenario", "",
+		"scenario file: sessions play scripted steps (speak, call a tool, await its result, end) instead of timed turns; see docs/load-tests.md")
 	quiet := flag.Bool("quiet", false, "log warnings only")
 	flag.Parse()
 
@@ -45,6 +47,15 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	var scenario *mockprovider.Scenario
+	if *scenarioFile != "" {
+		var err error
+		if scenario, err = mockprovider.LoadScenario(*scenarioFile); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(2)
+		}
+	}
+
 	server := mockprovider.New(mockprovider.Config{
 		FirstAudio:   *firstAudio,
 		TurnAudio:    *turnAudio,
@@ -52,6 +63,7 @@ func main() {
 		SpeechBefore: *speechBefore,
 		DeltaAudio:   *deltaAudio,
 		DeltaPace:    *deltaPace,
+		Scenario:     scenario,
 		Log:          log,
 	})
 
@@ -61,6 +73,11 @@ func main() {
 			log.Info("mockprovider", "live", stats.Live, "peak", stats.Peak,
 				"total", stats.Total, "turns", stats.Turns, "cut", stats.Cut,
 				"audioSec", stats.AudioSec)
+			if scenario != nil {
+				log.Info("mockprovider scenario", "toolCalls", stats.ToolCalls,
+					"toolResults", stats.ToolResults, "scriptsDone", stats.ScriptsDone,
+					"scriptsFailed", stats.ScriptsFailed, "unmatched", stats.Unmatched)
+			}
 		}
 	}()
 
