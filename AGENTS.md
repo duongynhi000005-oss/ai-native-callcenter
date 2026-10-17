@@ -49,6 +49,7 @@ cd web && npm run build                           # web/dist, embedded via go:em
 cd web && npm run test                            # vitest
 
 make stack-up                                     # the whole product in containers, seeded (deploy/README.md)
+make e2e-up && make e2e-smoke; make e2e-down    # isolated outbound-call smoke test: internal network, mock provider, callee simulator (deploy/e2e/README.md)
 ```
 
 Load harness: `docs/load-tests.md`.

@@ -1,0 +1,22 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+
+  The end-to-end environment's one trunk: its only peer is the callee
+  simulator, at a fixed address on the environment's internal network. The
+  application's AICC_OUTBOUND_ENDPOINT names this gateway, and the harness
+  refuses to run when it names anything else.
+
+  e2e.sh renders this template into the run directory, replacing the address,
+  and the compose overlay mounts that one file into sip_profiles/external/.
+  The directory is never mounted, because that would hide aicc_bot.xml. The
+  proxy is an IP address, never a service name.
+
+  No registration and no OPTIONS ping: the simulator is a UAS for INVITE.
+-->
+<include>
+  <gateway name="e2e_calleesim">
+    <param name="proxy" value="@CALLEESIM_IP@:5080"/>
+    <param name="register" value="false"/>
+    <param name="caller-id-in-from" value="true"/>
+  </gateway>
+</include>

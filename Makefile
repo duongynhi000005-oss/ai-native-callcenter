@@ -61,6 +61,18 @@ stack-down: ## Stop the stack (add ARGS=-v to discard its data)
 stack-logs: ## Follow the stack's application log
 	docker compose -f $(STACK) logs -f aicc
 
+.PHONY: e2e-up
+e2e-up: ## Start the isolated end-to-end environment (internal network, fresh database; deploy/e2e/README.md)
+	deploy/e2e/e2e.sh up
+
+.PHONY: e2e-smoke
+e2e-smoke: ## Place one AI outbound call in the end-to-end environment and check the dialog and the CDR
+	deploy/e2e/e2e.sh smoke
+
+.PHONY: e2e-down
+e2e-down: ## Collect logs and remove the end-to-end environment, its volumes and its network
+	deploy/e2e/e2e.sh down
+
 .PHONY: image
 image: ## Build the container image (VERSION=v0.1.0 stamps `aicc version`)
 	docker build --build-arg VERSION=$(VERSION) -t aicc:$(if $(VERSION),$(VERSION),dev) .

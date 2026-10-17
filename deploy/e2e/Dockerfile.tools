@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The harness's own binaries in an image with nothing else in it: no shell, no
+# package manager, no CA bundle. They are built on the host (static, CGO off,
+# the Docker daemon's architecture) by e2e.sh, so the image needs no Go
+# toolchain and no container needs to reach a module proxy.
+FROM scratch
+COPY aicc-calleesim aicc-mockprovider aicc-e2e /usr/local/bin/

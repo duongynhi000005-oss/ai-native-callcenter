@@ -1,0 +1,12 @@
+{
+  "numbers": {
+    "13800000001": [
+      {
+        "provisionals": [{"status": 180, "atMs": 100}],
+        "finalAfterMs": 800,
+        "byeAfterMs": 9000,
+        "uplink": {"kind": "SILENCE"}
+      }
+    ]
+  }
+}
