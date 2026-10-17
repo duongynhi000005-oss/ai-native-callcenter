@@ -40,6 +40,17 @@ services:
       OPENAI_API_KEY: not-a-key
       # The only way out for an outbound call is the simulator's gateway.
       AICC_OUTBOUND_ENDPOINT: ${E2E_OUTBOUND_ENDPOINT:-sofia/gateway/e2e_calleesim/%s}
+      # Campaign tests (make e2e-campaign, internal/e2e/campaign*.go). The
+      # dial form is deployment-wide and the default one, spelt out because
+      # the simulator's scenario is keyed on what it produces: the canonical
+      # number with its plus, so a US and a Chinese contact can never be read
+      # as each other (deploy/e2e/README.md, "Campaign tests").
+      AICC_OUTBOUND_DIAL_FORM: E164
+      # Off, so a repeat run against the same environment is not held back by
+      # the previous run's touch of the same numbers.
+      AICC_CAMPAIGN_FREQUENCY_WINDOW: "0"
+      # Open all day, so a run never waits for the callee's local morning.
+      AICC_OUTBOUND_HOURS: 00:00-24:00
       AICC_LOG_LEVEL: ${AICC_LOG_LEVEL:-info}
 
   freeswitch:
@@ -106,6 +117,8 @@ services:
       E2E_PASSWORD: ${E2E_PASSWORD:?}
     volumes:
       - ./e2e/flow.json:/etc/e2e/flow.json:ro
+      # The campaign driver checks its cases against the simulator's scenario.
+      - ./e2e/scenario.json:/etc/e2e/scenario.json:ro
       - ${E2E_RUN_DIR:?}:/run/e2e
 
 networks:

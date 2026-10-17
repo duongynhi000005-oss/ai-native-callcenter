@@ -69,6 +69,10 @@ e2e-up: ## Start the isolated end-to-end environment (internal network, fresh da
 e2e-smoke: ## Place one AI outbound call in the end-to-end environment and check the dialog and the CDR
 	deploy/e2e/e2e.sh smoke
 
+.PHONY: e2e-campaign
+e2e-campaign: ## Run the campaign scenarios and probes in the end-to-end environment (two campaigns, US and CN; a few minutes)
+	deploy/e2e/e2e.sh campaign
+
 .PHONY: e2e-down
 e2e-down: ## Collect logs and remove the end-to-end environment, its volumes and its network
 	deploy/e2e/e2e.sh down

@@ -5,4 +5,4 @@
 # the Docker daemon's architecture) by e2e.sh, so the image needs no Go
 # toolchain and no container needs to reach a module proxy.
 FROM scratch
-COPY aicc-calleesim aicc-mockprovider aicc-e2e /usr/local/bin/
+COPY aicc-calleesim aicc-mockprovider aicc-e2e aicc-e2e-campaign.test /usr/local/bin/
