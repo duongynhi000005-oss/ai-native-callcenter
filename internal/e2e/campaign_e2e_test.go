@@ -2,7 +2,7 @@
 
 //go:build e2e
 
-// The campaign tests of issue #245. They need the environment of deploy/e2e
+// The campaign tests of issues #245 and #246. They need the environment of deploy/e2e
 // and run inside its internal network: e2e.sh builds this file into a static
 // test binary (go test -c -tags e2e), puts it in the harness image and runs it
 // with docker compose run. `make e2e-campaign` is the way to run them.
@@ -24,6 +24,8 @@ var (
 	flagReady        = flag.String("e2e.ready", "", "application readiness URL")
 	flagCalleeSim    = flag.String("e2e.calleesim", "", "callee simulator report base")
 	flagMockProvider = flag.String("e2e.mockprovider", "", "mock provider HTTP base, for its session counters")
+	flagMetrics      = flag.String("e2e.metrics", "", "application metrics exposition, e.g. http://10.1.2.10:9090/metrics")
+	flagProviderScn  = flag.String("e2e.provider-scenario", "", "the mock provider's scenario file")
 	flagESL          = flag.String("e2e.esl", "", "switch event socket address")
 	flagCompose      = flag.String("e2e.compose-config", "", "resolved compose configuration (JSON)")
 	flagScenario     = flag.String("e2e.scenario", "", "the simulator's scenario file")
@@ -36,13 +38,14 @@ var (
 func TestCampaigns(t *testing.T) {
 	cfg := CampaignConfig{
 		API: *flagAPI, ReadyURL: *flagReady, CalleeSim: *flagCalleeSim, MockProvider: *flagMockProvider,
-		ESLAddr: *flagESL, ESLPassword: os.Getenv("ESL_PASSWORD"),
-		ComposeConfig: *flagCompose, ScenarioFile: *flagScenario, FlowFile: *flagFlow,
+		MetricsURL: *flagMetrics, ESLAddr: *flagESL, ESLPassword: os.Getenv("ESL_PASSWORD"),
+		ComposeConfig: *flagCompose, ScenarioFile: *flagScenario, ProviderScenarioFile: *flagProviderScn, FlowFile: *flagFlow,
 		Username: *flagUsername, Password: os.Getenv("E2E_PASSWORD"),
 		OutDir: *flagOut, Wait: *flagWait,
 	}
 	for name, v := range map[string]string{
 		"-e2e.api": cfg.API, "-e2e.ready": cfg.ReadyURL, "-e2e.calleesim": cfg.CalleeSim, "-e2e.mockprovider": cfg.MockProvider,
+		"-e2e.metrics": cfg.MetricsURL, "-e2e.provider-scenario": cfg.ProviderScenarioFile,
 		"-e2e.esl": cfg.ESLAddr, "-e2e.compose-config": cfg.ComposeConfig, "-e2e.scenario": cfg.ScenarioFile,
 		"-e2e.flow": cfg.FlowFile, "-e2e.username": cfg.Username, "-e2e.out": cfg.OutDir,
 		"ESL_PASSWORD": cfg.ESLPassword, "E2E_PASSWORD": cfg.Password,
@@ -89,6 +92,7 @@ func TestCampaigns(t *testing.T) {
 	}
 
 	t.Logf("measured table (dial form %s):%s", rep.DialForm, ProbeTable(rep.Probes))
+	t.Logf("%s", FirstAudioTable(rep.FirstAudio))
 	if len(rep.Findings) > 0 {
 		t.Logf("findings:\n  %s", strings.Join(rep.Findings, "\n  "))
 	}
