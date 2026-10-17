@@ -127,22 +127,22 @@ func New(cfg Config) *Server {
 
 // Stats reports what the server has served.
 type Stats struct {
-	Live     int64
-	Peak     int64
-	Total    int64
-	Turns    int64
-	Cut      int64
-	AudioSec float64
+	Live     int64   `json:"live"`
+	Peak     int64   `json:"peak"`
+	Total    int64   `json:"total"`
+	Turns    int64   `json:"turns"`
+	Cut      int64   `json:"cut"`
+	AudioSec float64 `json:"audioSec"`
 
 	// Scenario mode only.
-	ToolCalls     int64
-	ToolResults   int64
-	ScriptsDone   int64
-	ScriptsFailed int64
-	Unmatched     int64
+	ToolCalls     int64 `json:"toolCalls"`
+	ToolResults   int64 `json:"toolResults"`
+	ScriptsDone   int64 `json:"scriptsDone"`
+	ScriptsFailed int64 `json:"scriptsFailed"`
+	Unmatched     int64 `json:"unmatched"`
 	// ResultsWithoutCreate counts tool results the script continued past
 	// after the grace period, with no response.create following.
-	ResultsWithoutCreate int64
+	ResultsWithoutCreate int64 `json:"resultsWithoutCreate"`
 }
 
 func (s *Server) Stats() Stats {
@@ -162,6 +162,23 @@ func (s *Server) Stats() Stats {
 
 		ResultsWithoutCreate: s.resultsWithoutCreate.Load(),
 	}
+}
+
+// StatsPath is where Handler serves the counters as JSON. Real providers have
+// no such path, so a session can never be mistaken for a stats request.
+const StatsPath = "/_stats"
+
+// Handler is the server as the application reaches it, plus a read-only
+// GET StatsPath that reports Stats as JSON, so a test outside the process can
+// ask how many sessions were ever opened.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+StatsPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.Stats())
+	})
+	mux.Handle("/", s)
+	return mux
 }
 
 // ServeHTTP upgrades any path to a session. Real providers select the model

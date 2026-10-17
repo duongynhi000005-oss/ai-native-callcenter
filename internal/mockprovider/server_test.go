@@ -4,8 +4,10 @@ package mockprovider_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	nethttp "net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -105,6 +107,55 @@ func TestSessionsAreCounted(t *testing.T) {
 	if stats := server.Stats(); stats.Total != 2 || stats.Peak != 2 {
 		t.Errorf("total %d peak %d, want 2 and 2", stats.Total, stats.Peak)
 	}
+}
+
+// An outside test (the end-to-end campaign driver) asks whether the
+// application ever opened a session. The handler answers StatsPath with the
+// counters as JSON, under the names the driver reads, and still upgrades any
+// other path to a session; reading the counters is not a session.
+func TestStatsAreServedAsJSONBesideTheSessions(t *testing.T) {
+	server := mockprovider.New(mockprovider.Config{TurnEvery: time.Hour, Log: quietLog()})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	stats := func() map[string]any {
+		t.Helper()
+		resp, err := nethttp.Get(ts.URL + mockprovider.StatsPath)
+		if err != nil {
+			t.Fatalf("get stats: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != nethttp.StatusOK {
+			t.Fatalf("stats status %d", resp.StatusCode)
+		}
+		got := map[string]any{}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode stats: %v", err)
+		}
+		return got
+	}
+	counts := func(m map[string]any) (total, live float64) {
+		total, okTotal := m["total"].(float64)
+		live, okLive := m["live"].(float64)
+		if !okTotal || !okLive {
+			t.Fatalf("stats lack total or live: %v", m)
+		}
+		return total, live
+	}
+
+	if total, live := counts(stats()); total != 0 || live != 0 {
+		t.Fatalf("before any session: total %v live %v, want 0 and 0", total, live)
+	}
+	session, _ := dial(t, ts.URL)
+	defer session.Close(t.Context())
+	// dial returns once the server's session answered session.update, and
+	// the server counts a session before that session starts, so the counters
+	// are already there; the poll keeps the test right should that order ever
+	// change, and reads both counters at once.
+	waitFor(t, func() bool {
+		total, live := counts(stats())
+		return total == 1 && live == 1
+	}, "one session counted over HTTP")
 }
 
 func connect(t *testing.T, cfg mockprovider.Config) (*provider.Realtime, <-chan provider.Event) {
