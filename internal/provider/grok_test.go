@@ -373,6 +373,10 @@ func TestAMidCallLineIsPutInTheConversationOnlyWhereTheEngineNeedsIt(t *testing.
 			f.send(map[string]any{"type": "response.done", "response": map[string]any{"status": "completed"}})
 			awaitEvent(t, session, EventTypeResponseDone)
 
+			// The fake records frames on its own read goroutine, so the
+			// opening response.create may not be on record yet. Wait for it
+			// (and that it is the only one) before counting what SpeakText adds.
+			f.awaitMessages("response.create", 1)
 			before := len(f.messages())
 			if err := session.SpeakText("Thanks for calling.", tc.isClosing); err != nil {
 				t.Fatalf("speak: %v", err)
