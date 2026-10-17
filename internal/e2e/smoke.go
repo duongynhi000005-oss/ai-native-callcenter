@@ -210,7 +210,7 @@ func runCall(ctx context.Context, cfg SmokeConfig, c *httpc, sum *Summary, col *
 
 	// The simulator ends the call by itself (its scenario says when); wait for
 	// the dialog to end and the ledger row to appear.
-	report, err := waitDialogEnded(ctx, c, cfg, len(pre.Dialogs)+1)
+	report, err := waitDialogEnded(ctx, c, cfg, len(pre.Dialogs))
 	if err != nil {
 		_ = writeJSON(filepath.Join(cfg.OutDir, "calleesim-report.json"), report)
 		return err
@@ -337,23 +337,27 @@ func assertCDR(l api.CDRList, callID uuid.UUID, cfg SmokeConfig, sum *Summary, c
 	sum.CDR = &CDRSummary{Count: len(l.Items), CallType: string(cdr.CallType), Status: string(cdr.Status), To: cdr.ToNumber, DID: gotDID}
 }
 
-func waitDialogEnded(ctx context.Context, c *httpc, cfg SmokeConfig, want int) (calleesim.Report, error) {
+// waitDialogEnded waits for a dialog after the first prior ones, and for
+// every dialog after them to have ended. The earlier dialogs are not looked
+// at: a dialog refused with a final error response never records an end, so
+// a run after a campaign run would otherwise wait for dialogs that cannot end.
+func waitDialogEnded(ctx context.Context, c *httpc, cfg SmokeConfig, prior int) (calleesim.Report, error) {
 	var r calleesim.Report
 	deadline := time.Now().Add(cfg.Wait)
 	for {
-		if err := c.getJSON(ctx, cfg.CalleeSim+"/report", &r); err == nil {
-			ended := 0
-			for _, d := range r.Dialogs {
-				if d.End != nil {
-					ended++
+		if err := c.getJSON(ctx, cfg.CalleeSim+"/report", &r); err == nil && len(r.Dialogs) > prior {
+			ended := true
+			for _, d := range r.Dialogs[prior:] {
+				if d.End == nil {
+					ended = false
 				}
 			}
-			if ended >= want {
+			if ended {
 				return r, nil
 			}
 		}
 		if time.Now().After(deadline) {
-			return r, fmt.Errorf("the simulator did not record %d ended dialog(s) within %s (has %d dialog(s))", want, cfg.Wait, len(r.Dialogs))
+			return r, fmt.Errorf("the simulator did not record a new dialog that ended within %s (has %d dialog(s), %d before the call)", cfg.Wait, len(r.Dialogs), prior)
 		}
 		if err := sleep(ctx, 500*time.Millisecond); err != nil {
 			return r, err
