@@ -132,7 +132,7 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 	}
 
 	rep := &CampaignReport{StartedAt: time.Now().UTC(), DialForm: string(form), Latency: map[string]float64{}}
-	d := &driver{cfg: cfg, c: c, form: form, rep: rep}
+	d := &driver{cfg: cfg, c: c, form: form, rep: rep, plan: defaultPlan}
 	runErr := d.run(ctx)
 
 	rep.FinishedAt = time.Now().UTC()
@@ -363,12 +363,26 @@ func stepProblems(label, key string, steps []Step, list []calleesim.Behaviour) [
 	return problems
 }
 
+// campaignPlan is what the driver provisions for each region: the campaign's
+// ring timeout and attempt budget, and the DID's outbound line limit.
+type campaignPlan struct {
+	RingTimeoutSec int
+	MaxAttempts    int
+	// MaxOutboundChannels is the DID's maxOutboundChannels; nil means no
+	// limit.
+	MaxOutboundChannels *int
+}
+
+// defaultPlan is the policy of the campaign scenarios and probes.
+var defaultPlan = campaignPlan{RingTimeoutSec: RingTimeoutSec, MaxAttempts: MaxAttempts}
+
 // driver is one run.
 type driver struct {
 	cfg  CampaignConfig
 	c    *httpc
 	form phonenum.DialForm
 	rep  *CampaignReport
+	plan campaignPlan
 
 	regions []*regionRun
 	dnc     []string
@@ -489,7 +503,7 @@ func (d *driver) provision(ctx context.Context, r Region, usedDIDs map[string]bo
 		}
 		var err error
 		slug := "e2e-campaign-" + strings.ToLower(r.Code) + "-" + number
-		did, err = d.c.publishFlowAndDID(ctx, d.cfg.FlowFile, slug, "e2e campaign "+r.Code+" "+number, number)
+		did, err = d.c.publishFlowAndDID(ctx, d.cfg.FlowFile, slug, "e2e campaign "+r.Code+" "+number, number, d.plan.MaxOutboundChannels)
 		if err == nil {
 			usedDIDs[number] = true
 			break
@@ -517,8 +531,8 @@ func (d *driver) provision(ctx context.Context, r Region, usedDIDs map[string]bo
 	}
 
 	maxConcurrent := len(d.cfg.Cases)
-	ring := RingTimeoutSec
-	attempts, system := MaxAttempts, MaxSystemRetries
+	ring := d.plan.RingTimeoutSec
+	attempts, system := d.plan.MaxAttempts, MaxSystemRetries
 	base, factor, capSec := RetryIntervalSec, 1, RetryIntervalSec
 	intervals := api.CampaignIntervalSec{
 		"NO_ANSWER": RetryIntervalSec, "BUSY": RetryIntervalSec, "REJECTED": RetryIntervalSec, "UNKNOWN": RetryIntervalSec,
