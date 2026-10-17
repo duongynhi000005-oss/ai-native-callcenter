@@ -6,7 +6,9 @@
 # then the campaign tests, two campaigns (US and CN numbers) running the
 # unanswered scenarios and the SIP-response probes of issue #245, the answered
 # scenarios of issue #246 (no redial after an answer, a HIGH lead's callback)
-# and the run-wide invariants checked after every run.
+# and the run-wide invariants checked after every run; then the capacity
+# scenarios of issue #247 (bot-slot overflow, the DID outbound line limit),
+# each in an application start of its own.
 #
 # Path-filtered to what can break an outbound call. The application is built
 # from the checkout; the switch image is the published one the base compose
@@ -98,10 +100,16 @@ jobs:
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         run: make e2e-campaign
 
+      # K1 (overflow) and K2 (DID line limit), on the same environment, each
+      # after recreating the application with its settings; about a minute.
+      - name: Capacity tests
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        run: make e2e-capacity
+
       # The run directory holds the simulator's record, the CDRs, the smoke
-      # summary, the campaign report with its failure bundles and every
-      # container's log; a failed up, smoke or campaign run has already
-      # written the logs by the time this runs.
+      # summary, the campaign report with its failure bundles, the capacity
+      # reports and every container's log; a failed up, smoke, campaign or
+      # capacity run has already written the logs by the time this runs.
       - name: Upload the run directory
         if: failure()
         uses: actions/upload-artifact@v4
