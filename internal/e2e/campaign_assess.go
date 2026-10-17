@@ -50,8 +50,10 @@ type CampaignReport struct {
 	Scenarios []ScenarioResult   `json:"scenarios"`
 	// Probes is the measured table, one row per region and case: SIP final
 	// response, switch hangup cause, outcome, retry interval and budget.
-	Probes   []ProbeRow    `json:"probes"`
-	Provider ProviderCount `json:"provider"`
+	Probes []ProbeRow `json:"probes"`
+	// FirstAudio is every answered call's time to the first word heard.
+	FirstAudio []FirstAudioRow `json:"firstAudio"`
+	Provider   ProviderCount   `json:"provider"`
 	// Run holds the assertions about the run as a whole: the simulator's
 	// verdict, the provider, and which campaign each dialog belongs to.
 	Run CheckList `json:"run"`
@@ -103,6 +105,8 @@ type ScenarioResult struct {
 	Attempts   []AttemptResult `json:"attempts"`
 	// Invites is the simulator's INVITE count for the dial key in this run.
 	Invites int `json:"invites"`
+	// Callbacks are the callbacks the contact's calls filed (answered cases).
+	Callbacks []api.Callback `json:"callbacks,omitempty"`
 }
 
 // ContactResult is a contact as read from the API.
@@ -143,6 +147,15 @@ type AttemptResult struct {
 	// RetryLatenessMs is how long after the previous nextAttemptAt this
 	// attempt started. Reported, never asserted beyond "not early".
 	RetryLatenessMs *float64 `json:"retryLatenessMs,omitempty"`
+	// InviteGapMs is the time from the previous attempt's INVITE to this
+	// one's. Reported, never asserted beyond "not before the interval".
+	InviteGapMs *float64 `json:"inviteGapMs,omitempty"`
+	// IsAnswered marks an attempt the callee answered. FirstAudioAfterAnswerMs
+	// runs from its 200 OK to the first downlink frame above silence, and
+	// AnswerToEndMs to the BYE. Reported, never asserted.
+	IsAnswered              bool     `json:"isAnswered,omitempty"`
+	FirstAudioAfterAnswerMs *float64 `json:"firstAudioAfterAnswerMs,omitempty"`
+	AnswerToEndMs           *float64 `json:"answerToEndMs,omitempty"`
 }
 
 // ProbeRow is one line of the measured table.
@@ -186,22 +199,32 @@ func assess(rep *CampaignReport, v *RunView, cases []Case, form phonenum.DialFor
 		}
 		for _, cv := range rv.Contacts {
 			key := rv.Region.DialKey(cv.Case, form)
+			if len(cv.Case.Steps) > 0 {
+				rep.Scenarios = append(rep.Scenarios, assessSteppedContact(rv, cv, key, dialogsFor(v.Dialogs, key), cdrs, v.Callbacks, v.ObservedAt))
+				continue
+			}
 			rep.Scenarios = append(rep.Scenarios, assessContact(rv, cv, key, dialogsFor(v.Dialogs, key), cdrs, v.ObservedAt, &rep.Findings))
 		}
 	}
 
 	// C07 and C08 name it: a ringing leg, with or without early media, must
-	// not open a provider session (design 10 section 2, rule 1). No case of
-	// the run is answered, so the mock provider's count must not move at all.
-	noSession := v.Provider.TotalAfter == v.Provider.TotalBefore && v.Provider.LiveAfter == 0
+	// not open a provider session (design 10 section 2, rule 1). The mock
+	// provider cannot tell one call from another, so this is read off the
+	// counts: it opened exactly as many sessions as the simulator answered
+	// calls, which leaves none for a leg that only rang. The run-wide
+	// invariant (AfterRunChecks) holds the application's own counter to it
+	// as well.
+	answered := answeredDialogs(v.Dialogs)
+	noRingingSession := v.Provider.Sessions() == int64(answered) && v.Provider.After.Live == 0
 	for i := range rep.Scenarios {
 		sc := &rep.Scenarios[i]
-		if cs := caseByID(cases, sc.ID); cs.SIPStatus != 0 || cs.IsOnDNC {
+		if cs := caseByID(cases, sc.ID); len(cs.Steps) > 0 || cs.SIPStatus != 0 || cs.IsOnDNC {
 			continue
 		}
-		msg := fmt.Sprintf("no provider session was opened while it rang (mock provider sessions %d -> %d during the run)", v.Provider.TotalBefore, v.Provider.TotalAfter)
+		msg := fmt.Sprintf("no provider session was opened while it rang: the mock opened %d session(s) during the run, one per answered call (%d), and has %d live",
+			v.Provider.Sessions(), answered, v.Provider.After.Live)
 		sc.Checks = append(sc.Checks, msg)
-		if !noSession {
+		if !noRingingSession {
 			sc.Failures = append(sc.Failures, msg)
 			sc.Passed = false
 		}
@@ -210,17 +233,47 @@ func assess(rep *CampaignReport, v *RunView, cases []Case, form phonenum.DialFor
 	var run Checks
 	run.That(v.Callee.UnexpectedCount == unexpectedBase,
 		"the simulator saw no dialog its scenario does not know during the run (unexpected %d -> %d)", unexpectedBase, v.Callee.UnexpectedCount)
-	run.That(noSession,
-		"no provider session was opened during the run: no call was answered and nothing opened one on a 180 or a 183 (sessions ever %d -> %d, live %d)",
-		v.Provider.TotalBefore, v.Provider.TotalAfter, v.Provider.LiveAfter)
 	assessAttribution(&run, v, form, rep.Scenarios)
+	assessProviderScripts(&run, v, cases)
 	rep.Run = run.list()
 
+	rep.FirstAudio = firstAudioRows(rep.Scenarios)
 	rep.Probes = probeRows(rep.Scenarios, cases)
 	rep.CrossRegion = crossRegion(rep.Probes)
 	if rep.Findings == nil {
 		rep.Findings = []string{}
 	}
+}
+
+// answeredDialogs is how many of the dialogs the simulator answered with 200.
+func answeredDialogs(dialogs []calleesim.DialogRecord) int {
+	n := 0
+	for _, d := range dialogs {
+		if d.Final != nil && d.Final.Status == 200 {
+			n++
+		}
+	}
+	return n
+}
+
+// assessProviderScripts checks what the mock provider's scripts did during
+// the run: every scripted contact's call requested its tool once and got the
+// result back, and no script failed or went unclaimed.
+func assessProviderScripts(run *Checks, v *RunView, cases []Case) {
+	scripted := 0
+	for _, cs := range cases {
+		if cs.Script != "" {
+			scripted += cs.AnsweredSteps()
+		}
+	}
+	scripted *= len(v.Regions)
+	b, a := v.Provider.Before, v.Provider.After
+	run.That(scripted > 0 && a.ToolCalls-b.ToolCalls == int64(scripted),
+		"the mock provider requested %d tool call(s), one per scripted answered call (%d)", scripted, a.ToolCalls-b.ToolCalls)
+	run.That(a.ToolResults-b.ToolResults == int64(scripted),
+		"the application answered all %d tool call(s) (%d results)", scripted, a.ToolResults-b.ToolResults)
+	run.That(a.ScriptsFailed == b.ScriptsFailed, "no mock provider script failed (%d -> %d)", b.ScriptsFailed, a.ScriptsFailed)
+	run.That(a.Unmatched == b.Unmatched, "every provider session was claimed by a script (unclaimed %d -> %d)", b.Unmatched, a.Unmatched)
 }
 
 func caseByID(cases []Case, id string) Case {
@@ -575,9 +628,12 @@ func probeRows(results []ScenarioResult, cases []Case) []ProbeRow {
 	for _, s := range results {
 		cs := byID[s.ID]
 		row := ProbeRow{Region: s.Region, ID: s.ID, Callee: s.Callee, Invites: s.Invites, SIPFinal: "none"}
-		if cs.Kind == KindScenario {
+		switch {
+		case len(cs.Steps) > 0:
+			row.Design = stepOutcomes(cs)
+		case cs.Kind == KindScenario:
 			row.Design = cs.Outcome
-		} else {
+		default:
 			row.Design = sipIntent[cs.SIPStatus]
 		}
 		if len(s.Attempts) > 0 {

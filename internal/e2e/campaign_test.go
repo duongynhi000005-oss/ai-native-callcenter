@@ -18,11 +18,11 @@ func TestScenarioFileCoversEveryCampaignCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckScenarioCoversCases(s, Regions, DefaultCases, phonenum.FormE164); err != nil {
+	if err := CheckScenarioCoversCases(s, Regions, AllCases, phonenum.FormE164); err != nil {
 		t.Fatal(err)
 	}
-	if len(Regions) != 2 || len(DefaultCases) != 11 {
-		t.Fatalf("%d regions and %d cases, want 2 and 11", len(Regions), len(DefaultCases))
+	if len(Regions) != 2 || len(DefaultCases) != 11 || len(AllCases) != 14 {
+		t.Fatalf("%d regions, %d unanswered and %d cases in all, want 2, 11 and 14", len(Regions), len(DefaultCases), len(AllCases))
 	}
 }
 
@@ -36,7 +36,7 @@ func TestRegionsNeverMixNumbers(t *testing.T) {
 		if !ok || r.Prefix != prefix {
 			t.Fatalf("region %s has prefix %q, want %q", r.Code, r.Prefix, prefix)
 		}
-		for _, cs := range DefaultCases {
+		for _, cs := range AllCases {
 			n := r.Number(cs)
 			if !phonenum.IsCanonical(n) || !strings.HasPrefix(n, prefix) || len(n) != len(prefix)+2 {
 				t.Errorf("%s %s: %q is not a canonical number of %s", r.Code, cs.ID, n, prefix)
@@ -47,8 +47,8 @@ func TestRegionsNeverMixNumbers(t *testing.T) {
 			seen[n] = r.Code + " " + cs.ID
 		}
 	}
-	if got := len(seen); got != len(Regions)*len(DefaultCases) {
-		t.Fatalf("%d distinct numbers, want %d", got, len(Regions)*len(DefaultCases))
+	if got := len(seen); got != len(Regions)*len(AllCases) {
+		t.Fatalf("%d distinct numbers, want %d", got, len(Regions)*len(AllCases))
 	}
 }
 

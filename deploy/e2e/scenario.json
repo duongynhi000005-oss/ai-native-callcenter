@@ -8,6 +8,12 @@
         "uplink": {"kind": "SILENCE"}
       }
     ],
+    "+12025550101": [{"provisionals": [{"status": 180, "atMs": 100}], "finalAfterMs": 2000, "uplink": {"kind": "TONE"}}],
+    "+12025550102": [{"finalAfterMs": 300, "byeAfterMs": 1000}],
+    "+12025550104": [
+      {"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 486, "finalAfterMs": 300},
+      {"provisionals": [{"status": 180, "atMs": 100}], "finalAfterMs": 300, "byeAfterMs": 3000}
+    ],
     "+12025550103": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 486, "finalAfterMs": 300}],
     "+12025550105": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 603, "finalAfterMs": 300}],
     "+12025550106": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 404, "finalAfterMs": 300}],
@@ -18,6 +24,12 @@
     "+12025550113": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 503, "finalAfterMs": 300}],
     "+12025550114": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 484, "finalAfterMs": 300}],
     "+12025550115": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 410, "finalAfterMs": 300}],
+    "+8613988886601": [{"provisionals": [{"status": 180, "atMs": 100}], "finalAfterMs": 2000, "uplink": {"kind": "TONE"}}],
+    "+8613988886602": [{"finalAfterMs": 300, "byeAfterMs": 1000}],
+    "+8613988886604": [
+      {"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 486, "finalAfterMs": 300},
+      {"provisionals": [{"status": 180, "atMs": 100}], "finalAfterMs": 300, "byeAfterMs": 3000}
+    ],
     "+8613988886603": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 486, "finalAfterMs": 300}],
     "+8613988886605": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 603, "finalAfterMs": 300}],
     "+8613988886606": [{"provisionals": [{"status": 180, "atMs": 100}], "finalStatus": 404, "finalAfterMs": 300}],

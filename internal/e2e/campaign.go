@@ -22,10 +22,11 @@ import (
 )
 
 // campaignScopes are what the campaign driver's API key may do: provision a
-// flow and DIDs, keep the do-not-call list, run campaigns and read the
-// ledger. Nothing else.
+// flow and DIDs, keep the do-not-call list, run campaigns, read the ledger and
+// read the callback queue (a HIGH lead files a callback). Nothing else.
 var campaignScopes = []string{
 	"config:read", "config:write", "campaigns:read", "campaigns:write", "dnc:read", "dnc:write", "history:read:all",
+	"calls:read:own",
 }
 
 // CampaignConfig is everything the campaign driver needs to know about its
@@ -36,6 +37,9 @@ type CampaignConfig struct {
 	// CalleeSim is the simulator's report base; MockProvider the mock
 	// provider's HTTP base, for its session counters.
 	CalleeSim, MockProvider string
+	// MetricsURL is the application's metrics exposition (the ops listener's
+	// GET /metrics), for the run-wide invariants.
+	MetricsURL string
 	// ESLAddr and ESLPassword reach the switch, for the gateway check.
 	ESLAddr, ESLPassword string
 	// ComposeConfig is the resolved compose configuration (JSON): the guard
@@ -43,6 +47,9 @@ type CampaignConfig struct {
 	ComposeConfig string
 	// ScenarioFile is the simulator's scenario; every case must be in it.
 	ScenarioFile string
+	// ProviderScenarioFile is the mock provider's scenario: every scripted
+	// case must get its script from it, and every other call the default.
+	ProviderScenarioFile string
 
 	Username, Password string
 	FlowFile           string
@@ -53,7 +60,7 @@ type CampaignConfig struct {
 	// contact settling.
 	Wait time.Duration
 
-	// Cases and Regions default to DefaultCases and Regions.
+	// Cases and Regions default to AllCases and Regions.
 	Cases   []Case
 	Regions []Region
 	// AfterRun are checked once the run is over; nil means AfterRunChecks.
@@ -66,7 +73,7 @@ type CampaignConfig struct {
 // or an assertion failed.
 func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, error) {
 	if len(cfg.Cases) == 0 {
-		cfg.Cases = DefaultCases
+		cfg.Cases = AllCases
 	}
 	if len(cfg.Regions) == 0 {
 		cfg.Regions = Regions
@@ -101,6 +108,17 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 	if err := CheckScenarioCoversCases(scenario, cfg.Regions, cfg.Cases, form); err != nil {
 		return nil, err
 	}
+	providerScenario, err := mockprovider.LoadScenario(cfg.ProviderScenarioFile)
+	if err != nil {
+		return nil, err
+	}
+	flowSpec, err := os.ReadFile(cfg.FlowFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckProviderScenarioCoversCases(providerScenario, flowSpec, cfg.Cases); err != nil {
+		return nil, err
+	}
 	if err := checkSwitch(ctx, cfg.ESLAddr, cfg.ESLPassword); err != nil {
 		return nil, err
 	}
@@ -130,7 +148,7 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 	if err := writeJSON(filepath.Join(cfg.OutDir, "report.json"), rep); err != nil && runErr == nil {
 		runErr = err
 	}
-	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)), 0o644); err != nil && runErr == nil {
+	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)+FirstAudioTable(rep.FirstAudio)), 0o644); err != nil && runErr == nil {
 		runErr = err
 	}
 	if runErr != nil {
@@ -180,6 +198,10 @@ func CheckScenarioCoversCases(s *calleesim.Scenario, regions []Region, cases []C
 			}
 			seen[key] = label
 			list := s.Numbers[key]
+			if len(cs.Steps) > 0 {
+				problems = append(problems, stepProblems(label, key, cs.Steps, list)...)
+				continue
+			}
 			if cs.IsOnDNC {
 				if len(list) > 0 {
 					problems = append(problems, fmt.Sprintf("%s (%s) is on the do-not-call list and must not be in the scenario", label, key))
@@ -212,6 +234,135 @@ func CheckScenarioCoversCases(s *calleesim.Scenario, regions []Region, cases []C
 	return nil
 }
 
+// CheckProviderScenarioCoversCases refuses a run whose mock provider would
+// not play what the cases expect. The flow's entry instruction must render
+// the contact's script slot as ScriptMarker in both languages; a contact with
+// no script must get the default script, which speaks and neither calls a
+// tool nor ends the call (the callee hangs up, and the smoke hears speech);
+// a scripted contact must get its own script, which records the case's lead
+// and, when the callee never hangs up, ends the call itself.
+func CheckProviderScenarioCoversCases(sc *mockprovider.Scenario, flowSpec []byte, cases []Case) error {
+	var problems []string
+	var flow struct {
+		InitialNode string `json:"initialNode"`
+		Nodes       map[string]struct {
+			Instruction map[string]string `json:"instruction"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(flowSpec, &flow); err != nil {
+		return fmt.Errorf("flow file: %w", err)
+	}
+	slotRef := fmt.Sprintf(ScriptMarker, "{slots.userData."+ScriptSlot+"}")
+	for _, lang := range []string{"en", "zh"} {
+		if !strings.Contains(flow.Nodes[flow.InitialNode].Instruction[lang], slotRef) {
+			problems = append(problems, fmt.Sprintf("the flow's entry instruction (%s) does not contain %q", lang, slotRef))
+		}
+	}
+
+	def := sc.Pick(fmt.Sprintf(ScriptMarker, ""))
+	switch {
+	case def == nil || def.InstructionsContain != "":
+		problems = append(problems, "an unscripted call is not given the default script (empty instructionsContain)")
+	default:
+		if def.Steps[0].Op != mockprovider.OpSpeak {
+			problems = append(problems, fmt.Sprintf("the default script %q does not speak first", def.Name))
+		}
+		for _, st := range def.Steps {
+			if st.Op == mockprovider.OpCallTool || st.Op == mockprovider.OpEndSession {
+				problems = append(problems, fmt.Sprintf("the default script %q must neither call a tool nor end the call (%s)", def.Name, st.Op))
+			}
+		}
+	}
+
+	for _, cs := range cases {
+		if cs.Script == "" {
+			if cs.Lead != "" || cs.Callbacks != 0 {
+				problems = append(problems, fmt.Sprintf("%s expects a lead but names no script to record it", cs.ID))
+			}
+			continue
+		}
+		marker := fmt.Sprintf(ScriptMarker, cs.Script)
+		s := sc.Pick(marker)
+		if s == nil || s.InstructionsContain != marker {
+			problems = append(problems, fmt.Sprintf("%s: no script is selected by exactly %q", cs.ID, marker))
+			continue
+		}
+		problems = append(problems, scriptProblems(cs, s)...)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("the mock provider's scenario does not match the campaign cases: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// scriptProblems checks that a scripted case's script records its lead and,
+// when no attempt's callee hangs up, ends the call.
+func scriptProblems(cs Case, s *mockprovider.Script) []string {
+	var problems []string
+	lead := -1
+	for i, st := range s.Steps {
+		if st.Op != mockprovider.OpCallTool || st.ToolName != "record_lead" {
+			continue
+		}
+		var args struct {
+			Intent string `json:"intent"`
+			Notes  string `json:"notes"`
+		}
+		_ = json.Unmarshal(st.Args, &args)
+		if args.Intent == cs.Lead && args.Notes == cs.LeadNotes {
+			lead = i
+		}
+	}
+	if cs.Lead != "" && (lead < 0 || lead+1 >= len(s.Steps) || s.Steps[lead+1].Op != mockprovider.OpAwaitToolResult) {
+		problems = append(problems, fmt.Sprintf("%s: script %q does not record_lead %s with the case's notes and await the result", cs.ID, s.Name, cs.Lead))
+	}
+	byCallee := false
+	for _, st := range cs.Steps {
+		if st.IsAnswered() && st.ByeAfterMs > 0 {
+			byCallee = true
+		}
+	}
+	if !byCallee && s.Steps[len(s.Steps)-1].Op != mockprovider.OpEndSession {
+		problems = append(problems, fmt.Sprintf("%s: the callee never hangs up, so script %q must end the call (END_SESSION)", cs.ID, s.Name))
+	}
+	return problems
+}
+
+// stepProblems compares a case written attempt by attempt with the
+// simulator's behaviours for its number: one behaviour per attempt, each with
+// the step's provisional, final response, answer time and hang-up.
+func stepProblems(label, key string, steps []Step, list []calleesim.Behaviour) []string {
+	if len(list) != len(steps) {
+		return []string{fmt.Sprintf("%s: the scenario has %d behaviours for %s, want %d", label, len(list), key, len(steps))}
+	}
+	var problems []string
+	for i, st := range steps {
+		b := list[i]
+		at := fmt.Sprintf("%s attempt %d", label, i+1)
+		if b.Final() != st.SIPStatus {
+			problems = append(problems, fmt.Sprintf("%s: the scenario answers %d, want %d", at, b.Final(), st.SIPStatus))
+		}
+		if st.FinalAfterMs > 0 && b.FinalAfterMs != st.FinalAfterMs {
+			problems = append(problems, fmt.Sprintf("%s: the scenario answers after %d ms, want %d", at, b.FinalAfterMs, st.FinalAfterMs))
+		}
+		switch {
+		case st.Provisional == 0 && len(b.Provisionals) != 0:
+			problems = append(problems, fmt.Sprintf("%s: the scenario sends provisionals %+v, want none", at, b.Provisionals))
+		case st.Provisional != 0 && (len(b.Provisionals) != 1 || b.Provisionals[0].Status != st.Provisional || b.Provisionals[0].EarlyMedia != st.EarlyMedia):
+			problems = append(problems, fmt.Sprintf("%s: the scenario's provisionals are %+v, want one %d (early media %v)", at, b.Provisionals, st.Provisional, st.EarlyMedia))
+		}
+		bye := 0
+		if b.ByeAfterMs != nil {
+			// A hang-up at 0 ms would read as "never" below.
+			bye = max(*b.ByeAfterMs, 1)
+		}
+		if bye != st.ByeAfterMs {
+			problems = append(problems, fmt.Sprintf("%s: the callee hangs up %d ms after answering, want %d (0: never)", at, bye, st.ByeAfterMs))
+		}
+	}
+	return problems
+}
+
 // driver is one run.
 type driver struct {
 	cfg  CampaignConfig
@@ -226,6 +377,9 @@ type driver struct {
 	unexpectedBase  int
 	providerBefore  mockprovider.Stats
 	providerAfter   mockprovider.Stats
+	metricsBefore   Metrics
+	metricsAfter    Metrics
+	callbacks       []api.Callback
 	startedAt       time.Time
 	lastObservation time.Time
 }
@@ -246,13 +400,18 @@ type regionRun struct {
 }
 
 func (d *driver) run(ctx context.Context) error {
-	var pre calleesim.Report
-	if err := d.c.getJSON(ctx, d.cfg.CalleeSim+"/report", &pre); err != nil {
-		return fmt.Errorf("simulator report: %w", err)
+	pre, err := d.simulatorReport(ctx)
+	if err != nil {
+		return err
 	}
 	d.calleeBase, d.unexpectedBase = len(pre.Dialogs), pre.UnexpectedCount
-	var err error
+	if err := checkSimulatorUnused(pre, d.cfg.Regions, d.cfg.Cases, d.form); err != nil {
+		return err
+	}
 	if d.providerBefore, err = providerStats(ctx, d.c, d.cfg.MockProvider); err != nil {
+		return err
+	}
+	if d.metricsBefore, err = scrapeMetrics(ctx, d.c.client, d.cfg.MetricsURL); err != nil {
 		return err
 	}
 
@@ -300,9 +459,16 @@ func (d *driver) run(ctx context.Context) error {
 			return err
 		}
 	}
-	if d.providerAfter, err = providerStats(ctx, d.c, d.cfg.MockProvider); err != nil {
+	if err := d.settleCounters(ctx, answeredDialogs(post.Dialogs[min(d.calleeBase, len(post.Dialogs)):])); err != nil {
 		return err
 	}
+	// After the attempts were seen finished: a HIGH lead's callback is
+	// written in the same transaction as its attempt's finish.
+	var callbacks api.CallbackList
+	if err := d.c.do(ctx, http.MethodGet, "/callbacks?limit=100000", nil, &callbacks, http.StatusOK); err != nil {
+		return fmt.Errorf("list callbacks: %w", err)
+	}
+	d.callbacks = callbacks.Items
 
 	view := d.view(post)
 	assess(d.rep, view, d.cfg.Cases, d.form, d.unexpectedBase)
@@ -380,7 +546,13 @@ func (d *driver) provision(ctx context.Context, r Region, usedDIDs map[string]bo
 
 	rows := make([]api.CampaignContactRow, 0, len(d.cfg.Cases))
 	for _, cs := range d.cfg.Cases {
-		rows = append(rows, api.CampaignContactRow{Number: r.Number(cs)})
+		row := api.CampaignContactRow{Number: r.Number(cs)}
+		if cs.Script != "" {
+			// Business data the flow's instruction renders, which is how the
+			// mock provider tells this contact's calls apart (ScriptMarker).
+			row.Slots = &map[string]string{ScriptSlot: cs.Script}
+		}
+		rows = append(rows, row)
 	}
 	var imp api.CampaignImportResult
 	if err := d.c.do(ctx, http.MethodPost, "/campaigns/"+rr.campaign.ID.String()+"/contacts", api.CampaignContactsImport{Contacts: rows}, &imp, http.StatusOK); err != nil {
@@ -398,6 +570,130 @@ func (d *driver) removeDNC(ctx context.Context) {
 	for _, n := range d.dnc {
 		_ = d.c.do(ctx, http.MethodDelete, "/dnc-numbers/"+url.PathEscape(n), nil, nil, http.StatusNoContent, http.StatusNotFound)
 	}
+}
+
+// counterSettle bounds how long the driver waits for the counters to catch up
+// with what the API and the simulator already show; counterConfirm is how
+// long it then waits before the reading it keeps, so a late extra increment
+// (a second finish, a second session) lands in it.
+const (
+	counterSettle  = 30 * time.Second
+	counterConfirm = 3 * time.Second
+)
+
+// settleCounters reads the application's metrics and the mock provider's
+// counters for the after-run checks. They move on hand-offs the API does not
+// wait for: an attempt is FINISHED in the API when its transaction commits,
+// and the dialer counts it afterwards; a bot slot and a DID line are given
+// back when the switch reports the hangup; the mock counts a session closed
+// when its socket does. So the driver waits, up to counterSettle, until every
+// counter the invariants read has caught up (bot slots and the run's DID
+// lines at zero, the finished-attempt count and both session counts at what
+// the run shows, no session live), then waits counterConfirm more and keeps
+// that reading, whether or not it caught up: the checks judge it, and the
+// wait is reported.
+func (d *driver) settleCounters(ctx context.Context, answered int) error {
+	attempts := 0
+	for _, rr := range d.regions {
+		for _, list := range rr.attempts {
+			attempts += len(list)
+		}
+	}
+	caughtUp := func(m Metrics, s mockprovider.Stats) bool {
+		for _, state := range []string{"IN_USE", "RESERVED"} {
+			if v, n := m.Sum(MetricBotSlots, map[string]string{"state": state}); n != 1 || v != 0 {
+				return false
+			}
+		}
+		for _, rr := range d.regions {
+			if v, n := m.Sum(MetricDIDOutboundInUse, map[string]string{"did": rr.did.Number}); n != 1 || v != 0 {
+				return false
+			}
+		}
+		before, _ := d.metricsBefore.Sum(MetricCampaignAttempts, nil)
+		after, _ := m.Sum(MetricCampaignAttempts, nil)
+		sb, _ := d.metricsBefore.Sum(MetricProviderSessions, nil)
+		sa, _ := m.Sum(MetricProviderSessions, nil)
+		return after-before == float64(attempts) && sa-sb == float64(answered) &&
+			s.Total-d.providerBefore.Total == int64(answered) && s.Live == 0
+	}
+	start := time.Now()
+	deadline := start.Add(counterSettle)
+	for {
+		m, err := scrapeMetrics(ctx, d.c.client, d.cfg.MetricsURL)
+		if err != nil {
+			return err
+		}
+		s, err := providerStats(ctx, d.c, d.cfg.MockProvider)
+		if err != nil {
+			return err
+		}
+		if caughtUp(m, s) || time.Now().After(deadline) {
+			break
+		}
+		if err := sleep(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	d.rep.Latency["countersSettledMs"] = float64(time.Since(start).Milliseconds())
+	if err := sleep(ctx, counterConfirm); err != nil {
+		return err
+	}
+	var err error
+	if d.metricsAfter, err = scrapeMetrics(ctx, d.c.client, d.cfg.MetricsURL); err != nil {
+		return err
+	}
+	if d.providerAfter, err = providerStats(ctx, d.c, d.cfg.MockProvider); err != nil {
+		return err
+	}
+	return nil
+}
+
+// simulatorReport is the simulator's record, waited for up to the run's bound:
+// e2e.sh restarts the simulator before a campaign run (checkSimulatorUnused).
+func (d *driver) simulatorReport(ctx context.Context) (calleesim.Report, error) {
+	var r calleesim.Report
+	deadline := time.Now().Add(d.cfg.Wait)
+	for {
+		err := d.c.getJSON(ctx, d.cfg.CalleeSim+"/report", &r)
+		if err == nil {
+			return r, nil
+		}
+		if time.Now().After(deadline) {
+			return r, fmt.Errorf("simulator report: %w", err)
+		}
+		if err := sleep(ctx, 500*time.Millisecond); err != nil {
+			return r, err
+		}
+	}
+}
+
+// checkSimulatorUnused refuses a run in which the simulator would play the
+// wrong behaviour: it answers the n-th INVITE for a number with the n-th
+// behaviour of the scenario, counting every INVITE since it started, so a
+// case whose attempts behave differently (C04: busy, then answered) needs a
+// simulator that has never seen its number. e2e.sh restarts it first.
+func checkSimulatorUnused(pre calleesim.Report, regions []Region, cases []Case, form phonenum.DialForm) error {
+	seen := map[string]int{}
+	for _, dlg := range pre.Dialogs {
+		seen[dlg.Number]++
+	}
+	var used []string
+	for _, r := range regions {
+		for _, cs := range cases {
+			if len(cs.Steps) < 2 {
+				continue
+			}
+			if key := r.DialKey(cs, form); seen[key] > 0 {
+				used = append(used, fmt.Sprintf("%s %s (%s, %d INVITEs)", r.Code, cs.ID, key, seen[key]))
+			}
+		}
+	}
+	if len(used) > 0 {
+		return fmt.Errorf("the simulator has already answered numbers whose attempts behave differently, so it would play the wrong attempt: %s; restart it (deploy/e2e/e2e.sh campaign does)",
+			strings.Join(used, ", "))
+	}
+	return nil
 }
 
 func providerStats(ctx context.Context, c *httpc, base string) (mockprovider.Stats, error) {
@@ -518,9 +814,11 @@ func (d *driver) campaignCDRs(ctx context.Context, campaignID string) ([]api.CDR
 
 // view is what the run left, for the assessment and the after-run checks.
 func (d *driver) view(post calleesim.Report) *RunView {
-	v := &RunView{c: d.c, ObservedAt: d.lastObservation, Provider: ProviderCount{
-		TotalBefore: d.providerBefore.Total, TotalAfter: d.providerAfter.Total, LiveAfter: d.providerAfter.Live,
-	}}
+	v := &RunView{
+		c: d.c, ObservedAt: d.lastObservation, Cases: d.cfg.Cases, Form: d.form,
+		Provider:      ProviderCount{Before: d.providerBefore, After: d.providerAfter},
+		MetricsBefore: d.metricsBefore, MetricsAfter: d.metricsAfter, Callbacks: d.callbacks,
+	}
 	if d.calleeBase <= len(post.Dialogs) {
 		v.Dialogs = post.Dialogs[d.calleeBase:]
 	}

@@ -9,6 +9,8 @@ import (
 
 	"github.com/rasonyang/ai-native-callcenter/internal/api"
 	"github.com/rasonyang/ai-native-callcenter/internal/calleesim"
+	"github.com/rasonyang/ai-native-callcenter/internal/mockprovider"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
 // AfterRunChecks run after every campaign run, in order, over everything the
@@ -16,9 +18,15 @@ import (
 // afterRun, and a failed one fails the run.
 //
 // This is the plug-in point for checks that hold for any run rather than for
-// one scenario: issue #246 adds its global invariants here, one AfterRunCheck
-// each. Empty today.
-var AfterRunChecks []AfterRunCheck
+// one scenario: the run-wide invariants of issue #246, one AfterRunCheck each
+// (campaign_invariants.go).
+var AfterRunChecks = []AfterRunCheck{
+	{Name: "provider-sessions", Run: CheckProviderSessions},
+	{Name: "no-invite-after-answer", Run: CheckNoInviteAfterAnswer},
+	{Name: "capacity-released", Run: CheckCapacityReleased},
+	{Name: "attempts-finished-once", Run: CheckAttemptsFinishedOnce},
+	{Name: "one-cdr-per-channel", Run: CheckOneCDRPerChannel},
+}
 
 // AfterRunCheck is one check made on a finished run.
 type AfterRunCheck struct {
@@ -60,6 +68,17 @@ type RunView struct {
 	Callee  calleesim.Report
 	// Provider is the mock provider's session counters around the run.
 	Provider ProviderCount
+	// MetricsBefore and MetricsAfter are the application's counters read
+	// before the campaigns started and after the run had settled.
+	MetricsBefore Metrics
+	MetricsAfter  Metrics
+	// Callbacks is the whole callback queue, read after the run settled.
+	Callbacks []api.Callback
+	// Cases are the run's cases, the same in every region.
+	Cases []Case
+	// Form is the deployment's dial form: a contact's dialogs are those whose
+	// Request-URI user is its number in this form.
+	Form phonenum.DialForm
 }
 
 // Do calls the public API with the run's scoped key.
@@ -89,9 +108,12 @@ type ContactView struct {
 	Attempts []api.CampaignAttempt
 }
 
-// ProviderCount is the mock provider's sessions, read before and after.
+// ProviderCount is the mock provider's counters, read before the campaigns
+// started and after the run settled.
 type ProviderCount struct {
-	TotalBefore int64 `json:"totalBefore"`
-	TotalAfter  int64 `json:"totalAfter"`
-	LiveAfter   int64 `json:"liveAfter"`
+	Before mockprovider.Stats `json:"before"`
+	After  mockprovider.Stats `json:"after"`
 }
+
+// Sessions is how many sessions the mock opened during the run.
+func (p ProviderCount) Sessions() int64 { return p.After.Total - p.Before.Total }

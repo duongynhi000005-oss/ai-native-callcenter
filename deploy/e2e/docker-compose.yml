@@ -95,12 +95,18 @@ services:
       default:
         ipv4_address: ${E2E_CALLEESIM_IP:?}
 
-  # Answers as a voice provider; the application reaches it by endpoint.
+  # Answers as a voice provider; the application reaches it by endpoint. It
+  # plays provider-scenario.json: a call whose instructions carry a script's
+  # marker gets that script (C01 records a HIGH lead and ends the call), every
+  # other call the default one, which speaks and leaves the ending to the
+  # callee.
   mockprovider:
     image: aicc-e2e-tools:${E2E_PROJECT}
     restart: "no"
     entrypoint: ["/usr/local/bin/aicc-mockprovider"]
-    command: ["-addr=0.0.0.0:9099"]
+    command: ["-addr=0.0.0.0:9099", "-scenario=/etc/e2e/provider-scenario.json"]
+    volumes:
+      - ./e2e/provider-scenario.json:/etc/e2e/provider-scenario.json:ro
     networks:
       default:
         ipv4_address: ${E2E_MOCK_IP:?}
@@ -117,8 +123,10 @@ services:
       E2E_PASSWORD: ${E2E_PASSWORD:?}
     volumes:
       - ./e2e/flow.json:/etc/e2e/flow.json:ro
-      # The campaign driver checks its cases against the simulator's scenario.
+      # The campaign driver checks its cases against the simulator's scenario
+      # and the mock provider's.
       - ./e2e/scenario.json:/etc/e2e/scenario.json:ro
+      - ./e2e/provider-scenario.json:/etc/e2e/provider-scenario.json:ro
       - ${E2E_RUN_DIR:?}:/run/e2e
 
 networks:

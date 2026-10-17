@@ -5,10 +5,11 @@ package e2e
 import (
 	"time"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/calleesim"
 	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
-// The campaign scenarios and probes of issue #245, as data. A Case is one
+// The campaign scenarios and probes of issues #245 and #246, as data. A Case is one
 // contact; a Region is one campaign, and every region runs the whole table at
 // once. The numbers exist only inside deploy/e2e: the environment's network
 // is internal and its one gateway is the callee simulator.
@@ -94,7 +95,90 @@ type Case struct {
 	// HasRingTimeoutBound asserts the CANCEL at the ring timeout within
 	// RingTimeoutTolerance (C07). Other ringing cases report the time only.
 	HasRingTimeoutBound bool
+
+	// Steps, when set, lists the case's attempts one by one: what the callee
+	// does on each and what it must come to. Every case that reaches an
+	// answer is written this way (issue #246), and the single-attempt fields
+	// above stay empty for it.
+	Steps []Step
+	// Script names the mock provider's script for the contact's calls. The
+	// driver imports the contact with it in the slot ScriptSlot, the flow's
+	// instruction renders it (ScriptMarker), and the mock picks its script by
+	// that text. Empty: the mock's default script.
+	Script string
+	// Lead and LeadNotes are what the contact's answered call must record
+	// (record_lead); an empty Lead means no lead at all.
+	Lead, LeadNotes string
+	// Callbacks is how many callbacks the contact's calls must file.
+	Callbacks int
 }
+
+// Step is one attempt of a case written attempt by attempt.
+type Step struct {
+	// Provisional is the 1xx the callee sends first (180, or 183 with
+	// EarlyMedia); zero for none.
+	Provisional int
+	EarlyMedia  bool
+	// SIPStatus is the final response: 200, or the error the callee refuses
+	// with.
+	SIPStatus int
+	// FinalAfterMs, when set, is when the final response goes out, counted
+	// from the INVITE.
+	FinalAfterMs int
+	// ByeAfterMs, when set, is when the callee hangs up, counted from its 200
+	// OK; zero means the callee never does and the caller (the bot) ends the
+	// call.
+	ByeAfterMs int
+	// Outcome is the attempt's expected outcome, and Cause its expected
+	// hangup cause, asserted when set (an answered call's is recorded only).
+	Outcome, Cause string
+}
+
+// IsAnswered reports whether the callee answers this attempt.
+func (s Step) IsAnswered() bool { return s.SIPStatus == 200 }
+
+// EndedBy is who ends an answered attempt's dialog, as the simulator records
+// it: the callee when it hangs up by itself, otherwise the caller.
+func (s Step) EndedBy() string {
+	if s.ByeAfterMs > 0 {
+		return calleesim.EndedByCallee
+	}
+	return calleesim.EndedByCaller
+}
+
+// IsAnswered reports whether any attempt of the case reaches an answer.
+func (c Case) IsAnswered() bool {
+	for _, s := range c.Steps {
+		if s.IsAnswered() {
+			return true
+		}
+	}
+	return false
+}
+
+// AnsweredSteps is how many of the case's attempts the callee answers.
+func (c Case) AnsweredSteps() int {
+	n := 0
+	for _, s := range c.Steps {
+		if s.IsAnswered() {
+			n++
+		}
+	}
+	return n
+}
+
+// ScriptSlot is the contact slot that carries a case's Script, and
+// ScriptMarker the line the flow's instruction renders from it (its verb takes
+// the script, or in the flow file the slot reference). The mock provider
+// selects a script by a substring of the standing instructions, and the
+// instruction is where a contact's own data reaches them, so a scripted
+// contact is told apart from the other contacts of its campaign by this one
+// line. The full stop keeps one script's marker from being a prefix of
+// another's.
+const (
+	ScriptSlot   = "e2eScript"
+	ScriptMarker = "E2E script: %s."
+)
 
 // neverAnsweredAfterMs is how long a ringing callee waits before it gives up
 // by itself, with neverAnsweredStatus: far beyond the ring timeout, so only
@@ -125,6 +209,30 @@ var DefaultCases = []Case{
 	{ID: "P4", Kind: KindProbe, Suffix: "14", Callee: "180, then 484 Address Incomplete", Provisional: 180, SIPStatus: 484},
 	{ID: "P5", Kind: KindProbe, Suffix: "15", Callee: "180, then 410 Gone", Provisional: 180, SIPStatus: 410},
 }
+
+// AnsweredCases are C01, C02 and C04 (issue #246): the paths on which a
+// campaign reaches a person. They run in the same campaigns as DefaultCases,
+// so the run-wide invariants (AfterRunChecks) see answered and unanswered
+// calls side by side.
+var AnsweredCases = []Case{
+	{ID: "C01", Kind: KindScenario, Suffix: "01",
+		Callee: "180, then 200 after 2 s, a tone on the uplink; the bot records a HIGH lead and ends the call",
+		Steps:  []Step{{Provisional: 180, SIPStatus: 200, FinalAfterMs: 2000, Outcome: "ANSWERED"}},
+		Script: "C01_LEAD_HIGH", Lead: "HIGH", LeadNotes: "e2e C01: the customer asked to be called back", Callbacks: 1},
+	{ID: "C02", Kind: KindScenario, Suffix: "02",
+		Callee: "200, then the customer hangs up at 1 s",
+		Steps:  []Step{{SIPStatus: 200, ByeAfterMs: 1000, Outcome: "ANSWERED"}}},
+	{ID: "C04", Kind: KindScenario, Suffix: "04",
+		Callee: "486 Busy Here on attempt 1; 200 on attempt 2, the customer hanging up at 3 s",
+		Steps: []Step{
+			{Provisional: 180, SIPStatus: 486, Outcome: "BUSY", Cause: "USER_BUSY"},
+			{Provisional: 180, SIPStatus: 200, ByeAfterMs: 3000, Outcome: "ANSWERED"},
+		}},
+}
+
+// AllCases is what a campaign run holds unless told otherwise: issue #245's
+// unanswered cases and probes, then issue #246's answered cases.
+var AllCases = append(append([]Case{}, DefaultCases...), AnsweredCases...)
 
 // Budget is what an outcome spends, as the contact's counters show it.
 type Budget string

@@ -5,7 +5,7 @@
 #
 #   deploy/e2e/e2e.sh up      fresh database, application built from this tree
 #   deploy/e2e/e2e.sh smoke   place one AI outbound call and check the result
-#   deploy/e2e/e2e.sh campaign  run the campaign scenarios and probes (#245)
+#   deploy/e2e/e2e.sh campaign  run the campaign scenarios, probes and invariants (#245, #246)
 #   deploy/e2e/e2e.sh down    collect logs, remove containers, volumes, network
 #   deploy/e2e/e2e.sh config  print the resolved compose configuration
 #
@@ -152,13 +152,19 @@ cmd_campaign() {
   local id out t0=$SECONDS
   id="campaign-$(date -u +%Y%m%dT%H%M%SZ)"
   out="/run/e2e/$id"
+  # The simulator answers a number's n-th INVITE with the n-th behaviour of
+  # its scenario, counting from its start, so a case whose attempts behave
+  # differently (C04: busy, then answered) needs one that has not seen the
+  # number yet. The driver waits for it and refuses a simulator that has.
+  compose restart calleesim >&2
   if compose run --rm -T --no-deps --entrypoint /usr/local/bin/aicc-e2e-campaign.test driver \
       -test.v -test.run '^TestCampaigns$' -test.timeout 20m \
       -e2e.api "http://$APP_IP:8080" -e2e.ready "http://$APP_IP:9090/readyz" \
+      -e2e.metrics "http://$APP_IP:9090/metrics" \
       -e2e.calleesim "http://$CALLEE_IP:8771" -e2e.mockprovider "http://$MOCK_IP:9099" \
       -e2e.esl "$FS_IP:18021" -e2e.compose-config /run/e2e/compose.json \
-      -e2e.scenario /etc/e2e/scenario.json -e2e.flow /etc/e2e/flow.json \
-      -e2e.username admin -e2e.out "$out" >&2; then
+      -e2e.scenario /etc/e2e/scenario.json -e2e.provider-scenario /etc/e2e/provider-scenario.json \
+      -e2e.flow /etc/e2e/flow.json -e2e.username admin -e2e.out "$out" >&2; then
     [ -f "$RUN/$id/probes.md" ] && cat "$RUN/$id/probes.md"
     say "campaign tests passed in $((SECONDS - t0)) s. Results: $RUN/$id"
   else

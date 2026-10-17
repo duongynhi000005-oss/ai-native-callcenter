@@ -17,8 +17,8 @@
         "zh": "你好，这是一通自动化测试电话。"
       },
       "instruction": {
-        "en": "Greet the caller and answer briefly.",
-        "zh": "问候对方并简短回答。"
+        "en": "Greet the caller and answer briefly. E2E script: {slots.userData.e2eScript}.",
+        "zh": "问候对方并简短回答。E2E script: {slots.userData.e2eScript}."
       },
       "tools": []
     },
