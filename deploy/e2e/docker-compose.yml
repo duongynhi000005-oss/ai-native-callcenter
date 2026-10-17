@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The end-to-end environment, layered on deploy/docker-compose.yml and nothing
+# else. Never run it by hand: deploy/e2e/e2e.sh derives the variables below and
+# checks the resolved configuration before anything starts. README.md in this
+# directory is the whole story.
+#
+# What makes it safe is the network, not care: every service is on the one
+# default network, and that network is internal: true, so no container has a
+# route out of it. Nothing publishes a port. The only gateway besides the
+# application's own is one whose peer is the callee simulator.
+
+name: ${E2E_PROJECT:?run deploy/e2e/e2e.sh, which sets E2E_PROJECT}
+
+services:
+  postgres:
+    restart: "no"
+    ports: !reset []
+
+  aicc:
+    # Built from this checkout (the base file's build section) under a tag of
+    # its own, so an e2e build never replaces the demo stack's aicc:local.
+    image: aicc-e2e:${E2E_PROJECT}
+    restart: "no"
+    # deploy/.env is the deployment's, with real provider keys in it. Nothing
+    # of it reaches this stack: every variable that matters is pinned below.
+    env_file: !reset []
+    ports: !reset []
+    networks:
+      default:
+        ipv4_address: ${E2E_APP_IP:?}
+    environment:
+      # No seed: the driver provisions the flow and the number it needs through
+      # the public API, and a week of demo history would only add rows.
+      AICC_SEED: ""
+      # The mock provider speaks the Realtime protocol; the key is a placeholder
+      # no provider would accept, and no real one exists in this environment.
+      AICC_PROVIDER: openai
+      AICC_PROVIDER_ENDPOINT: ws://${E2E_MOCK_IP:?}:9099/v1/realtime
+      OPENAI_API_KEY: not-a-key
+      # The only way out for an outbound call is the simulator's gateway.
+      AICC_OUTBOUND_ENDPOINT: ${E2E_OUTBOUND_ENDPOINT:-sofia/gateway/e2e_calleesim/%s}
+      AICC_LOG_LEVEL: ${AICC_LOG_LEVEL:-info}
+
+  freeswitch:
+    restart: "no"
+    ports: !reset []
+    networks:
+      default:
+        ipv4_address: ${E2E_FS_IP:?}
+    environment:
+      # On an internal network the switch would otherwise pick whatever its
+      # primary interface says; pin it to the address the others dial.
+      FS_LOCAL_IP: ${E2E_FS_IP:?}
+      AICC_BOT_HOST: ${E2E_APP_IP:?}
+    volumes:
+      # One file, never the directory: a directory mount would hide
+      # aicc_bot.xml. Nothing from deploy/dev/freeswitch (the development
+      # trunk) is mounted anywhere. e2e.sh renders it from
+      # calleesim-gateway.xml.in with the simulator's address.
+      - ${E2E_RUN_DIR:?}/e2e_calleesim.xml:/usr/local/freeswitch/conf/sip_profiles/external/e2e_calleesim.xml:ro
+      # The working tree's Lua, so a change to freeswitch/scripts is tested
+      # against the pinned image without rebuilding it.
+      - ../freeswitch/scripts:/usr/local/freeswitch/scripts:ro
+
+  # Plays the callee: answers the number the scenario names, records the dialog.
+  calleesim:
+    image: aicc-e2e-tools:${E2E_PROJECT}
+    restart: "no"
+    user: "${E2E_UID:?}:${E2E_GID:?}"
+    entrypoint: ["/usr/local/bin/aicc-calleesim"]
+    command:
+      - -listen=0.0.0.0:5080
+      - -advertise=${E2E_CALLEESIM_IP:?}
+      - -scenario=/etc/e2e/scenario.json
+      - -http=0.0.0.0:8771
+      - -out=/run/e2e/calleesim-final.json
+      - -rtp-min=30000
+      - -rtp-max=30200
+    volumes:
+      - ./e2e/scenario.json:/etc/e2e/scenario.json:ro
+      - ${E2E_RUN_DIR:?}:/run/e2e
+    networks:
+      default:
+        ipv4_address: ${E2E_CALLEESIM_IP:?}
+
+  # Answers as a voice provider; the application reaches it by endpoint.
+  mockprovider:
+    image: aicc-e2e-tools:${E2E_PROJECT}
+    restart: "no"
+    entrypoint: ["/usr/local/bin/aicc-mockprovider"]
+    command: ["-addr=0.0.0.0:9099"]
+    networks:
+      default:
+        ipv4_address: ${E2E_MOCK_IP:?}
+
+  # The test driver. Run with `docker compose run`, not started by `up`.
+  driver:
+    image: aicc-e2e-tools:${E2E_PROJECT}
+    profiles: ["driver"]
+    restart: "no"
+    user: "${E2E_UID:?}:${E2E_GID:?}"
+    entrypoint: ["/usr/local/bin/aicc-e2e"]
+    environment:
+      ESL_PASSWORD: ${ESL_PASSWORD:-aicc@123}
+      E2E_PASSWORD: ${E2E_PASSWORD:?}
+    volumes:
+      - ./e2e/flow.json:/etc/e2e/flow.json:ro
+      - ${E2E_RUN_DIR:?}:/run/e2e
+
+networks:
+  default:
+    internal: true
+    ipam:
+      config: !override
+        - subnet: ${E2E_SUBNET:?}
