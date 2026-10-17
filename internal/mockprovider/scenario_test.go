@@ -4,11 +4,13 @@ package mockprovider_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/rasonyang/ai-native-callcenter/internal/mockprovider"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 )
@@ -232,4 +234,153 @@ func dialWith(t *testing.T, url, instructions string) (*provider.Realtime, <-cha
 	}
 	t.Cleanup(func() { session.Close(t.Context()) })
 	return session, session.Events()
+}
+
+// rawSession is a bare WebSocket client: it lets a test place the two writes
+// of a tool answer as far apart as it likes, which the application's own
+// client does not. A reader goroutine feeds frames and the final close into
+// channels, because a gorilla read that hits its deadline is not resumable.
+type rawSession struct {
+	t      *testing.T
+	conn   *websocket.Conn
+	frames chan string
+	ended  chan int // the close code, or -1 for any other end
+}
+
+func dialRaw(t *testing.T, url string) *rawSession {
+	t.Helper()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(url, "http")+"/v1/realtime", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	r := &rawSession{t: t, conn: conn, frames: make(chan string, 256), ended: make(chan int, 1)}
+	go func() {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				var closeErr *websocket.CloseError
+				if errors.As(err, &closeErr) {
+					r.ended <- closeErr.Code
+				} else {
+					r.ended <- -1
+				}
+				return
+			}
+			r.frames <- string(data)
+		}
+	}()
+	r.write(`{"type":"session.update","session":{"instructions":"x"}}`)
+	r.write(`{"type":"response.create"}`)
+	return r
+}
+
+func (r *rawSession) write(frame string) {
+	r.t.Helper()
+	if err := r.conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		r.t.Fatalf("write %s: %v", frame, err)
+	}
+}
+
+// awaitCallID reads until the scripted tool call and returns its call id.
+func (r *rawSession) awaitCallID() string {
+	r.t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case data := <-r.frames:
+			var event struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+			}
+			if json.Unmarshal([]byte(data), &event) == nil && event.Type == "response.function_call_arguments.done" {
+				return event.CallID
+			}
+		case code := <-r.ended:
+			r.t.Fatalf("session ended (%d) before the tool call", code)
+		case <-deadline:
+			r.t.Fatal("no tool call within 5s")
+		}
+	}
+}
+
+// closeWithin reports how the session ended if it ended within d: the close
+// code, or isClosed=false when the socket stayed open for the whole of d.
+func (r *rawSession) closeWithin(d time.Duration) (code int, isClosed bool) {
+	r.t.Helper()
+	timer := time.After(d)
+	for {
+		select {
+		case <-r.frames:
+		case code := <-r.ended:
+			return code, true
+		case <-timer:
+			return 0, false
+		}
+	}
+}
+
+func rawServer(t *testing.T, grace time.Duration) (*mockprovider.Server, string) {
+	t.Helper()
+	scenario, err := mockprovider.ParseScenario([]byte(highLeadScript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := mockprovider.New(mockprovider.Config{
+		FirstAudio: 10 * time.Millisecond, DeltaAudio: 20 * time.Millisecond,
+		Scenario: scenario, ResponseGrace: grace, Log: quietLog(),
+	})
+	http := httptest.NewServer(server)
+	t.Cleanup(http.Close)
+	return server, http.URL
+}
+
+func toolOutputFrame(callID string) string {
+	return `{"type":"conversation.item.create","item":{"type":"function_call_output","call_id":"` + callID + `","output":"{}"}}`
+}
+
+// SendToolResult writes the function_call_output and then a response.create.
+// A script that ended on the first frame closed the socket between the two,
+// and the client's second write failed with "close sent".
+func TestTheSessionIsNotClosedBetweenTheToolResultAndTheTurnItAsksFor(t *testing.T) {
+	server, url := rawServer(t, 5*time.Second)
+	raw := dialRaw(t, url)
+	callID := raw.awaitCallID()
+
+	raw.write(toolOutputFrame(callID))
+
+	if code, isClosed := raw.closeWithin(400 * time.Millisecond); isClosed {
+		t.Fatalf("session closed with %d before the response.create that follows the result", code)
+	}
+	raw.write(`{"type":"response.create"}`)
+	code, isClosed := raw.closeWithin(3 * time.Second)
+	if !isClosed || code != websocket.CloseNormalClosure {
+		t.Fatalf("closed=%v code=%d, want a normal close once the application finished answering", isClosed, code)
+	}
+	waitFor(t, func() bool { return server.Stats().ScriptsDone == 1 }, "the script to finish")
+	if stats := server.Stats(); stats.ResultsWithoutCreate != 0 || stats.ScriptsFailed != 0 || stats.ToolResults != 1 {
+		t.Errorf("stats %+v, want one result, answered with a response.create, no failure", stats)
+	}
+}
+
+func TestAClientThatSendsNoResponseCreateIsWaitedForOnlyAGracePeriod(t *testing.T) {
+	const grace = 300 * time.Millisecond
+	server, url := rawServer(t, grace)
+	raw := dialRaw(t, url)
+	callID := raw.awaitCallID()
+	start := time.Now()
+
+	raw.write(toolOutputFrame(callID))
+
+	code, isClosed := raw.closeWithin(3 * time.Second)
+	if !isClosed || code != websocket.CloseNormalClosure {
+		t.Fatalf("closed=%v code=%d, want a normal close after the grace period", isClosed, code)
+	}
+	if waited := time.Since(start); waited < grace {
+		t.Errorf("closed after %v, before the %v grace period", waited, grace)
+	}
+	waitFor(t, func() bool { return server.Stats().ScriptsDone == 1 }, "the script to finish")
+	if stats := server.Stats(); stats.ResultsWithoutCreate != 1 || stats.ScriptsFailed != 0 || stats.ToolResults != 1 {
+		t.Errorf("stats %+v, want exactly one result without a response.create and no failure", stats)
+	}
 }
