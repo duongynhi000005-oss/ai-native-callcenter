@@ -111,7 +111,11 @@ func ParseScenario(data []byte) (*Scenario, error) {
 	return &sc, nil
 }
 
-func (sc *Scenario) pick(instructions string) *Script {
+// Pick is the script a session with these standing instructions plays: the
+// first script whose InstructionsContain they contain, else the default one,
+// else nil (the session stays silent). Exported so that a harness can check,
+// before a run, which script each of its calls will get.
+func (sc *Scenario) Pick(instructions string) *Script {
 	var fallback *Script
 	for i := range sc.Scripts {
 		script := &sc.Scripts[i]
@@ -245,7 +249,7 @@ func (s *session) observe(eventType string, data []byte) (isConsumed bool) {
 }
 
 func (s *session) runScript(instructions string) {
-	script := s.server.cfg.Scenario.pick(instructions)
+	script := s.server.cfg.Scenario.Pick(instructions)
 	if script == nil {
 		s.server.unmatched.Add(1)
 		s.log.Warn("mockprovider: no script claims this session; it stays silent")
