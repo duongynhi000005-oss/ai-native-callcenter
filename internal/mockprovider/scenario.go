@@ -172,10 +172,29 @@ func (script *Script) validate() error {
 type scenarioState struct {
 	instructions string
 	isStarted    bool
-	// results carries the call id of every function_call_output the
-	// application sends.
-	results chan string
+	// results carries, in arrival order, every function_call_output the
+	// application sends (its call id) and every response.create after the
+	// script started (isCreate).
+	results chan scnSignal
 }
+
+type scnSignal struct {
+	callID string
+	// isCreate marks a response.create: the application asking for the turn
+	// a tool result is owed.
+	isCreate bool
+}
+
+func (s *session) signal(sig scnSignal) {
+	select {
+	case s.scn.results <- sig:
+	default:
+	}
+}
+
+// DefaultResponseGrace bounds how long AWAIT_TOOL_RESULT waits, after the
+// function_call_output, for the response.create that normally follows it.
+const DefaultResponseGrace = time.Second
 
 // observe is called for every inbound event in scenario mode, ahead of the
 // ordinary dispatch. It reports whether the event is consumed.
@@ -200,6 +219,8 @@ func (s *session) observe(eventType string, data []byte) (isConsumed bool) {
 		if !s.scn.isStarted {
 			s.scn.isStarted = true
 			go s.runScript(s.scn.instructions)
+		} else {
+			s.signal(scnSignal{isCreate: true})
 		}
 		return true
 
@@ -212,10 +233,7 @@ func (s *session) observe(eventType string, data []byte) (isConsumed bool) {
 		}
 		if json.Unmarshal(data, &create) == nil && create.Item.Type == "function_call_output" {
 			s.server.toolResults.Add(1)
-			select {
-			case s.scn.results <- create.Item.CallID:
-			default:
-			}
+			s.signal(scnSignal{callID: create.Item.CallID})
 		}
 		return true
 
@@ -343,16 +361,36 @@ func (s *session) scriptedTurn(speech time.Duration, call *scriptedCall) bool {
 	return err == nil
 }
 
-// awaitResult waits for the application's answer to callID.
+// awaitResult waits for the application to finish answering callID: the
+// function_call_output, then the response.create the client sends after it
+// (realtime.go SendToolResult writes the two as separate frames). Returning
+// on the first frame would let a script close the socket between the two
+// writes and fail the client's second one with a close-sent error. A client
+// that sends no response.create (the turn rides on one already asked for)
+// costs one grace period, counted and logged. It reports false when the
+// output itself does not arrive in time.
 func (s *session) awaitResult(callID string, timeout time.Duration) bool {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	isOutput := false
+	var grace <-chan time.Time
 	for {
 		select {
 		case got := <-s.scn.results:
-			if got == callID {
+			switch {
+			case !isOutput && !got.isCreate && got.callID == callID:
+				isOutput = true
+				g := time.NewTimer(s.server.cfg.ResponseGrace)
+				defer g.Stop()
+				grace = g.C
+			case isOutput && got.isCreate:
 				return true
 			}
+		case <-grace:
+			s.server.resultsWithoutCreate.Add(1)
+			s.log.Info("mockprovider: no response.create followed the tool result; continuing",
+				"callId", callID)
+			return true
 		case <-timer.C:
 			return false
 		case <-s.done:

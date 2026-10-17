@@ -56,11 +56,18 @@ type Config struct {
 	// Scenario switches the server to scripted sessions (scenario.go). Nil is
 	// the default mode: a turn on a timer, never a tool.
 	Scenario *Scenario
+	// ResponseGrace is how long AWAIT_TOOL_RESULT waits for the
+	// response.create that follows a tool result before continuing without
+	// it. Default DefaultResponseGrace.
+	ResponseGrace time.Duration
 
 	Log *slog.Logger
 }
 
 func (c *Config) applyDefaults() {
+	if c.ResponseGrace <= 0 {
+		c.ResponseGrace = DefaultResponseGrace
+	}
 	if c.FirstAudio <= 0 {
 		c.FirstAudio = 400 * time.Millisecond
 	}
@@ -99,6 +106,9 @@ type Server struct {
 	scriptsDone   atomic.Int64
 	scriptsFailed atomic.Int64
 	unmatched     atomic.Int64 // sessions no script claimed
+	// resultsWithoutCreate counts awaited results with no response.create
+	// after them inside the grace period.
+	resultsWithoutCreate atomic.Int64
 }
 
 // New prepares a server. The audio it speaks is built once here and shared:
@@ -130,6 +140,9 @@ type Stats struct {
 	ScriptsDone   int64
 	ScriptsFailed int64
 	Unmatched     int64
+	// ResultsWithoutCreate counts tool results the script continued past
+	// after the grace period, with no response.create following.
+	ResultsWithoutCreate int64
 }
 
 func (s *Server) Stats() Stats {
@@ -146,6 +159,8 @@ func (s *Server) Stats() Stats {
 		ScriptsDone:   s.scriptsDone.Load(),
 		ScriptsFailed: s.scriptsFailed.Load(),
 		Unmatched:     s.unmatched.Load(),
+
+		ResultsWithoutCreate: s.resultsWithoutCreate.Load(),
 	}
 }
 
@@ -197,7 +212,7 @@ func newSession(server *Server, conn *websocket.Conn) *session {
 		done:   make(chan struct{}),
 	}
 	if server.cfg.Scenario != nil {
-		s.scn = &scenarioState{results: make(chan string, 16)}
+		s.scn = &scenarioState{results: make(chan scnSignal, 16)}
 	}
 	return s
 }

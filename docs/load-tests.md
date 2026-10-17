@@ -47,7 +47,8 @@ provider. The default mode is unchanged. Each session plays one script:
 ```
 
 * Steps: `SPEAK` (`durationSec`), `CALL_TOOL` (`toolName`, `args` object),
-  `AWAIT_TOOL_RESULT` (waits for the answer to the latest `CALL_TOOL`;
+  `AWAIT_TOOL_RESULT` (waits for the answer to the latest `CALL_TOOL`: its
+  `function_call_output` plus the `response.create` after it, or 1 s without one;
   `timeoutSec`, default 10; on timeout the mock closes the socket with 1011 and
   counts a failed script), `END_SESSION` (last step only).
 * The script starts when the application asks for the opening turn. Later
