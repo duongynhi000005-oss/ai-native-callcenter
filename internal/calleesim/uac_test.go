@@ -4,6 +4,7 @@ package calleesim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -118,8 +119,11 @@ func (u *testUAC) request(method string, cseq int, branch string, extra string, 
 		u.local(), extra, len(body), body)
 }
 
+// write sends one request. A write on the closed socket is the reader's ACK
+// racing the test's cleanup, not a failure: by then the test has its verdict,
+// and reporting it would fail a passing test or log after it completed.
 func (u *testUAC) write(s string) {
-	if _, err := u.sip.WriteToUDP([]byte(s), u.target); err != nil {
+	if _, err := u.sip.WriteToUDP([]byte(s), u.target); err != nil && !errors.Is(err, net.ErrClosed) {
 		u.t.Errorf("uac write: %v", err)
 	}
 }
