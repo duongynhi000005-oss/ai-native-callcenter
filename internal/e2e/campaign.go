@@ -419,6 +419,9 @@ type driver struct {
 	callbacks       []api.Callback
 	startedAt       time.Time
 	lastObservation time.Time
+	// onPoll, when set, runs after every successful observation while the
+	// driver waits (the capacity runs sample the lines in use with it).
+	onPoll func(ctx context.Context)
 }
 
 // regionRun is one campaign of the run as the driver tracks it.
@@ -496,7 +499,9 @@ func (d *driver) run(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := d.settleCounters(ctx, answeredDialogs(post.Dialogs[min(d.calleeBase, len(post.Dialogs)):])); err != nil {
+	// Every answered dialog reaches a bot here: no case overflows, and the
+	// run places no direct call.
+	if err := d.settleCounters(ctx, answeredDialogs(post.Dialogs[min(d.calleeBase, len(post.Dialogs)):]), nil); err != nil {
 		return err
 	}
 	// After the attempts were seen finished: a HIGH lead's callback is
@@ -624,12 +629,13 @@ const (
 // and the dialer counts it afterwards; a bot slot and a DID line are given
 // back when the switch reports the hangup; the mock counts a session closed
 // when its socket does. So the driver waits, up to counterSettle, until every
-// counter the invariants read has caught up (bot slots and the run's DID
-// lines at zero, the finished-attempt count and both session counts at what
-// the run shows, no session live), then waits counterConfirm more and keeps
-// that reading, whether or not it caught up: the checks judge it, and the
-// wait is reported.
-func (d *driver) settleCounters(ctx context.Context, answered int) error {
+// counter the invariants read has caught up (bot slots and the lines of the
+// run's DIDs and of extraDIDs at zero, the finished-attempt count at what the
+// run shows, both session counts at sessions, no session live), then waits
+// counterConfirm more and keeps that reading, whether or not it caught up: the
+// checks judge it, and the wait is reported. A series that does not exist
+// reads as zero here; the checks decide whether it must exist.
+func (d *driver) settleCounters(ctx context.Context, sessions int, extraDIDs []string) error {
 	attempts := 0
 	for _, rr := range d.regions {
 		for _, list := range rr.attempts {
@@ -638,12 +644,16 @@ func (d *driver) settleCounters(ctx context.Context, answered int) error {
 	}
 	caughtUp := func(m Metrics, s mockprovider.Stats) bool {
 		for _, state := range []string{"IN_USE", "RESERVED"} {
-			if v, n := m.Sum(MetricBotSlots, map[string]string{"state": state}); n != 1 || v != 0 {
+			if v, n := m.Sum(MetricBotSlots, map[string]string{"state": state}); n > 1 || v != 0 {
 				return false
 			}
 		}
+		dids := append([]string{}, extraDIDs...)
 		for _, rr := range d.regions {
-			if v, n := m.Sum(MetricDIDOutboundInUse, map[string]string{"did": rr.did.Number}); n != 1 || v != 0 {
+			dids = append(dids, rr.did.Number)
+		}
+		for _, did := range dids {
+			if v, n := m.Sum(MetricDIDOutboundInUse, map[string]string{"did": did}); n != 1 || v != 0 {
 				return false
 			}
 		}
@@ -651,8 +661,8 @@ func (d *driver) settleCounters(ctx context.Context, answered int) error {
 		after, _ := m.Sum(MetricCampaignAttempts, nil)
 		sb, _ := d.metricsBefore.Sum(MetricProviderSessions, nil)
 		sa, _ := m.Sum(MetricProviderSessions, nil)
-		return after-before == float64(attempts) && sa-sb == float64(answered) &&
-			s.Total-d.providerBefore.Total == int64(answered) && s.Live == 0
+		return after-before == float64(attempts) && sa-sb == float64(sessions) &&
+			s.Total-d.providerBefore.Total == int64(sessions) && s.Live == 0
 	}
 	start := time.Now()
 	deadline := start.Add(counterSettle)
@@ -823,6 +833,9 @@ func (d *driver) waitUntil(ctx context.Context, what string, done func() bool) e
 	deadline := time.Now().Add(d.cfg.Wait)
 	for {
 		err := d.observe(ctx)
+		if err == nil && d.onPoll != nil {
+			d.onPoll(ctx)
+		}
 		if err == nil && done() {
 			return nil
 		}

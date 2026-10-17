@@ -68,34 +68,66 @@ func expectedAnswered(v *RunView) int {
 }
 
 // CheckProviderSessions: the provider sessions started equal the answered
-// dialogs, and none was started for a leg that only rang (180 or 183).
+// dialogs that reached a bot, and none was started for a leg that only rang
+// (180 or 183).
 //
 // Read three ways. The mock provider counts the sessions it accepted, and
 // the application counts the sessions it opened
 // (aicc_provider_sessions_started_total, which it moves before it dials, so
 // it counts one that fails while being set up as well); both must have moved
-// by exactly the number of dialogs the simulator answered. Neither knows
-// which call a session was for, so per call the ledger says it: every
-// answered call's CDR shows a BOT leg, and no CDR of a call that only rang
-// does.
+// by exactly the number of dialogs the simulator answered that reached a
+// bot. Neither knows which call a session was for, so per call the ledger
+// says it: every answered call's CDR shows a BOT leg, and no CDR of a call
+// that only rang does.
+//
+// Issue #247 adapts it, explicitly, for runs whose calls do not all reach a
+// bot or are not all a campaign's:
+//   - an attempt whose outcome is OVERFLOW was answered and met no bot, so it
+//     opens no session and its CDR must show no BOT leg;
+//   - a direct call (RunView.Direct) that was answered opens one session;
+//   - a run whose cases have no call that only rings (K1) cannot show one,
+//     so that check is recorded as not applicable instead of failing on an
+//     empty count;
+//   - a run whose calls open no session at all (K2, in an application start
+//     of its own) may have no series of the application's counter yet: a
+//     missing series reads as zero, and only then.
+//
+// The campaign scenarios have no OVERFLOW, no direct call and both kinds of
+// call, so for them it is the check it was.
 func CheckProviderSessions(_ context.Context, v *RunView, c *Checks) {
 	answered := answeredDialogs(v.Dialogs)
 	want := expectedAnswered(v)
 	c.That(answered == want && len(v.Dialogs) > 0,
 		"the simulator answered %d of the run's %d dialogs, the number the cases answer (%d)", answered, len(v.Dialogs), want)
 
+	overflow := 0
+	for _, p := range pairAttempts(v) {
+		if deref(p.attempt.Outcome) == outcomeOverflow {
+			overflow++
+		}
+	}
+	direct := 0
+	for _, d := range v.Direct {
+		if d.IsAnswered() {
+			direct++
+		}
+	}
+	sessions := answered - overflow + direct
+
 	mock := v.Provider.Sessions()
-	c.That(mock == int64(answered), "the mock provider accepted one session per answered dialog: %d session(s), %d answered", mock, answered)
+	c.That(mock == int64(sessions),
+		"the mock provider accepted one session per answered dialog that reached a bot: %d session(s), %d answered campaign dialog(s) - %d OVERFLOW + %d answered direct call(s) = %d",
+		mock, answered, overflow, direct, sessions)
 	c.That(v.Provider.After.Live == 0, "no provider session is still open on the mock (%d)", v.Provider.After.Live)
 
 	before, _ := v.MetricsBefore.Sum(MetricProviderSessions, nil)
 	after, series := v.MetricsAfter.Sum(MetricProviderSessions, nil)
 	app := after - before
-	c.That(series > 0 && app == float64(answered),
-		"the application opened one provider session per answered dialog: %s moved %.0f -> %.0f (+%.0f), %d answered",
-		MetricProviderSessions, before, after, app, answered)
+	c.That((series > 0 || sessions == 0) && app == float64(sessions),
+		"the application opened one provider session per answered dialog that reached a bot: %s moved %.0f -> %.0f (+%.0f, %d series), want +%d",
+		MetricProviderSessions, before, after, app, series, sessions)
 
-	ringing, ringingWithBot, answeredWithBot := 0, 0, 0
+	ringing, ringingWithBot, reached, reachedWithBot, overflowWithBot, overflowSeen := 0, 0, 0, 0, 0, 0
 	var stray []string
 	for _, p := range pairAttempts(v) {
 		if p.dialog == nil || len(p.cdrs) != 1 {
@@ -104,9 +136,16 @@ func CheckProviderSessions(_ context.Context, v *RunView, c *Checks) {
 		isAnswered := p.dialog.Final != nil && p.dialog.Final.Status == 200
 		bot := hasBotLeg(p.cdrs[0]) || p.cdrs[0].BotSec > 0
 		switch {
-		case isAnswered:
+		case isAnswered && deref(p.attempt.Outcome) == outcomeOverflow:
+			overflowSeen++
 			if bot {
-				answeredWithBot++
+				overflowWithBot++
+				stray = append(stray, p.label())
+			}
+		case isAnswered:
+			reached++
+			if bot {
+				reachedWithBot++
 			}
 		case len(p.dialog.Provisionals) > 0:
 			ringing++
@@ -116,10 +155,39 @@ func CheckProviderSessions(_ context.Context, v *RunView, c *Checks) {
 			}
 		}
 	}
-	c.That(answeredWithBot == answered && answered > 0,
-		"every answered call's CDR shows it reached the bot (%d of %d)", answeredWithBot, answered)
+	c.That(reachedWithBot == reached && reached == answered-overflow && (reached > 0 || want == 0),
+		"every answered call that was not OVERFLOW shows in its CDR that it reached the bot (%d of %d; %d answered, %d OVERFLOW)",
+		reachedWithBot, reached, answered, overflow)
+	if overflow > 0 {
+		c.That(overflowSeen == overflow && overflowWithBot == 0,
+			"no OVERFLOW call reached the bot (%d of %d OVERFLOW call(s) have a BOT leg or bot seconds: %v)", overflowWithBot, overflowSeen, stray)
+	}
+	if wantRinging(v) == 0 {
+		c.That(ringing == 0, "not applicable: the run's cases have no call that only rings, and none did (%d)", ringing)
+		return
+	}
 	c.That(ringing > 0 && ringingWithBot == 0,
 		"no call that only rang (180 or 183, %d of them) reached the bot (%d did: %v)", ringing, ringingWithBot, stray)
+}
+
+// outcomeOverflow is the outcome of an answered call that met no bot.
+const outcomeOverflow = "OVERFLOW"
+
+// wantRinging is how many of the run's calls only ring, per the cases: every
+// unanswered, dialled case, once per region.
+func wantRinging(v *RunView) int {
+	n := 0
+	for _, cs := range v.Cases {
+		if !cs.IsOnDNC && len(cs.Steps) == 0 && cs.Provisional != 0 {
+			n++
+		}
+		for _, st := range cs.Steps {
+			if !st.IsAnswered() && st.Provisional != 0 {
+				n++
+			}
+		}
+	}
+	return n * len(v.Regions)
 }
 
 // CheckNoInviteAfterAnswer: every answered number receives exactly one
@@ -150,7 +218,10 @@ func CheckNoInviteAfterAnswer(_ context.Context, v *RunView, c *Checks) {
 		}
 	}
 	sort.Strings(numbers)
-	c.That(len(numbers) == wantNumbers && wantNumbers > 0, "%d number(s) were answered during the run, as the cases say (%d)", wantNumbers, len(numbers))
+	// A run whose cases answer nothing (issue #247's K2) must answer no
+	// number; its cardinality is that it dialled at all.
+	c.That(len(numbers) == wantNumbers && (wantNumbers > 0 || len(v.Dialogs) > 0),
+		"%d number(s) were answered during the run, as the cases say (%d; %d dialogs)", wantNumbers, len(numbers), len(v.Dialogs))
 	for _, n := range numbers {
 		list := byNumber[n]
 		answered, after := 0, 0
@@ -175,16 +246,32 @@ func CheckNoInviteAfterAnswer(_ context.Context, v *RunView, c *Checks) {
 
 // CheckCapacityReleased: the bot slots in use and the DIDs' outbound lines in
 // use are back to zero once the run has settled (aicc_bot_slots by state,
-// aicc_did_outbound_in_use by did). Each series must exist: the run answered
-// calls, which take a bot slot, and its DIDs placed calls, which take lines.
+// aicc_did_outbound_in_use by did). Each DID series must exist: the run's
+// DIDs placed calls, which take lines. The bot slot series must exist when
+// the run's calls took a slot; a run in an application start of its own whose
+// calls never answered (issue #247's K2) may have none, which reads as zero.
+// The DID of the run's direct calls (K1) is held to the same.
 func CheckCapacityReleased(_ context.Context, v *RunView, c *Checks) {
+	tookSlot := answeredDialogs(v.Dialogs) > 0
+	for _, d := range v.Direct {
+		tookSlot = tookSlot || d.IsAnswered()
+	}
 	for _, state := range []string{"IN_USE", "RESERVED"} {
 		val, n := v.MetricsAfter.Sum(MetricBotSlots, map[string]string{"state": state})
-		c.That(n == 1 && val == 0, "%s{state=%q} is back to 0 (%d series, value %.0f)", MetricBotSlots, state, n, val)
+		c.That((n == 1 || (n == 0 && !tookSlot)) && val == 0, "%s{state=%q} is back to 0 (%d series, value %.0f)", MetricBotSlots, state, n, val)
 	}
 	for _, rv := range v.Regions {
 		val, n := v.MetricsAfter.Sum(MetricDIDOutboundInUse, map[string]string{"did": rv.DID.Number})
 		c.That(n == 1 && val == 0, "%s: %s{did=%q} is back to 0 (%d series, value %.0f)", rv.Region.Code, MetricDIDOutboundInUse, rv.DID.Number, n, val)
+	}
+	seen := map[string]bool{}
+	for _, d := range v.Direct {
+		if seen[d.DID] {
+			continue
+		}
+		seen[d.DID] = true
+		val, n := v.MetricsAfter.Sum(MetricDIDOutboundInUse, map[string]string{"did": d.DID})
+		c.That(n == 1 && val == 0, "direct calls: %s{did=%q} is back to 0 (%d series, value %.0f)", MetricDIDOutboundInUse, d.DID, n, val)
 	}
 }
 
