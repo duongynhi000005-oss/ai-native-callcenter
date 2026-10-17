@@ -5,6 +5,7 @@
 #
 #   deploy/e2e/e2e.sh up      fresh database, application built from this tree
 #   deploy/e2e/e2e.sh smoke   place one AI outbound call and check the result
+#   deploy/e2e/e2e.sh campaign  run the campaign scenarios and probes (#245)
 #   deploy/e2e/e2e.sh down    collect logs, remove containers, volumes, network
 #   deploy/e2e/e2e.sh config  print the resolved compose configuration
 #
@@ -60,6 +61,9 @@ build_tools() {
   for cmd in aicc-calleesim aicc-mockprovider aicc-e2e; do
     (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags '-s -w' -o "$TOOLS/$cmd" "./cmd/$cmd")
   done
+  # The campaign tests are Go tests under the build tag e2e, compiled into a
+  # static test binary that runs inside the network like the smoke driver.
+  (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go test -c -tags e2e -trimpath -ldflags '-s -w' -o "$TOOLS/aicc-e2e-campaign.test" ./internal/e2e)
   docker build -q -t "aicc-e2e-tools:$PROJECT" -f "$E2E/Dockerfile.tools" "$TOOLS" >/dev/null
   # The guard runs on the host, before anything starts.
   (cd "$ROOT" && go build -o "$WORK/aicc-e2e-host" ./cmd/aicc-e2e)
@@ -81,6 +85,23 @@ collect_logs() {
     compose logs --no-color --timestamps "$svc" > "$RUN/logs/$svc.log" 2>&1 || true
   done
   compose exec -T freeswitch fs_cli -p "$(env_value ESL_PASSWORD)" -P 18021 -x 'sofia status' > "$RUN/logs/sofia-status.txt" 2>&1 || true
+  # The switch's own log file prefixes each line of a call with its channel
+  # uuid (the leg id), which the console output does not: the failure bundles
+  # are sliced from it.
+  compose exec -T freeswitch cat /usr/local/freeswitch/log/freeswitch.log > "$RUN/logs/freeswitch-file.log" 2>/dev/null || true
+}
+
+# slice_bundles copies, into every failure bundle of a campaign run, the lines
+# of the application log and the switch log that name one of the bundle's ids
+# (call id, leg id, SIP Call-ID; ids.txt, written by the driver).
+slice_bundles() {
+  local ids dir
+  for ids in "$1"/bundles/*/ids.txt; do
+    [ -f "$ids" ] || continue
+    dir="$(dirname "$ids")"
+    grep -F -f "$ids" "$RUN/logs/aicc.log" > "$dir/aicc.log" 2>/dev/null || true
+    grep -F -f "$ids" "$RUN/logs/freeswitch-file.log" > "$dir/freeswitch.log" 2>/dev/null || true
+  done
 }
 
 cmd_up() {
@@ -125,6 +146,31 @@ cmd_smoke() {
   fi
 }
 
+cmd_campaign() {
+  [ -n "$(compose ps -q aicc 2>/dev/null)" ] || { say "the environment is not up; run: make e2e-up"; exit 1; }
+  render
+  local id out t0=$SECONDS
+  id="campaign-$(date -u +%Y%m%dT%H%M%SZ)"
+  out="/run/e2e/$id"
+  if compose run --rm -T --no-deps --entrypoint /usr/local/bin/aicc-e2e-campaign.test driver \
+      -test.v -test.run '^TestCampaigns$' -test.timeout 20m \
+      -e2e.api "http://$APP_IP:8080" -e2e.ready "http://$APP_IP:9090/readyz" \
+      -e2e.calleesim "http://$CALLEE_IP:8771" -e2e.mockprovider "http://$MOCK_IP:9099" \
+      -e2e.esl "$FS_IP:18021" -e2e.compose-config /run/e2e/compose.json \
+      -e2e.scenario /etc/e2e/scenario.json -e2e.flow /etc/e2e/flow.json \
+      -e2e.username admin -e2e.out "$out" >&2; then
+    [ -f "$RUN/$id/probes.md" ] && cat "$RUN/$id/probes.md"
+    say "campaign tests passed in $((SECONDS - t0)) s. Results: $RUN/$id"
+  else
+    local rc=$?
+    collect_logs
+    slice_bundles "$RUN/$id"
+    [ -f "$RUN/$id/probes.md" ] && cat "$RUN/$id/probes.md"
+    say "campaign tests FAILED after $((SECONDS - t0)) s. Report, bundles and logs: $RUN"
+    exit "$rc"
+  fi
+}
+
 cmd_down() {
   if [ -n "$(compose ps -aq 2>/dev/null)" ]; then collect_logs; fi
   compose down -v --remove-orphans >&2
@@ -139,7 +185,8 @@ cmd_down() {
 case "${1:-}" in
   up) cmd_up ;;
   smoke) cmd_smoke ;;
+  campaign) cmd_campaign ;;
   down) cmd_down ;;
   config) build_tools; render; cat "$RUN/compose.json" ;;
-  *) echo "usage: $0 up|smoke|down|config" >&2; exit 2 ;;
+  *) echo "usage: $0 up|smoke|campaign|down|config" >&2; exit 2 ;;
 esac

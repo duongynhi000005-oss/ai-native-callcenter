@@ -2,14 +2,16 @@
 
 An isolated stack for automated outbound-call tests: PostgreSQL, the switch
 image, the application built from this checkout, `aicc-mockprovider` (the voice
-provider) and `aicc-calleesim` (the called party). A test driver
-(`cmd/aicc-e2e`) runs inside the same network and talks to the application only
-through the public API.
+provider) and `aicc-calleesim` (the called party). The test drivers
+(`cmd/aicc-e2e` for the smoke, a Go test binary for the campaign tests) run
+inside the same network and talk to the application only through the public
+API, with a scoped API key.
 
 ```sh
-make e2e-up       # fresh database, application built from the working tree
-make e2e-smoke    # one AI outbound call; checks the callee's record and the CDR
-make e2e-down     # collect logs, remove containers, volumes and the network
+make e2e-up        # fresh database, application built from the working tree
+make e2e-smoke     # one AI outbound call; checks the callee's record and the CDR
+make e2e-campaign  # two campaigns (US, CN): unanswered outcomes and SIP probes
+make e2e-down      # collect logs, remove containers, volumes and the network
 ```
 
 Needs Docker with Compose v2.24 or later and Go. Nothing else on the host:
@@ -82,6 +84,81 @@ summary and never asserted. The smoke provisions its own flow and DID with a
 random number, so it can be repeated against a running environment; `make
 e2e-up` is what gives a fresh database.
 
+## Campaign tests
+
+`make e2e-campaign` runs the tests of `internal/e2e/campaign*.go` (issue
+#245). They are Go tests under the build tag `e2e`: `e2e.sh up` compiles them
+into a static test binary (`go test -c -tags e2e`) that goes into the harness
+image and runs with `docker compose run`, inside the internal network, like the
+smoke driver. They need an environment that is up; like the smoke, they can be
+repeated against a running one, and `make e2e-up` is what gives a fresh one.
+
+Two campaigns, one per country, are created and started together, each with
+its own DID (the caller id in `From`) and every case of the table below:
+
+- US: `+1 202 555 01xx`, the fictional range;
+- CN: `+86 139 8888 66xx`, 11 national digits, a range reserved for this
+  harness.
+
+Numbers are never mixed within a campaign, and no number of either range may
+be replaced by one a real trunk rings.
+
+| case | callee (`scenario.json`) | asserted |
+| --- | --- | --- |
+| C03 | 180, then 486 | `BUSY`, cause `USER_BUSY` |
+| C05 | 180, then 603 | `REJECTED`, cause `CALL_REJECTED` |
+| C06 | 180, then 404 | `INVALID_NUMBER`, cause `UNALLOCATED_NUMBER`; contact `INVALID_NUMBER`; no further INVITE |
+| C07 | 180, never answered | `NO_ANSWER`; CANCEL at the 5 s ring timeout ±1 s; no provider session |
+| C08 | 183 with early media, never answered | `NO_ANSWER`; CANCEL; no provider session |
+| C09 | number on the do-not-call list | `DNC_SKIPPED`, cause `NUMBER_ON_DNC`; contact `DNC`; zero INVITEs |
+| P1–P5 | 180, then 480, 408, 503, 484, 410 | recorded, and held to design 10 §7.2's cause table |
+
+C07's bound is read from the attempt's `startedAt`, which the dialer writes
+just before it sends the originate whose timeout the ring timeout is. The
+switch checks that timeout in whole seconds, so a 5 s ring timeout rings for
+more than 4 s and at most 5 s; measured from the INVITE, a ring that began
+late in a second can read just under 4 s although nothing is wrong. Both
+times are in the report (`cancelAfterStartMs`, `cancelAfterInviteMs`).
+
+The policy is the validated minimum: ring timeout 5 s, every interval and the
+transient backoff 60 s, `maxAttempts` and `maxSystemRetries` 2, calling window
+00:00–24:00 every day. So a retried outcome is dialled exactly twice and ends
+`EXHAUSTED`, whichever budget it spends, and a terminal one is dialled once. A
+run lasts a little over a minute, most of it the wait for the retries.
+
+For every case and both countries the run asserts the attempt's outcome and
+hangup cause; the contact's status, `attempts`, `systemFailures` and
+`nextAttemptAt` right after the first attempt (end + 60 s, or none) and at the
+end; that the retry did not start early; one CDR per dialled attempt with the
+same cause, the dialled string and no answer; and the simulator's INVITEs for
+the number. Over the run: every dialog belongs to one contact and came from its
+own campaign's caller id, no INVITE of one campaign carries the other country's
+number, the simulator saw nothing its scenario does not know, and the mock
+provider opened no session at all (`GET /_stats` on it, before and after). The
+two countries must come out identical on every column of the measured table;
+a difference fails the run. Every equality is paired with a count. Latency is
+reported, never asserted.
+
+The deployment's `AICC_OUTBOUND_DIAL_FORM` is `E164` (the default, spelt out in
+the compose overlay): the switch is handed `+12025550103` and `+8613988886603`,
+which is the Request-URI user part the simulator matches. The driver reads the
+dial form from the resolved configuration and refuses to start when
+`scenario.json` does not hold every case's number in that form with the case's
+responses.
+
+Checks that hold for any run, rather than for one case, plug in as
+`AfterRunChecks` (`internal/e2e/campaign_checks.go`); issue #246 adds its
+invariants there.
+
+A run writes `campaign-<time>/report.json` (every assertion, per region, case
+and attempt, with the simulator's dialog and the CDRs) and `probes.md` (the
+measured table: SIP response → `hangup_cause` → outcome → retry interval and
+budget). On a failure, `bundles/<region>-<case>-<n>/` holds that attempt, its
+dialog, and the lines of the application log and the switch log that name its
+call id, leg id or SIP Call-ID, sliced by `e2e.sh` from `logs/aicc.log` and
+`logs/freeswitch-file.log` (the switch's own log file, which prefixes a call's
+lines with its channel uuid, the leg id).
+
 ## Reading a run
 
 `bin/e2e/<project>/run/` (git-ignored) holds, after a run:
@@ -91,7 +168,11 @@ e2e-up` is what gives a fresh database.
 | `smoke-<time>/smoke.json` | every assertion made, failures, latencies, condensed dialog and CDR |
 | `smoke-<time>/calleesim-report.json` | the simulator's full record: INVITE headers, responses, energy per 100 ms |
 | `smoke-<time>/cdr.json` | the CDR list for the DID |
-| `logs/<service>.log` | each container's output, written on a failed up or smoke and by `e2e-down` |
+| `campaign-<time>/report.json` | the campaign run: every assertion, per region, case and attempt |
+| `campaign-<time>/probes.md` | the measured table, one block per country |
+| `campaign-<time>/bundles/` | per failed attempt: attempt, dialog, CDRs and the sliced logs |
+| `logs/<service>.log` | each container's output, written on a failed up, smoke or campaign run and by `e2e-down` |
+| `logs/freeswitch-file.log` | the switch's log file, each call's lines prefixed with its leg id |
 | `logs/sofia-status.txt` | the switch's gateways |
 | `compose.json` | the resolved configuration the guard checked |
 | `e2e_calleesim.xml` | the rendered gateway file |

@@ -1,0 +1,747 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package e2e
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/rasonyang/ai-native-callcenter/internal/api"
+	"github.com/rasonyang/ai-native-callcenter/internal/calleesim"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
+)
+
+// retryTolerance is how far a contact's nextAttemptAt may sit from the end
+// of the attempt plus the interval. The dialer adds the interval exactly; the
+// slack covers the two timestamps being written apart, not the dialer's speed.
+const retryTolerance = 2 * time.Second
+
+// inviteSlack is how far outside its attempt's start and finish the
+// simulator's INVITE may sit and still be that attempt's. The simulator and
+// the application read the same host clock.
+const inviteSlack = time.Second
+
+// Where an attempt's ending came from.
+const (
+	// SourceCDR: the CDR finished the attempt (the channel existed).
+	SourceCDR = "CDR"
+	// SourceJob: the originate's job result did (a CDR marked
+	// tech.isPlacementFailure, design 10 section 5.5).
+	SourceJob = "JOB"
+	// SourceDialer: the dialer did, with no call placed (no CDR).
+	SourceDialer = "DIALER"
+)
+
+// CampaignReport is what a run writes to report.json.
+type CampaignReport struct {
+	Passed     bool      `json:"passed"`
+	StartedAt  time.Time `json:"startedAt"`
+	FinishedAt time.Time `json:"finishedAt"`
+	// DurationSec is the whole run, sign-in to report.
+	DurationSec float64 `json:"durationSec"`
+	// DialForm is the deployment's AICC_OUTBOUND_DIAL_FORM.
+	DialForm string `json:"dialForm"`
+	// Latency is reported and never asserted.
+	Latency   map[string]float64 `json:"latencyMs"`
+	Campaigns []CampaignInfo     `json:"campaigns"`
+	Scenarios []ScenarioResult   `json:"scenarios"`
+	// Probes is the measured table, one row per region and case: SIP final
+	// response, switch hangup cause, outcome, retry interval and budget.
+	Probes   []ProbeRow    `json:"probes"`
+	Provider ProviderCount `json:"provider"`
+	// Run holds the assertions about the run as a whole: the simulator's
+	// verdict, the provider, and which campaign each dialog belongs to.
+	Run CheckList `json:"run"`
+	// CrossRegion asserts that the two countries come out the same.
+	CrossRegion CheckList        `json:"crossRegion"`
+	AfterRun    []AfterRunResult `json:"afterRun"`
+	// Findings are observations for a person to judge; they fail nothing.
+	Findings []string `json:"findings"`
+	Failures []string `json:"failures"`
+}
+
+// CheckList is the assertions made, and those that failed.
+type CheckList struct {
+	Checks   []string `json:"checks"`
+	Failures []string `json:"failures"`
+}
+
+// AfterRunResult is one AfterRunCheck's assertions.
+type AfterRunResult struct {
+	Name string `json:"name"`
+	CheckList
+}
+
+// CampaignInfo identifies one campaign of the run.
+type CampaignInfo struct {
+	Region     string `json:"region"`
+	CampaignID string `json:"campaignId"`
+	DID        string `json:"did"`
+	Status     string `json:"status"`
+}
+
+// ScenarioResult is one case in one region.
+type ScenarioResult struct {
+	Region string `json:"region"`
+	ID     string `json:"id"`
+	Kind   Kind   `json:"kind"`
+	Number string `json:"number"`
+	// DialKey is what the switch was handed: the Request-URI user part.
+	DialKey string `json:"dialKey"`
+	Callee  string `json:"callee"`
+	// Expected is the outcome held to: the scenario's, or for a probe the
+	// one its first attempt measured.
+	Expected   string          `json:"expected"`
+	Passed     bool            `json:"passed"`
+	Checks     []string        `json:"checks"`
+	Failures   []string        `json:"failures"`
+	AfterFirst *ContactResult  `json:"contactAfterFirstAttempt,omitempty"`
+	Contact    *ContactResult  `json:"contact,omitempty"`
+	Attempts   []AttemptResult `json:"attempts"`
+	// Invites is the simulator's INVITE count for the dial key in this run.
+	Invites int `json:"invites"`
+}
+
+// ContactResult is a contact as read from the API.
+type ContactResult struct {
+	Status         string     `json:"status"`
+	Attempts       int        `json:"attempts"`
+	SystemFailures int        `json:"systemFailures"`
+	LastOutcome    string     `json:"lastOutcome,omitempty"`
+	NextAttemptAt  *time.Time `json:"nextAttemptAt,omitempty"`
+}
+
+// AttemptResult is one attempt: what the API says of it, its CDR, the
+// simulator's record of its dialog, and whether its own assertions held.
+type AttemptResult struct {
+	// Index counts from 1.
+	Index       int        `json:"index"`
+	Number      string     `json:"number"`
+	CallID      string     `json:"callId"`
+	LegID       string     `json:"legId"`
+	State       string     `json:"state"`
+	Outcome     string     `json:"outcome"`
+	HangupCause string     `json:"hangupCause"`
+	StartedAt   time.Time  `json:"startedAt"`
+	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
+	Source      string     `json:"source"`
+	CDRs        []api.CDR  `json:"cdrs"`
+	// Dialog is the simulator's record of this attempt's INVITE.
+	Dialog   *calleesim.DialogRecord `json:"dialog,omitempty"`
+	Passed   bool                    `json:"passed"`
+	Checks   []string                `json:"checks"`
+	Failures []string                `json:"failures"`
+	// Bundle is the failure bundle's directory, relative to the run's.
+	Bundle string `json:"bundle,omitempty"`
+	// CancelAfterInviteMs and CancelAfterStartMs are a ringing case's time
+	// from the INVITE, and from the attempt's start, to the caller's CANCEL.
+	CancelAfterInviteMs *float64 `json:"cancelAfterInviteMs,omitempty"`
+	CancelAfterStartMs  *float64 `json:"cancelAfterStartMs,omitempty"`
+	// RetryLatenessMs is how long after the previous nextAttemptAt this
+	// attempt started. Reported, never asserted beyond "not early".
+	RetryLatenessMs *float64 `json:"retryLatenessMs,omitempty"`
+}
+
+// ProbeRow is one line of the measured table.
+type ProbeRow struct {
+	Region string `json:"region"`
+	ID     string `json:"id"`
+	Callee string `json:"callee"`
+	// SIPFinal is the simulator's final response to the first INVITE: its
+	// status, "487 after CANCEL" for a ring the caller gave up on, or
+	// "none" when nothing was dialled.
+	SIPFinal    string `json:"sipFinal"`
+	HangupCause string `json:"hangupCause"`
+	Outcome     string `json:"outcome"`
+	Source      string `json:"source"`
+	// Budget is the counter the first attempt spent, read off the contact.
+	Budget Budget `json:"budget"`
+	// RetryIntervalSec is nextAttemptAt minus the first attempt's end; nil
+	// when the contact is not dialled again.
+	RetryIntervalSec  *float64 `json:"retryIntervalSec"`
+	ContactAfterFirst string   `json:"contactAfterFirstAttempt"`
+	ContactFinal      string   `json:"contactFinal"`
+	Attempts          int      `json:"attempts"`
+	SystemFailures    int      `json:"systemFailures"`
+	Invites           int      `json:"invites"`
+	// Design is section 7.2's intent for this case: the scenario's expected
+	// outcome, or this harness's reading of the SIP response (sipIntent).
+	Design string `json:"design"`
+}
+
+// assess makes every assertion about a finished run and fills the report.
+func assess(rep *CampaignReport, v *RunView, cases []Case, form phonenum.DialForm, unexpectedBase int) {
+	rep.Provider = v.Provider
+
+	for _, rv := range v.Regions {
+		rep.Campaigns = append(rep.Campaigns, CampaignInfo{
+			Region: rv.Region.Code, CampaignID: rv.Campaign.ID.String(), DID: rv.DID.Number, Status: string(rv.Campaign.Status),
+		})
+		cdrs := map[string][]api.CDR{}
+		for _, cdr := range rv.CDRs {
+			cdrs[cdr.CallID.String()] = append(cdrs[cdr.CallID.String()], cdr)
+		}
+		for _, cv := range rv.Contacts {
+			key := rv.Region.DialKey(cv.Case, form)
+			rep.Scenarios = append(rep.Scenarios, assessContact(rv, cv, key, dialogsFor(v.Dialogs, key), cdrs, v.ObservedAt, &rep.Findings))
+		}
+	}
+
+	// C07 and C08 name it: a ringing leg, with or without early media, must
+	// not open a provider session (design 10 section 2, rule 1). No case of
+	// the run is answered, so the mock provider's count must not move at all.
+	noSession := v.Provider.TotalAfter == v.Provider.TotalBefore && v.Provider.LiveAfter == 0
+	for i := range rep.Scenarios {
+		sc := &rep.Scenarios[i]
+		if cs := caseByID(cases, sc.ID); cs.SIPStatus != 0 || cs.IsOnDNC {
+			continue
+		}
+		msg := fmt.Sprintf("no provider session was opened while it rang (mock provider sessions %d -> %d during the run)", v.Provider.TotalBefore, v.Provider.TotalAfter)
+		sc.Checks = append(sc.Checks, msg)
+		if !noSession {
+			sc.Failures = append(sc.Failures, msg)
+			sc.Passed = false
+		}
+	}
+
+	var run Checks
+	run.That(v.Callee.UnexpectedCount == unexpectedBase,
+		"the simulator saw no dialog its scenario does not know during the run (unexpected %d -> %d)", unexpectedBase, v.Callee.UnexpectedCount)
+	run.That(noSession,
+		"no provider session was opened during the run: no call was answered and nothing opened one on a 180 or a 183 (sessions ever %d -> %d, live %d)",
+		v.Provider.TotalBefore, v.Provider.TotalAfter, v.Provider.LiveAfter)
+	assessAttribution(&run, v, form, rep.Scenarios)
+	rep.Run = run.list()
+
+	rep.Probes = probeRows(rep.Scenarios, cases)
+	rep.CrossRegion = crossRegion(rep.Probes)
+	if rep.Findings == nil {
+		rep.Findings = []string{}
+	}
+}
+
+func caseByID(cases []Case, id string) Case {
+	for _, cs := range cases {
+		if cs.ID == id {
+			return cs
+		}
+	}
+	return Case{}
+}
+
+// dialogsFor are the run's dialogs whose Request-URI user is key, in order.
+func dialogsFor(all []calleesim.DialogRecord, key string) []calleesim.DialogRecord {
+	var out []calleesim.DialogRecord
+	for _, d := range all {
+		if d.Number == key {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// assessAttribution checks that every dialog of the run belongs to exactly
+// one contact, came from that contact's campaign (its DID is the caller id in
+// From), and that no campaign's INVITE carries the other country's number.
+func assessAttribution(run *Checks, v *RunView, form phonenum.DialForm, results []ScenarioResult) {
+	type owner struct {
+		region RegionView
+		cs     Case
+	}
+	owners := map[string]owner{}
+	for _, rv := range v.Regions {
+		for _, cv := range rv.Contacts {
+			owners[rv.Region.DialKey(cv.Case, form)] = owner{rv, cv.Case}
+		}
+	}
+	wantPerRegion := map[string]int{}
+	for _, r := range results {
+		wantPerRegion[r.Region] += r.Invites
+	}
+
+	unowned, wrongCaller := 0, 0
+	perRegion := map[string]int{}
+	foreign := map[string]int{}
+	for _, d := range v.Dialogs {
+		o, ok := owners[d.Number]
+		if !ok {
+			unowned++
+			continue
+		}
+		perRegion[o.region.Region.Code]++
+		from := sipUser(d.InviteHeaders["from"])
+		if from != o.region.DID.Number {
+			wrongCaller++
+		}
+		// The caller id names the campaign; the number must be that
+		// campaign's country.
+		for _, rv := range v.Regions {
+			if from == rv.DID.Number && !strings.HasPrefix(d.Number, dialPrefix(rv.Region, form)) {
+				foreign[rv.Region.Code]++
+			}
+		}
+	}
+	total := 0
+	for _, n := range wantPerRegion {
+		total += n
+	}
+	run.That(len(v.Dialogs) == total && total > 0, "the simulator saw exactly the run's %d INVITEs (%d)", total, len(v.Dialogs))
+	run.That(unowned == 0, "every dialog of the run belongs to one contact of one campaign (%d do not)", unowned)
+	run.That(wrongCaller == 0, "every dialog came from its own campaign's caller id (%d did not)", wrongCaller)
+	for _, rv := range v.Regions {
+		code := rv.Region.Code
+		run.That(perRegion[code] == wantPerRegion[code] && perRegion[code] > 0,
+			"%s: the simulator saw %d INVITEs for the campaign's numbers (%d)", code, wantPerRegion[code], perRegion[code])
+		run.That(foreign[code] == 0, "%s: no INVITE from campaign %s (caller id %s) carries a number outside %s (%d did)",
+			code, rv.Campaign.ID, rv.DID.Number, rv.Region.Prefix+"xx", foreign[code])
+	}
+}
+
+// dialPrefix is a region's number prefix in the dial form.
+func dialPrefix(r Region, form phonenum.DialForm) string {
+	full, _ := phonenum.DialString(r.Prefix+"00", form, r.CountryCode)
+	return full[:len(full)-2]
+}
+
+// sipUser is the user part of the SIP URI in a From, To or Contact value.
+func sipUser(header string) string {
+	_, rest, ok := strings.Cut(header, "sip:")
+	if !ok {
+		return ""
+	}
+	user, _, ok := strings.Cut(rest, "@")
+	if !ok {
+		return ""
+	}
+	return user
+}
+
+func contactResult(ct *api.CampaignContact) *ContactResult {
+	if ct == nil {
+		return nil
+	}
+	out := &ContactResult{Status: string(ct.Status), Attempts: ct.Attempts, SystemFailures: ct.SystemFailures, NextAttemptAt: ct.NextAttemptAt}
+	if ct.LastOutcome != nil {
+		out.LastOutcome = string(*ct.LastOutcome)
+	}
+	return out
+}
+
+func deref[T ~string](p *T) string {
+	if p == nil {
+		return ""
+	}
+	return string(*p)
+}
+
+// assessContact checks one contact: its attempts, their CDRs and dialogs,
+// its counters right after the first attempt and at the end, and the retry.
+func assessContact(rv RegionView, cv ContactView, key string, dialogs []calleesim.DialogRecord,
+	cdrs map[string][]api.CDR, observedAt time.Time, findings *[]string) ScenarioResult {
+	cs := cv.Case
+	res := ScenarioResult{
+		Region: rv.Region.Code, ID: cs.ID, Kind: cs.Kind, Number: cv.Number, DialKey: key, Callee: cs.Callee,
+		AfterFirst: contactResult(cv.AfterFirst), Contact: contactResult(cv.Contact), Attempts: []AttemptResult{},
+		Invites: len(dialogs),
+	}
+	var col Checks
+	col.That(cv.Contact != nil, "the contact exists in the campaign")
+	col.That(cv.AfterFirst != nil, "the contact was read right after its first attempt finished")
+
+	expected := cs.Outcome
+	if cs.Kind == KindProbe && len(cv.Attempts) > 0 {
+		expected = deref(cv.Attempts[0].Outcome)
+	}
+	res.Expected = expected
+	design, known := designOutcomes[expected]
+	col.That(known, "%q is an unanswered outcome of design 10 section 7.2", expected)
+	retried := known && design.TerminalStatus == ""
+	wantAttempts := 1
+	if retried {
+		wantAttempts = MaxAttempts
+	}
+	wantInvites := wantAttempts
+	if cs.IsOnDNC {
+		wantInvites = 0
+	}
+	col.That(len(cv.Attempts) == wantAttempts, "the contact has %d attempt(s) (%d)", wantAttempts, len(cv.Attempts))
+	col.That(len(dialogs) == wantInvites, "the simulator saw %d INVITE(s) for %s (%d)", wantInvites, key, len(dialogs))
+
+	firstCause := ""
+	for i, a := range cv.Attempts {
+		var dlg *calleesim.DialogRecord
+		if i < len(dialogs) {
+			dlg = &dialogs[i]
+		}
+		res.Attempts = append(res.Attempts, assessAttempt(rv, cs, i, a, key, expected, dlg, cdrs[a.CallID.String()], &firstCause, findings))
+	}
+
+	spend := func(n int) (int, int) {
+		switch design.Budget {
+		case BudgetAttempts:
+			return n, 0
+		case BudgetSystem:
+			return 0, n
+		}
+		return 0, 0
+	}
+	if af := cv.AfterFirst; af != nil && known {
+		wa, ws := spend(1)
+		col.That(af.Attempts == wa && af.SystemFailures == ws,
+			"after the first attempt: attempts = %d and system_failures = %d (%d, %d)", wa, ws, af.Attempts, af.SystemFailures)
+		if retried {
+			col.That(af.Status == api.CampaignContactStatus("ACTIVE"), "after the first attempt: the contact is ACTIVE, due for a retry (%s)", af.Status)
+			first := cv.Attempts[0]
+			measured := "none"
+			ok := false
+			if af.NextAttemptAt != nil && first.FinishedAt != nil {
+				gap := af.NextAttemptAt.Sub(*first.FinishedAt)
+				measured = gap.String()
+				ok = absDuration(gap-RetryIntervalSec*time.Second) <= retryTolerance
+			}
+			col.That(ok, "after the first attempt: nextAttemptAt is its end + %d s, the policy's interval (measured %s)", RetryIntervalSec, measured)
+		} else {
+			col.That(string(af.Status) == design.TerminalStatus, "after the first attempt: the contact is %s (%s)", design.TerminalStatus, af.Status)
+			col.That(af.NextAttemptAt == nil, "after the first attempt: no next attempt is scheduled")
+		}
+	}
+	if ct := cv.Contact; ct != nil && known {
+		wa, ws := spend(wantAttempts)
+		col.That(ct.Attempts == wa && ct.SystemFailures == ws,
+			"at the end: attempts = %d and system_failures = %d (%d, %d)", wa, ws, ct.Attempts, ct.SystemFailures)
+		want := design.TerminalStatus
+		if retried {
+			want = "EXHAUSTED" // both budgets are MaxAttempts = MaxSystemRetries = 2
+		}
+		col.That(string(ct.Status) == want, "at the end: the contact is %s (%s)", want, ct.Status)
+		col.That(ct.NextAttemptAt == nil, "at the end: no next attempt is scheduled")
+		col.That(deref(ct.LastOutcome) == expected, "at the end: the last outcome is %s (%s)", expected, deref(ct.LastOutcome))
+	}
+	if retried && len(cv.Attempts) >= 2 && cv.AfterFirst != nil && cv.AfterFirst.NextAttemptAt != nil {
+		late := cv.Attempts[1].StartedAt.Sub(*cv.AfterFirst.NextAttemptAt)
+		ms := float64(late.Milliseconds())
+		res.Attempts[1].RetryLatenessMs = &ms
+		col.That(late >= -inviteSlack, "the retry did not start before nextAttemptAt (it started %s after it)", late)
+	}
+	if !retried && len(cv.Attempts) >= 1 && cv.Attempts[0].FinishedAt != nil {
+		watched := observedAt.Sub(*cv.Attempts[0].FinishedAt)
+		col.That(watched >= RetryIntervalSec*time.Second,
+			"the contact was watched for at least the %d s retry interval after its attempt, with no further attempt (%s)", RetryIntervalSec, watched.Round(time.Second))
+	}
+
+	res.Checks, res.Failures = nonNil(col.checks), nonNil(col.failures)
+	for _, a := range res.Attempts {
+		res.Failures = append(res.Failures, a.Failures...)
+	}
+	res.Passed = len(res.Failures) == 0
+	return res
+}
+
+// assessAttempt checks one attempt against its CDR and its dialog.
+func assessAttempt(rv RegionView, cs Case, i int, a api.CampaignAttempt, key, expected string,
+	dlg *calleesim.DialogRecord, cdrs []api.CDR, firstCause *string, findings *[]string) AttemptResult {
+	pre := fmt.Sprintf("attempt %d: ", i+1)
+	outcome, cause := deref(a.Outcome), deref(a.HangupCause)
+	ar := AttemptResult{
+		Index: i + 1, Number: a.Number, CallID: a.CallID.String(), LegID: a.LegID.String(), State: string(a.State),
+		Outcome: outcome, HangupCause: cause, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Dialog: dlg,
+		CDRs: cdrs, Source: SourceDialer,
+	}
+	if ar.CDRs == nil {
+		ar.CDRs = []api.CDR{}
+	}
+	if len(cdrs) > 0 {
+		ar.Source = SourceCDR
+		if cdrs[0].Tech != nil {
+			if v, ok := (*cdrs[0].Tech)["isPlacementFailure"].(bool); ok && v {
+				ar.Source = SourceJob
+			}
+		}
+	}
+	var col Checks
+	col.That(a.State == attemptFinished, pre+"the attempt is FINISHED (%s)", a.State)
+	col.That(outcome == expected, pre+"the outcome is %s (%s)", expected, outcome)
+	switch {
+	case cs.Kind == KindScenario:
+		col.That(cause == cs.Cause, pre+"the hangup cause is %s (%s)", cs.Cause, cause)
+	case i == 0:
+		*firstCause = cause
+		col.That(cause != "", pre+"the attempt carries a hangup cause (%q)", cause)
+		if want, listed := designCauseOutcomes[cause]; listed {
+			if ar.Source == SourceJob && designOutcomes[want].Budget == BudgetSystem {
+				want = "ORIGINATE_FAILED" // a failure before any channel, section 5.5
+			}
+			col.That(outcome == want, pre+"design 10 section 7.2 maps %s to %s (%s)", cause, want, outcome)
+		} else {
+			*findings = append(*findings, fmt.Sprintf("%s %s: hangup cause %q is not in design 10 section 7.2; it came out %s", rv.Region.Code, cs.ID, cause, outcome))
+		}
+	default:
+		col.That(cause == *firstCause, pre+"the hangup cause is the first attempt's %s (%s)", *firstCause, cause)
+	}
+
+	if cs.IsOnDNC {
+		col.That(dlg == nil, "%sno INVITE was sent", pre)
+	} else {
+		col.That(len(cdrs) == 1, pre+"exactly one CDR carries the call id (%d)", len(cdrs))
+		if len(cdrs) == 1 {
+			cdr := cdrs[0]
+			col.That(deref(cdr.HangupCause) == cause, pre+"the CDR's hangup cause is the attempt's (%s)", deref(cdr.HangupCause))
+			col.That(cdr.ToNumber == key, pre+"the CDR's dialled number is %s (%s)", key, cdr.ToNumber)
+			col.That(deref(cdr.DID) == rv.DID.Number, pre+"the CDR names the campaign's DID %s (%s)", rv.DID.Number, deref(cdr.DID))
+			col.That(cdr.AnsweredAt == nil && cdr.BotSec == 0, pre+"the CDR records no answer and no bot time (answered %v, botSec %d)", cdr.AnsweredAt != nil, cdr.BotSec)
+		}
+		col.That(dlg != nil, "%sthe simulator recorded the attempt's INVITE", pre)
+	}
+	if dlg != nil {
+		assessDialog(&col, pre, rv, cs, a, dlg, &ar)
+	}
+	ar.Checks, ar.Failures = nonNil(col.checks), nonNil(col.failures)
+	ar.Passed = len(ar.Failures) == 0
+	return ar
+}
+
+func assessDialog(col *Checks, pre string, rv RegionView, cs Case, a api.CampaignAttempt, d *calleesim.DialogRecord, ar *AttemptResult) {
+	from := sipUser(d.InviteHeaders["from"])
+	col.That(from == rv.DID.Number, pre+"the INVITE came from the campaign's caller id %s (%s)", rv.DID.Number, from)
+	inWindow := !d.InviteAt.Before(a.StartedAt.Add(-inviteSlack)) && (a.FinishedAt == nil || !d.InviteAt.After(a.FinishedAt.Add(inviteSlack)))
+	col.That(inWindow, pre+"the INVITE (%s) falls inside the attempt (%s to %v)", d.InviteAt.Format(time.RFC3339Nano), a.StartedAt.Format(time.RFC3339Nano), a.FinishedAt)
+
+	sent := false
+	for _, p := range d.Provisionals {
+		if p.Status == cs.Provisional && p.HasEarlyMedia == cs.EarlyMedia {
+			sent = true
+		}
+	}
+	col.That(sent, pre+"the callee sent %d (early media %v)", cs.Provisional, cs.EarlyMedia)
+	final := 0
+	if d.Final != nil {
+		final = d.Final.Status
+	}
+	if cs.SIPStatus != 0 {
+		col.That(final == cs.SIPStatus, pre+"the callee answered %d (%d)", cs.SIPStatus, final)
+		return
+	}
+	// A ringing callee: never answered, and the caller gave up with a CANCEL.
+	col.That(final == 487, pre+"the callee never answered; its INVITE was terminated with 487 (%d)", final)
+	cancelled := d.End != nil && d.End.Method == calleesim.EndedWithCancel && d.End.By == calleesim.EndedByCaller
+	col.That(cancelled, "%sthe caller ended the dialog with a CANCEL", pre)
+	if !cancelled {
+		return
+	}
+	after := d.End.At.Sub(d.InviteAt)
+	ms := float64(after.Milliseconds())
+	ar.CancelAfterInviteMs = &ms
+	// The ring timeout is the originate's, and the switch checks it in whole
+	// seconds from the moment the originate began: a 5 s timeout rings for
+	// more than 4 s and at most 5 s. The attempt's start is written just
+	// before the originate is sent, so it is the clock the bound is read on;
+	// measured from the INVITE, a ring that began late in a second could
+	// read just under 4 s although the switch behaved.
+	ring := d.End.At.Sub(a.StartedAt)
+	ringMs := float64(ring.Milliseconds())
+	ar.CancelAfterStartMs = &ringMs
+	if cs.HasRingTimeoutBound {
+		col.That(absDuration(ring-RingTimeoutSec*time.Second) <= RingTimeoutTolerance,
+			pre+"the CANCEL came at the %d s ring timeout, within %s (%.0f ms after the attempt started, %.0f ms after the INVITE)",
+			RingTimeoutSec, RingTimeoutTolerance, ringMs, ms)
+	}
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// probeRows reads the measured table off the results: every case, scenarios
+// included, since the table is what the switch and the platform did.
+func probeRows(results []ScenarioResult, cases []Case) []ProbeRow {
+	byID := map[string]Case{}
+	for _, cs := range cases {
+		byID[cs.ID] = cs
+	}
+	rows := make([]ProbeRow, 0, len(results))
+	for _, s := range results {
+		cs := byID[s.ID]
+		row := ProbeRow{Region: s.Region, ID: s.ID, Callee: s.Callee, Invites: s.Invites, SIPFinal: "none"}
+		if cs.Kind == KindScenario {
+			row.Design = cs.Outcome
+		} else {
+			row.Design = sipIntent[cs.SIPStatus]
+		}
+		if len(s.Attempts) > 0 {
+			a := s.Attempts[0]
+			row.HangupCause, row.Outcome, row.Source = a.HangupCause, a.Outcome, a.Source
+			if d := a.Dialog; d != nil && d.Final != nil {
+				row.SIPFinal = fmt.Sprint(d.Final.Status)
+				if d.End != nil && d.End.Method == calleesim.EndedWithCancel {
+					row.SIPFinal += " after CANCEL"
+				}
+			}
+			if af := s.AfterFirst; af != nil {
+				row.ContactAfterFirst = af.Status
+				switch {
+				case af.Attempts == 1 && af.SystemFailures == 0:
+					row.Budget = BudgetAttempts
+				case af.Attempts == 0 && af.SystemFailures == 1:
+					row.Budget = BudgetSystem
+				case af.Attempts == 0 && af.SystemFailures == 0:
+					row.Budget = BudgetNone
+				default:
+					row.Budget = Budget(fmt.Sprintf("attempts %d, system %d", af.Attempts, af.SystemFailures))
+				}
+				if af.NextAttemptAt != nil && a.FinishedAt != nil {
+					sec := af.NextAttemptAt.Sub(*a.FinishedAt).Seconds()
+					row.RetryIntervalSec = &sec
+				}
+			}
+		}
+		if s.Contact != nil {
+			row.ContactFinal = s.Contact.Status
+			row.Attempts, row.SystemFailures = s.Contact.Attempts, s.Contact.SystemFailures
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// crossRegion asserts that the countries come out the same on every count:
+// SIP response, hangup cause, outcome, source, budget, retry interval and the
+// contact's fate. A difference is a finding, so it fails the run.
+func crossRegion(rows []ProbeRow) CheckList {
+	var col Checks
+	byID := map[string][]ProbeRow{}
+	var order []string
+	for _, p := range rows {
+		if _, seen := byID[p.ID]; !seen {
+			order = append(order, p.ID)
+		}
+		byID[p.ID] = append(byID[p.ID], p)
+	}
+	for _, id := range order {
+		list := byID[id]
+		col.That(len(list) == 2, "%s ran in both regions (%d)", id, len(list))
+		for _, p := range list[1:] {
+			q := list[0]
+			col.That(q.signature() == p.signature() && sameInterval(q.RetryIntervalSec, p.RetryIntervalSec),
+				"%s: %s and %s agree (%s | %s)", id, q.Region, p.Region, q.signature(), p.signature())
+		}
+	}
+	return col.list()
+}
+
+func (p ProbeRow) signature() string {
+	return strings.Join([]string{p.SIPFinal, p.HangupCause, p.Outcome, p.Source, string(p.Budget), p.ContactAfterFirst, p.ContactFinal,
+		fmt.Sprintf("attempts=%d system=%d invites=%d retry=%s", p.Attempts, p.SystemFailures, p.Invites, intervalText(p.RetryIntervalSec))}, " / ")
+}
+
+func sameInterval(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return absDuration(time.Duration((*a-*b)*float64(time.Second))) <= retryTolerance
+}
+
+func intervalText(sec *float64) string {
+	if sec == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%.0fs", *sec)
+}
+
+// ProbeTable renders the measured table as Markdown, one block per region.
+func ProbeTable(rows []ProbeRow) string {
+	var b strings.Builder
+	region := ""
+	for _, p := range rows {
+		if p.Region != region {
+			region = p.Region
+			fmt.Fprintf(&b, "\n### %s\n\n", region)
+			b.WriteString("| case | callee | SIP final | hangup_cause | outcome | source | budget | retry interval | after 1st | final | attempts | system failures | INVITEs | section 7.2 |\n")
+			b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d | %d | %s |\n",
+			p.ID, p.Callee, p.SIPFinal, p.HangupCause, p.Outcome, p.Source, p.Budget, intervalText(p.RetryIntervalSec),
+			p.ContactAfterFirst, p.ContactFinal, p.Attempts, p.SystemFailures, p.Invites, p.Design)
+	}
+	return b.String()
+}
+
+// collectFailures lists every failed assertion of the run, prefixed.
+func collectFailures(rep *CampaignReport) []string {
+	out := []string{}
+	for _, f := range rep.Run.Failures {
+		out = append(out, "run: "+f)
+	}
+	for _, s := range rep.Scenarios {
+		for _, f := range s.Failures {
+			out = append(out, fmt.Sprintf("%s %s: %s", s.Region, s.ID, f))
+		}
+	}
+	for _, f := range rep.CrossRegion.Failures {
+		out = append(out, "cross-region: "+f)
+	}
+	for _, a := range rep.AfterRun {
+		for _, f := range a.Failures {
+			out = append(out, a.Name+": "+f)
+		}
+	}
+	return out
+}
+
+// writeBundles writes a directory per attempt of every failed scenario
+// (bundles/<region>-<case>-<n>/): the attempt with its CDRs and the
+// simulator's dialog, the scenario's failures, and ids.txt, the identifiers
+// e2e.sh slices the switch and application logs by (call id, leg id, SIP
+// Call-ID). A failed scenario with no attempt gets one bundle for the contact.
+func writeBundles(outDir string, rep *CampaignReport) error {
+	for i := range rep.Scenarios {
+		sc := &rep.Scenarios[i]
+		if sc.Passed {
+			continue
+		}
+		write := func(name string, ids []string, attempt any) (string, error) {
+			dir := filepath.Join("bundles", name)
+			if err := os.MkdirAll(filepath.Join(outDir, dir), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(outDir, dir, "ids.txt"), []byte(strings.Join(ids, "\n")+"\n"), 0o644); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(outDir, dir, "failures.txt"), []byte(strings.Join(sc.Failures, "\n")+"\n"), 0o644); err != nil {
+				return "", err
+			}
+			return dir, writeJSON(filepath.Join(outDir, dir, "attempt.json"), attempt)
+		}
+		if len(sc.Attempts) == 0 {
+			if _, err := write(fmt.Sprintf("%s-%s-contact", sc.Region, sc.ID), []string{sc.Number, sc.DialKey}, sc); err != nil {
+				return err
+			}
+			continue
+		}
+		for j := range sc.Attempts {
+			a := &sc.Attempts[j]
+			ids := []string{a.CallID, a.LegID}
+			if a.Dialog != nil {
+				ids = append(ids, a.Dialog.CallID)
+			}
+			dir, err := write(fmt.Sprintf("%s-%s-%d", sc.Region, sc.ID, a.Index), ids, a)
+			if err != nil {
+				return err
+			}
+			a.Bundle = dir
+		}
+	}
+	return nil
+}

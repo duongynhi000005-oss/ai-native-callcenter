@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# The end-to-end smoke test: one AI outbound call through the isolated compose
-# environment of deploy/e2e (internal network, callee simulator, mock
-# provider), checked against the simulator's record and the call ledger.
+# The end-to-end tests in the isolated compose environment of deploy/e2e
+# (internal network, callee simulator, mock provider): the smoke, one AI
+# outbound call checked against the simulator's record and the call ledger;
+# then the campaign tests, two campaigns (US and CN numbers) running the
+# unanswered scenarios and the SIP-response probes of issue #245.
 #
 # Path-filtered to what can break an outbound call. The application is built
 # from the checkout; the switch image is the published one the base compose
@@ -44,15 +46,20 @@ on:
       - 'cmd/aicc-e2e/**'
       - '.github/workflows/e2e.yml'
 
+# A newer push to a pull request cancels that pull request's run. A push to
+# main never cancels or replaces another run: each gets a group of its own
+# (the run id), because inside one group even with cancel-in-progress off
+# GitHub drops a pending run when a newer one queues, and a merge's result
+# would be lost.
 concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('e2e-pr-{0}', github.ref) || format('e2e-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   smoke:
-    name: smoke
+    name: smoke and campaign
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -61,18 +68,28 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The refusal rules are plain Go; fail on them before building images.
-      - name: Guard tests
+      # The refusal rules and the campaign cases are plain Go; fail on them
+      # before building images.
+      - name: Harness unit tests
         run: go test -race ./internal/e2e/
 
       - name: Start the environment
+        id: up
         run: make e2e-up
 
       - name: Smoke
         run: make e2e-smoke
 
+      # Runs on the same environment, also when the smoke failed: the two
+      # are independent, and both results are worth having from one build.
+      # About a minute and a half (a retry is at least 60 s away).
+      - name: Campaign tests
+        if: ${{ !cancelled() && steps.up.outcome == 'success' }}
+        run: make e2e-campaign
+
       # The run directory holds the simulator's record, the CDRs, the smoke
-      # summary and every container's log; a failed up or smoke has already
+      # summary, the campaign report with its failure bundles and every
+      # container's log; a failed up, smoke or campaign run has already
       # written the logs by the time this runs.
       - name: Upload the run directory
         if: failure()

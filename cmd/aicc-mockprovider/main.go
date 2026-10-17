@@ -84,7 +84,7 @@ func main() {
 	log.Info("mockprovider listening", "addr", *addr,
 		"firstAudio", *firstAudio, "turnAudio", *turnAudio, "turnEvery", *turnEvery)
 
-	if err := http.ListenAndServe(*addr, server); err != nil {
+	if err := http.ListenAndServe(*addr, server.Handler()); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

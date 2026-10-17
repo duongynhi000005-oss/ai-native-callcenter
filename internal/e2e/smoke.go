@@ -128,7 +128,7 @@ func Smoke(ctx context.Context, cfg SmokeConfig) error {
 	if err := CheckComposeConfig(composeJSON); err != nil {
 		return err
 	}
-	if err := checkSwitch(ctx, cfg); err != nil {
+	if err := checkSwitch(ctx, cfg.ESLAddr, cfg.ESLPassword); err != nil {
 		return err
 	}
 
@@ -160,10 +160,12 @@ func Smoke(ctx context.Context, cfg SmokeConfig) error {
 	return nil
 }
 
-func checkSwitch(ctx context.Context, cfg SmokeConfig) error {
+// checkSwitch asks the switch for its gateways and refuses a run unless they
+// are exactly the bot's and the simulator's.
+func checkSwitch(ctx context.Context, addr, password string) error {
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	client, err := esl.Dial(dctx, cfg.ESLAddr, cfg.ESLPassword)
+	client, err := esl.Dial(dctx, addr, password)
 	if err != nil {
 		return fmt.Errorf("cannot ask the switch for its gateways: %w", err)
 	}
@@ -176,43 +178,11 @@ func checkSwitch(ctx context.Context, cfg SmokeConfig) error {
 }
 
 func runCall(ctx context.Context, cfg SmokeConfig, c *httpc, sum *Summary, col *collector) error {
-	// Sign in once as the administrator, mint a scoped key, and use only the
-	// key from there on: the call is placed the way a customer's integration
-	// would place it.
-	var user api.CurrentUser
-	if err := c.do(ctx, http.MethodPost, "/auth/login", api.LoginRequest{Username: cfg.Username, Password: cfg.Password}, &user, http.StatusOK); err != nil {
-		return fmt.Errorf("login: %w", err)
-	}
-	var key api.APIKeyCreated
-	if err := c.do(ctx, http.MethodPost, "/api-keys", api.APIKeyWrite{Name: "e2e-smoke", Scopes: keyScopes}, &key, http.StatusCreated); err != nil {
-		return fmt.Errorf("create api key: %w", err)
-	}
-	c.bearer = key.Secret
-	c.client.Jar = nil // the key is the only credential from here on
-
-	specBytes, err := os.ReadFile(cfg.FlowFile)
-	if err != nil {
+	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, "e2e-smoke", keyScopes); err != nil {
 		return err
 	}
-	var spec api.FlowSpec
-	if err := json.Unmarshal(specBytes, &spec); err != nil {
-		return fmt.Errorf("flow file: %w", err)
-	}
-	var flow api.Flow
-	if err := c.do(ctx, http.MethodPost, "/flows", api.FlowCreate{Slug: "e2e-smoke-" + cfg.DID, Name: "e2e smoke " + cfg.DID, Spec: spec}, &flow, http.StatusCreated); err != nil {
-		return fmt.Errorf("create flow: %w", err)
-	}
-	if err := c.do(ctx, http.MethodPost, "/flows/"+flow.FlowID.String()+"/publish", api.FlowPublish{}, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent); err != nil {
-		return fmt.Errorf("publish flow: %w", err)
-	}
-	yes := true
-	no := false
-	flowID := flow.FlowID
-	var did api.DID
-	if err := c.do(ctx, http.MethodPost, "/dids", api.DIDWrite{
-		Number: cfg.DID, FlowID: &flowID, AllowOutbound: &yes, AllowInbound: &no, IsEnabled: &yes,
-	}, &did, http.StatusCreated); err != nil {
-		return fmt.Errorf("create did: %w", err)
+	if _, err := c.publishFlowAndDID(ctx, cfg.FlowFile, "e2e-smoke-"+cfg.DID, "e2e smoke "+cfg.DID, cfg.DID); err != nil {
+		return err
 	}
 
 	// What the environment holds before the call, so that "exactly one" means
@@ -240,7 +210,7 @@ func runCall(ctx context.Context, cfg SmokeConfig, c *httpc, sum *Summary, col *
 
 	// The simulator ends the call by itself (its scenario says when); wait for
 	// the dialog to end and the ledger row to appear.
-	report, err := waitDialogEnded(ctx, c, cfg, len(pre.Dialogs)+1)
+	report, err := waitDialogEnded(ctx, c, cfg, len(pre.Dialogs))
 	if err != nil {
 		_ = writeJSON(filepath.Join(cfg.OutDir, "calleesim-report.json"), report)
 		return err
@@ -264,6 +234,53 @@ func runCall(ctx context.Context, cfg SmokeConfig, c *httpc, sum *Summary, col *
 	col.that(all.Total == before.Total+1, "the ledger grew by exactly one row (%d -> %d)", before.Total, all.Total)
 	assertCDR(cdrs, callID, cfg, sum, col)
 	return nil
+}
+
+// signInWithKey signs in once as the administrator, mints a scoped key, and
+// uses only the key from there on: a call is placed, and a campaign driven,
+// the way a customer's integration would.
+func (c *httpc) signInWithKey(ctx context.Context, username, password, keyName string, scopes []string) error {
+	var user api.CurrentUser
+	if err := c.do(ctx, http.MethodPost, "/auth/login", api.LoginRequest{Username: username, Password: password}, &user, http.StatusOK); err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+	var key api.APIKeyCreated
+	if err := c.do(ctx, http.MethodPost, "/api-keys", api.APIKeyWrite{Name: keyName, Scopes: scopes}, &key, http.StatusCreated); err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+	c.bearer = key.Secret
+	c.client.Jar = nil // the key is the only credential from here on
+	return nil
+}
+
+// publishFlowAndDID publishes the flow in flowFile under slug and name, and
+// creates an enabled DID that allows outbound calls and runs it.
+func (c *httpc) publishFlowAndDID(ctx context.Context, flowFile, slug, name, number string) (api.DID, error) {
+	specBytes, err := os.ReadFile(flowFile)
+	if err != nil {
+		return api.DID{}, err
+	}
+	var spec api.FlowSpec
+	if err := json.Unmarshal(specBytes, &spec); err != nil {
+		return api.DID{}, fmt.Errorf("flow file: %w", err)
+	}
+	var flow api.Flow
+	if err := c.do(ctx, http.MethodPost, "/flows", api.FlowCreate{Slug: slug, Name: name, Spec: spec}, &flow, http.StatusCreated); err != nil {
+		return api.DID{}, fmt.Errorf("create flow: %w", err)
+	}
+	if err := c.do(ctx, http.MethodPost, "/flows/"+flow.FlowID.String()+"/publish", api.FlowPublish{}, nil, http.StatusOK, http.StatusCreated, http.StatusNoContent); err != nil {
+		return api.DID{}, fmt.Errorf("publish flow: %w", err)
+	}
+	yes := true
+	no := false
+	flowID := flow.FlowID
+	var did api.DID
+	if err := c.do(ctx, http.MethodPost, "/dids", api.DIDWrite{
+		Number: number, FlowID: &flowID, AllowOutbound: &yes, AllowInbound: &no, IsEnabled: &yes,
+	}, &did, http.StatusCreated); err != nil {
+		return api.DID{}, fmt.Errorf("create did: %w", err)
+	}
+	return did, nil
 }
 
 func assertDialog(r calleesim.Report, priorDialogs int, cfg SmokeConfig, placedAt time.Time, sum *Summary, col *collector) {
@@ -320,23 +337,27 @@ func assertCDR(l api.CDRList, callID uuid.UUID, cfg SmokeConfig, sum *Summary, c
 	sum.CDR = &CDRSummary{Count: len(l.Items), CallType: string(cdr.CallType), Status: string(cdr.Status), To: cdr.ToNumber, DID: gotDID}
 }
 
-func waitDialogEnded(ctx context.Context, c *httpc, cfg SmokeConfig, want int) (calleesim.Report, error) {
+// waitDialogEnded waits for a dialog after the first prior ones, and for
+// every dialog after them to have ended. The earlier dialogs are not looked
+// at: a dialog refused with a final error response never records an end, so
+// a run after a campaign run would otherwise wait for dialogs that cannot end.
+func waitDialogEnded(ctx context.Context, c *httpc, cfg SmokeConfig, prior int) (calleesim.Report, error) {
 	var r calleesim.Report
 	deadline := time.Now().Add(cfg.Wait)
 	for {
-		if err := c.getJSON(ctx, cfg.CalleeSim+"/report", &r); err == nil {
-			ended := 0
-			for _, d := range r.Dialogs {
-				if d.End != nil {
-					ended++
+		if err := c.getJSON(ctx, cfg.CalleeSim+"/report", &r); err == nil && len(r.Dialogs) > prior {
+			ended := true
+			for _, d := range r.Dialogs[prior:] {
+				if d.End == nil {
+					ended = false
 				}
 			}
-			if ended >= want {
+			if ended {
 				return r, nil
 			}
 		}
 		if time.Now().After(deadline) {
-			return r, fmt.Errorf("the simulator did not record %d ended dialog(s) within %s (has %d dialog(s))", want, cfg.Wait, len(r.Dialogs))
+			return r, fmt.Errorf("the simulator did not record a new dialog that ended within %s (has %d dialog(s), %d before the call)", cfg.Wait, len(r.Dialogs), prior)
 		}
 		if err := sleep(ctx, 500*time.Millisecond); err != nil {
 			return r, err
