@@ -53,6 +53,10 @@ type Config struct {
 	DeltaAudio time.Duration
 	DeltaPace  time.Duration
 
+	// Scenario switches the server to scripted sessions (scenario.go). Nil is
+	// the default mode: a turn on a timer, never a tool.
+	Scenario *Scenario
+
 	Log *slog.Logger
 }
 
@@ -88,6 +92,13 @@ type Server struct {
 	turns    atomic.Int64
 	cut      atomic.Int64 // turns that ended without a completion
 	audioSec atomic.Int64 // milliseconds of audio sent, summed
+
+	// Scenario mode.
+	toolCalls     atomic.Int64 // tool requests sent
+	toolResults   atomic.Int64 // tool results received
+	scriptsDone   atomic.Int64
+	scriptsFailed atomic.Int64
+	unmatched     atomic.Int64 // sessions no script claimed
 }
 
 // New prepares a server. The audio it speaks is built once here and shared:
@@ -112,6 +123,13 @@ type Stats struct {
 	Turns    int64
 	Cut      int64
 	AudioSec float64
+
+	// Scenario mode only.
+	ToolCalls     int64
+	ToolResults   int64
+	ScriptsDone   int64
+	ScriptsFailed int64
+	Unmatched     int64
 }
 
 func (s *Server) Stats() Stats {
@@ -122,6 +140,12 @@ func (s *Server) Stats() Stats {
 		Turns:    s.turns.Load(),
 		Cut:      s.cut.Load(),
 		AudioSec: float64(s.audioSec.Load()) / 1000,
+
+		ToolCalls:     s.toolCalls.Load(),
+		ToolResults:   s.toolResults.Load(),
+		ScriptsDone:   s.scriptsDone.Load(),
+		ScriptsFailed: s.scriptsFailed.Load(),
+		Unmatched:     s.unmatched.Load(),
 	}
 }
 
@@ -160,15 +184,22 @@ type session struct {
 	cancelTurn chan struct{}
 
 	done chan struct{}
+
+	// scn is set in scenario mode only.
+	scn *scenarioState
 }
 
 func newSession(server *Server, conn *websocket.Conn) *session {
-	return &session{
+	s := &session{
 		server: server,
 		conn:   conn,
 		log:    server.cfg.Log,
 		done:   make(chan struct{}),
 	}
+	if server.cfg.Scenario != nil {
+		s.scn = &scenarioState{results: make(chan string, 16)}
+	}
+	return s
 }
 
 func (s *session) run() {
@@ -179,7 +210,9 @@ func (s *session) run() {
 
 	// The caller drives the first turn; after that the provider drives them,
 	// the way server-side turn detection does.
-	go s.converse()
+	if s.scn == nil {
+		go s.converse()
+	}
 
 	for {
 		_, data, err := s.conn.ReadMessage()
@@ -190,6 +223,9 @@ func (s *session) run() {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(data, &event) != nil {
+			continue
+		}
+		if s.scn != nil && s.observe(event.Type, data) {
 			continue
 		}
 		switch event.Type {

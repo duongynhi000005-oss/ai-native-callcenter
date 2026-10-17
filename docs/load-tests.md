@@ -30,6 +30,42 @@ go run ./cmd/aicc-mockprovider -addr 127.0.0.1:9099 \
     -turn-every 10s -turn-audio 5s -first-audio 400ms -speech-before 300ms
 ```
 
+**Scenario mode** (`-scenario file.json`) turns the mock into a scripted model for
+end-to-end runs that need a tool call or a bot-initiated end without a real
+provider. The default mode is unchanged. Each session plays one script:
+
+```json
+{"scripts": [
+  {"name": "high-intent lead", "instructionsContain": "Novanet", "steps": [
+    {"op": "SPEAK", "durationSec": 2},
+    {"op": "CALL_TOOL", "toolName": "record_lead",
+     "args": {"intent": "HIGH", "notes": "wants a callback"}},
+    {"op": "AWAIT_TOOL_RESULT", "timeoutSec": 10},
+    {"op": "END_SESSION"}]},
+  {"name": "default", "steps": [{"op": "SPEAK", "durationSec": 1}, {"op": "END_SESSION"}]}
+]}
+```
+
+* Steps: `SPEAK` (`durationSec`), `CALL_TOOL` (`toolName`, `args` object),
+  `AWAIT_TOOL_RESULT` (waits for the answer to the latest `CALL_TOOL`;
+  `timeoutSec`, default 10; on timeout the mock closes the socket with 1011 and
+  counts a failed script), `END_SESSION` (last step only).
+* The script starts when the application asks for the opening turn. Later
+  `response.create` and `response.cancel` events are ignored: the script, not the
+  application, decides what the model does next. `SPEAK` honours `-first-audio`,
+  `-delta-audio` and `-delta-pace` (use `-delta-pace 100ms` for real-time audio).
+* Selection: the application sends the provider no call identifier (the URL has
+  the model, the headers the key). The one per-session value on the wire is the
+  standing instructions in `session.update`, so a script is chosen by a substring of
+  them (`instructionsContain`, first match in file order); a script without it is
+  the default. A session no script claims stays silent and is counted
+  (`unmatched` in the 10 s stats line).
+* End: on the Realtime profiles a provider has no "session over" event. The
+  mock closes the WebSocket with a normal closure; the client reports the model
+  closed and the application ends the call. An abnormal close is a fatal provider
+  error and the application rescues the caller instead.
+* Unknown fields and malformed scripts are rejected at startup.
+
 **`aicc-loadgen`** is the switch's side of the bot leg: an INVITE with the
 `X-AICC-*` headers the dialplan puts on one, a PCMU offer, 20 ms frames uplink,
 and a stopwatch on every frame downlink.
