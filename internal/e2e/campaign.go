@@ -85,7 +85,57 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 		return nil, err
 	}
 
-	// Refuse before anything is sent.
+	pre, err := preflight(ctx, cfg, "e2e-campaign", campaignScopes)
+	if err != nil {
+		return nil, err
+	}
+	c, form := pre.c, pre.form
+
+	rep := &CampaignReport{StartedAt: time.Now().UTC(), DialForm: string(form), Latency: map[string]float64{}}
+	d := &driver{cfg: cfg, c: c, form: form, rep: rep, plan: defaultPlan}
+	runErr := d.run(ctx)
+
+	rep.FinishedAt = time.Now().UTC()
+	rep.DurationSec = rep.FinishedAt.Sub(rep.StartedAt).Seconds()
+	rep.Failures = collectFailures(rep)
+	if runErr != nil {
+		rep.Failures = append(rep.Failures, runIncomplete+runErr.Error())
+	}
+	rep.Passed = len(rep.Failures) == 0
+	if err := writeBundles(cfg.OutDir, rep); err != nil && runErr == nil {
+		runErr = err
+	}
+	if err := writeJSON(filepath.Join(cfg.OutDir, "report.json"), rep); err != nil && runErr == nil {
+		runErr = err
+	}
+	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)+FirstAudioTable(rep.FirstAudio)), 0o644); err != nil && runErr == nil {
+		runErr = err
+	}
+	if runErr != nil {
+		return rep, runErr
+	}
+	if !rep.Passed {
+		return rep, fmt.Errorf("%d assertion(s) failed: %s", len(rep.Failures), strings.Join(rep.Failures, "; "))
+	}
+	return rep, nil
+}
+
+// prepared is what preflight leaves a run: the signed-in client, the
+// deployment's dial form, the resolved compose configuration and the
+// simulator's scenario.
+type prepared struct {
+	c           *httpc
+	form        phonenum.DialForm
+	composeJSON []byte
+	scenario    *calleesim.Scenario
+}
+
+// preflight refuses a run before anything is sent: the configuration must be
+// the isolated environment, the simulator's and the mock provider's scenarios
+// must play what cfg's cases expect, and the switch must hold only the
+// harness's gateways. Then it waits for the application and signs in with a
+// key holding scopes.
+func preflight(ctx context.Context, cfg CampaignConfig, keyName string, scopes []string) (*prepared, error) {
 	composeJSON, err := os.ReadFile(cfg.ComposeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("read compose config: %w", err)
@@ -127,37 +177,10 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 	if err := waitReady(ctx, c.client, cfg.ReadyURL, cfg.Wait); err != nil {
 		return nil, err
 	}
-	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, "e2e-campaign", campaignScopes); err != nil {
+	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, keyName, scopes); err != nil {
 		return nil, err
 	}
-
-	rep := &CampaignReport{StartedAt: time.Now().UTC(), DialForm: string(form), Latency: map[string]float64{}}
-	d := &driver{cfg: cfg, c: c, form: form, rep: rep, plan: defaultPlan}
-	runErr := d.run(ctx)
-
-	rep.FinishedAt = time.Now().UTC()
-	rep.DurationSec = rep.FinishedAt.Sub(rep.StartedAt).Seconds()
-	rep.Failures = collectFailures(rep)
-	if runErr != nil {
-		rep.Failures = append(rep.Failures, runIncomplete+runErr.Error())
-	}
-	rep.Passed = len(rep.Failures) == 0
-	if err := writeBundles(cfg.OutDir, rep); err != nil && runErr == nil {
-		runErr = err
-	}
-	if err := writeJSON(filepath.Join(cfg.OutDir, "report.json"), rep); err != nil && runErr == nil {
-		runErr = err
-	}
-	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)+FirstAudioTable(rep.FirstAudio)), 0o644); err != nil && runErr == nil {
-		runErr = err
-	}
-	if runErr != nil {
-		return rep, runErr
-	}
-	if !rep.Passed {
-		return rep, fmt.Errorf("%d assertion(s) failed: %s", len(rep.Failures), strings.Join(rep.Failures, "; "))
-	}
-	return rep, nil
+	return &prepared{c: c, form: form, composeJSON: composeJSON, scenario: scenario}, nil
 }
 
 // runIncomplete prefixes the failure of a run that stopped before its
