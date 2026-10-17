@@ -4,7 +4,9 @@
 # (internal network, callee simulator, mock provider): the smoke, one AI
 # outbound call checked against the simulator's record and the call ledger;
 # then the campaign tests, two campaigns (US and CN numbers) running the
-# unanswered scenarios and the SIP-response probes of issue #245.
+# unanswered scenarios and the SIP-response probes of issue #245, the answered
+# scenarios of issue #246 (no redial after an answer, a HIGH lead's callback)
+# and the run-wide invariants checked after every run.
 #
 # Path-filtered to what can break an outbound call. The application is built
 # from the checkout; the switch image is the published one the base compose
@@ -19,6 +21,10 @@ on:
       - 'internal/outbound/**'
       - 'internal/voice/**'
       - 'internal/telephony/**'
+      - 'internal/aicall/**'
+      - 'internal/flow/**'
+      - 'internal/provider/**'
+      - 'internal/store/campaign*'
       - 'internal/mockprovider/**'
       - 'internal/calleesim/**'
       - 'internal/e2e/**'
@@ -36,6 +42,10 @@ on:
       - 'internal/outbound/**'
       - 'internal/voice/**'
       - 'internal/telephony/**'
+      - 'internal/aicall/**'
+      - 'internal/flow/**'
+      - 'internal/provider/**'
+      - 'internal/store/campaign*'
       - 'internal/mockprovider/**'
       - 'internal/calleesim/**'
       - 'internal/e2e/**'
@@ -82,7 +92,8 @@ jobs:
 
       # Runs on the same environment, also when the smoke failed: the two
       # are independent, and both results are worth having from one build.
-      # About a minute and a half (a retry is at least 60 s away).
+      # About a minute and a half (a retry is at least 60 s away), plus the
+      # wait for the application's counters before the invariants.
       - name: Campaign tests
         if: ${{ !cancelled() && steps.up.outcome == 'success' }}
         run: make e2e-campaign
