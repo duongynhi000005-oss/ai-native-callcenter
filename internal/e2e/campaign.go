@@ -85,7 +85,57 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 		return nil, err
 	}
 
-	// Refuse before anything is sent.
+	pre, err := preflight(ctx, cfg, "e2e-campaign", campaignScopes)
+	if err != nil {
+		return nil, err
+	}
+	c, form := pre.c, pre.form
+
+	rep := &CampaignReport{StartedAt: time.Now().UTC(), DialForm: string(form), Latency: map[string]float64{}}
+	d := &driver{cfg: cfg, c: c, form: form, rep: rep, plan: defaultPlan}
+	runErr := d.run(ctx)
+
+	rep.FinishedAt = time.Now().UTC()
+	rep.DurationSec = rep.FinishedAt.Sub(rep.StartedAt).Seconds()
+	rep.Failures = collectFailures(rep)
+	if runErr != nil {
+		rep.Failures = append(rep.Failures, runIncomplete+runErr.Error())
+	}
+	rep.Passed = len(rep.Failures) == 0
+	if err := writeBundles(cfg.OutDir, rep); err != nil && runErr == nil {
+		runErr = err
+	}
+	if err := writeJSON(filepath.Join(cfg.OutDir, "report.json"), rep); err != nil && runErr == nil {
+		runErr = err
+	}
+	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)+FirstAudioTable(rep.FirstAudio)), 0o644); err != nil && runErr == nil {
+		runErr = err
+	}
+	if runErr != nil {
+		return rep, runErr
+	}
+	if !rep.Passed {
+		return rep, fmt.Errorf("%d assertion(s) failed: %s", len(rep.Failures), strings.Join(rep.Failures, "; "))
+	}
+	return rep, nil
+}
+
+// prepared is what preflight leaves a run: the signed-in client, the
+// deployment's dial form, the resolved compose configuration and the
+// simulator's scenario.
+type prepared struct {
+	c           *httpc
+	form        phonenum.DialForm
+	composeJSON []byte
+	scenario    *calleesim.Scenario
+}
+
+// preflight refuses a run before anything is sent: the configuration must be
+// the isolated environment, the simulator's and the mock provider's scenarios
+// must play what cfg's cases expect, and the switch must hold only the
+// harness's gateways. Then it waits for the application and signs in with a
+// key holding scopes.
+func preflight(ctx context.Context, cfg CampaignConfig, keyName string, scopes []string) (*prepared, error) {
 	composeJSON, err := os.ReadFile(cfg.ComposeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("read compose config: %w", err)
@@ -127,37 +177,10 @@ func RunCampaigns(ctx context.Context, cfg CampaignConfig) (*CampaignReport, err
 	if err := waitReady(ctx, c.client, cfg.ReadyURL, cfg.Wait); err != nil {
 		return nil, err
 	}
-	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, "e2e-campaign", campaignScopes); err != nil {
+	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, keyName, scopes); err != nil {
 		return nil, err
 	}
-
-	rep := &CampaignReport{StartedAt: time.Now().UTC(), DialForm: string(form), Latency: map[string]float64{}}
-	d := &driver{cfg: cfg, c: c, form: form, rep: rep}
-	runErr := d.run(ctx)
-
-	rep.FinishedAt = time.Now().UTC()
-	rep.DurationSec = rep.FinishedAt.Sub(rep.StartedAt).Seconds()
-	rep.Failures = collectFailures(rep)
-	if runErr != nil {
-		rep.Failures = append(rep.Failures, runIncomplete+runErr.Error())
-	}
-	rep.Passed = len(rep.Failures) == 0
-	if err := writeBundles(cfg.OutDir, rep); err != nil && runErr == nil {
-		runErr = err
-	}
-	if err := writeJSON(filepath.Join(cfg.OutDir, "report.json"), rep); err != nil && runErr == nil {
-		runErr = err
-	}
-	if err := os.WriteFile(filepath.Join(cfg.OutDir, "probes.md"), []byte(ProbeTable(rep.Probes)+FirstAudioTable(rep.FirstAudio)), 0o644); err != nil && runErr == nil {
-		runErr = err
-	}
-	if runErr != nil {
-		return rep, runErr
-	}
-	if !rep.Passed {
-		return rep, fmt.Errorf("%d assertion(s) failed: %s", len(rep.Failures), strings.Join(rep.Failures, "; "))
-	}
-	return rep, nil
+	return &prepared{c: c, form: form, composeJSON: composeJSON, scenario: scenario}, nil
 }
 
 // runIncomplete prefixes the failure of a run that stopped before its
@@ -363,12 +386,26 @@ func stepProblems(label, key string, steps []Step, list []calleesim.Behaviour) [
 	return problems
 }
 
+// campaignPlan is what the driver provisions for each region: the campaign's
+// ring timeout and attempt budget, and the DID's outbound line limit.
+type campaignPlan struct {
+	RingTimeoutSec int
+	MaxAttempts    int
+	// MaxOutboundChannels is the DID's maxOutboundChannels; nil means no
+	// limit.
+	MaxOutboundChannels *int
+}
+
+// defaultPlan is the policy of the campaign scenarios and probes.
+var defaultPlan = campaignPlan{RingTimeoutSec: RingTimeoutSec, MaxAttempts: MaxAttempts}
+
 // driver is one run.
 type driver struct {
 	cfg  CampaignConfig
 	c    *httpc
 	form phonenum.DialForm
 	rep  *CampaignReport
+	plan campaignPlan
 
 	regions []*regionRun
 	dnc     []string
@@ -382,6 +419,9 @@ type driver struct {
 	callbacks       []api.Callback
 	startedAt       time.Time
 	lastObservation time.Time
+	// onPoll, when set, runs after every successful observation while the
+	// driver waits (the capacity runs sample the lines in use with it).
+	onPoll func(ctx context.Context)
 }
 
 // regionRun is one campaign of the run as the driver tracks it.
@@ -459,7 +499,9 @@ func (d *driver) run(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := d.settleCounters(ctx, answeredDialogs(post.Dialogs[min(d.calleeBase, len(post.Dialogs)):])); err != nil {
+	// Every answered dialog reaches a bot here: no case overflows, and the
+	// run places no direct call.
+	if err := d.settleCounters(ctx, answeredDialogs(post.Dialogs[min(d.calleeBase, len(post.Dialogs)):]), nil); err != nil {
 		return err
 	}
 	// After the attempts were seen finished: a HIGH lead's callback is
@@ -489,7 +531,7 @@ func (d *driver) provision(ctx context.Context, r Region, usedDIDs map[string]bo
 		}
 		var err error
 		slug := "e2e-campaign-" + strings.ToLower(r.Code) + "-" + number
-		did, err = d.c.publishFlowAndDID(ctx, d.cfg.FlowFile, slug, "e2e campaign "+r.Code+" "+number, number)
+		did, err = d.c.publishFlowAndDID(ctx, d.cfg.FlowFile, slug, "e2e campaign "+r.Code+" "+number, number, d.plan.MaxOutboundChannels)
 		if err == nil {
 			usedDIDs[number] = true
 			break
@@ -517,8 +559,8 @@ func (d *driver) provision(ctx context.Context, r Region, usedDIDs map[string]bo
 	}
 
 	maxConcurrent := len(d.cfg.Cases)
-	ring := RingTimeoutSec
-	attempts, system := MaxAttempts, MaxSystemRetries
+	ring := d.plan.RingTimeoutSec
+	attempts, system := d.plan.MaxAttempts, MaxSystemRetries
 	base, factor, capSec := RetryIntervalSec, 1, RetryIntervalSec
 	intervals := api.CampaignIntervalSec{
 		"NO_ANSWER": RetryIntervalSec, "BUSY": RetryIntervalSec, "REJECTED": RetryIntervalSec, "UNKNOWN": RetryIntervalSec,
@@ -587,12 +629,13 @@ const (
 // and the dialer counts it afterwards; a bot slot and a DID line are given
 // back when the switch reports the hangup; the mock counts a session closed
 // when its socket does. So the driver waits, up to counterSettle, until every
-// counter the invariants read has caught up (bot slots and the run's DID
-// lines at zero, the finished-attempt count and both session counts at what
-// the run shows, no session live), then waits counterConfirm more and keeps
-// that reading, whether or not it caught up: the checks judge it, and the
-// wait is reported.
-func (d *driver) settleCounters(ctx context.Context, answered int) error {
+// counter the invariants read has caught up (bot slots and the lines of the
+// run's DIDs and of extraDIDs at zero, the finished-attempt count at what the
+// run shows, both session counts at sessions, no session live), then waits
+// counterConfirm more and keeps that reading, whether or not it caught up: the
+// checks judge it, and the wait is reported. A series that does not exist
+// reads as zero here; the checks decide whether it must exist.
+func (d *driver) settleCounters(ctx context.Context, sessions int, extraDIDs []string) error {
 	attempts := 0
 	for _, rr := range d.regions {
 		for _, list := range rr.attempts {
@@ -601,12 +644,16 @@ func (d *driver) settleCounters(ctx context.Context, answered int) error {
 	}
 	caughtUp := func(m Metrics, s mockprovider.Stats) bool {
 		for _, state := range []string{"IN_USE", "RESERVED"} {
-			if v, n := m.Sum(MetricBotSlots, map[string]string{"state": state}); n != 1 || v != 0 {
+			if v, n := m.Sum(MetricBotSlots, map[string]string{"state": state}); n > 1 || v != 0 {
 				return false
 			}
 		}
+		dids := append([]string{}, extraDIDs...)
 		for _, rr := range d.regions {
-			if v, n := m.Sum(MetricDIDOutboundInUse, map[string]string{"did": rr.did.Number}); n != 1 || v != 0 {
+			dids = append(dids, rr.did.Number)
+		}
+		for _, did := range dids {
+			if v, n := m.Sum(MetricDIDOutboundInUse, map[string]string{"did": did}); n != 1 || v != 0 {
 				return false
 			}
 		}
@@ -614,8 +661,8 @@ func (d *driver) settleCounters(ctx context.Context, answered int) error {
 		after, _ := m.Sum(MetricCampaignAttempts, nil)
 		sb, _ := d.metricsBefore.Sum(MetricProviderSessions, nil)
 		sa, _ := m.Sum(MetricProviderSessions, nil)
-		return after-before == float64(attempts) && sa-sb == float64(answered) &&
-			s.Total-d.providerBefore.Total == int64(answered) && s.Live == 0
+		return after-before == float64(attempts) && sa-sb == float64(sessions) &&
+			s.Total-d.providerBefore.Total == int64(sessions) && s.Live == 0
 	}
 	start := time.Now()
 	deadline := start.Add(counterSettle)
@@ -786,6 +833,9 @@ func (d *driver) waitUntil(ctx context.Context, what string, done func() bool) e
 	deadline := time.Now().Add(d.cfg.Wait)
 	for {
 		err := d.observe(ctx)
+		if err == nil && d.onPoll != nil {
+			d.onPoll(ctx)
+		}
 		if err == nil && done() {
 			return nil
 		}

@@ -63,9 +63,14 @@ type RunView struct {
 	ObservedAt time.Time
 	Regions    []RegionView
 	// Dialogs are the simulator's dialogs that began during the run, in
-	// order; Callee is its whole record.
+	// order, except those of Direct; Callee is its whole record.
 	Dialogs []calleesim.DialogRecord
 	Callee  calleesim.Report
+	// Direct are the calls the run placed itself through POST /calls,
+	// outside any campaign (issue #247's K1 slot holders); empty for the
+	// campaign scenarios. Each holds a bot slot and opens a provider session
+	// like a campaign call, and the invariants count them where they apply.
+	Direct []DirectCall
 	// Provider is the mock provider's session counters around the run.
 	Provider ProviderCount
 	// MetricsBefore and MetricsAfter are the application's counters read
@@ -113,6 +118,25 @@ type ContactView struct {
 type ProviderCount struct {
 	Before mockprovider.Stats `json:"before"`
 	After  mockprovider.Stats `json:"after"`
+}
+
+// DirectCall is one call the run placed itself, outside any campaign.
+type DirectCall struct {
+	Number string `json:"number"`
+	// DialKey is the Request-URI user part the simulator saw.
+	DialKey string    `json:"dialKey"`
+	DID     string    `json:"did"`
+	CallID  string    `json:"callId"`
+	Placed  time.Time `json:"placedAt"`
+	// Dialog is the simulator's record of its INVITE; CDRs the ledger's rows
+	// for its call id.
+	Dialog *calleesim.DialogRecord `json:"dialog,omitempty"`
+	CDRs   []api.CDR               `json:"cdrs"`
+}
+
+// IsAnswered reports whether the callee answered the call.
+func (d DirectCall) IsAnswered() bool {
+	return d.Dialog != nil && d.Dialog.Final != nil && d.Dialog.Final.Status == 200
 }
 
 // Sessions is how many sessions the mock opened during the run.

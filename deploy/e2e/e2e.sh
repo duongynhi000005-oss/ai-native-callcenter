@@ -6,6 +6,7 @@
 #   deploy/e2e/e2e.sh up      fresh database, application built from this tree
 #   deploy/e2e/e2e.sh smoke   place one AI outbound call and check the result
 #   deploy/e2e/e2e.sh campaign  run the campaign scenarios, probes and invariants (#245, #246)
+#   deploy/e2e/e2e.sh capacity  run the capacity scenarios K1 and K2, each in an application start of its own (#247)
 #   deploy/e2e/e2e.sh down    collect logs, remove containers, volumes, network
 #   deploy/e2e/e2e.sh config  print the resolved compose configuration
 #
@@ -28,6 +29,11 @@ TOOLS="$WORK/tools"
 APP_IP="$NET.10"; FS_IP="$NET.11"; MOCK_IP="$NET.12"; CALLEE_IP="$NET.13"
 TO_NUMBER=13800000001
 
+# The application's bot capacity and overflow hold for its next start; empty
+# is the application's default. Only cmd_capacity changes them, and nothing
+# from the caller's shell reaches them.
+APP_BOT_MAX_CALLS=""; APP_BOT_INBOUND_RESERVE=""; APP_OVERFLOW_HOLD=""
+
 # Compose runs with a scrubbed environment: nothing from the caller's shell
 # (provider keys, AICC_* settings, a stray .env) can reach an interpolation.
 # Only the Docker client's own variables and the harness's are passed.
@@ -39,6 +45,8 @@ compose() {
     E2E_APP_IP="$APP_IP" E2E_FS_IP="$FS_IP" E2E_MOCK_IP="$MOCK_IP" E2E_CALLEESIM_IP="$CALLEE_IP" \
     E2E_UID="$(id -u)" E2E_GID="$(id -g)" FS_EXTERNAL_IP="$FS_IP" \
     ${E2E_OUTBOUND_ENDPOINT:+E2E_OUTBOUND_ENDPOINT="$E2E_OUTBOUND_ENDPOINT"} \
+    E2E_BOT_MAX_CALLS="$APP_BOT_MAX_CALLS" E2E_BOT_INBOUND_RESERVE="$APP_BOT_INBOUND_RESERVE" \
+    E2E_OVERFLOW_HOLD="$APP_OVERFLOW_HOLD" \
     docker compose -p "$PROJECT" --project-directory "$ROOT/deploy" \
     --env-file "$E2E/e2e.env" -f "$ROOT/deploy/docker-compose.yml" -f "$E2E/docker-compose.yml" "$@"
 }
@@ -177,6 +185,66 @@ cmd_campaign() {
   fi
 }
 
+# restart_app recreates the application with the APP_* settings in effect, so
+# a scenario runs in an application start of its own. The configuration is
+# rendered (and refused by the guard) first: the driver checks the scenario's
+# settings in that same file.
+restart_app() {
+  render
+  local t=$SECONDS
+  compose up -d --no-deps --force-recreate --wait --wait-timeout 180 aicc >&2
+  say "application restarted for $1 in $((SECONDS - t)) s (AICC_BOT_MAX_CALLS='$APP_BOT_MAX_CALLS' AICC_BOT_INBOUND_RESERVE='$APP_BOT_INBOUND_RESERVE' AICC_OVERFLOW_HOLD='$APP_OVERFLOW_HOLD')"
+}
+
+run_capacity() {
+  local sc="$1" dir="$2" t=$SECONDS
+  if compose run --rm -T --no-deps --entrypoint /usr/local/bin/aicc-e2e-campaign.test driver \
+      -test.v -test.run '^TestCapacity$' -test.timeout 10m -e2e.capacity "$sc" \
+      -e2e.api "http://$APP_IP:8080" -e2e.ready "http://$APP_IP:9090/readyz" \
+      -e2e.metrics "http://$APP_IP:9090/metrics" \
+      -e2e.calleesim "http://$CALLEE_IP:8771" -e2e.mockprovider "http://$MOCK_IP:9099" \
+      -e2e.esl "$FS_IP:18021" -e2e.compose-config /run/e2e/compose.json \
+      -e2e.scenario /etc/e2e/scenario.json -e2e.provider-scenario /etc/e2e/provider-scenario.json \
+      -e2e.flow /etc/e2e/flow.json -e2e.username admin -e2e.out "/run/e2e/$dir/$sc" >&2; then
+    say "$sc passed in $((SECONDS - t)) s"
+  else
+    say "$sc FAILED after $((SECONDS - t)) s"
+    return 1
+  fi
+}
+
+cmd_capacity() {
+  [ -n "$(compose ps -q aicc 2>/dev/null)" ] || { say "the environment is not up; run: make e2e-up"; exit 1; }
+  local id rc=0 sc t0=$SECONDS
+  id="capacity-$(date -u +%Y%m%dT%H%M%SZ)"
+  # A fresh record: the simulator counts a number's INVITEs from its start.
+  compose restart calleesim >&2
+  # K1 lowers the bot capacity and K2 keeps the defaults; each gets an
+  # application start of its own, and K2 last leaves the application as
+  # e2e.sh up started it.
+  for sc in K1 K2; do
+    case "$sc" in
+      K1) APP_BOT_MAX_CALLS=3; APP_BOT_INBOUND_RESERVE=0; APP_OVERFLOW_HOLD=1500ms ;;
+      K2) APP_BOT_MAX_CALLS=""; APP_BOT_INBOUND_RESERVE=""; APP_OVERFLOW_HOLD="" ;;
+    esac
+    if ! restart_app "$sc"; then rc=1; break; fi
+    run_capacity "$sc" "$id" || rc=1
+  done
+  if [ -n "$APP_BOT_MAX_CALLS$APP_BOT_INBOUND_RESERVE$APP_OVERFLOW_HOLD" ]; then
+    APP_BOT_MAX_CALLS=""; APP_BOT_INBOUND_RESERVE=""; APP_OVERFLOW_HOLD=""
+    restart_app defaults || rc=1
+  fi
+  for sc in K1 K2; do
+    if [ -f "$RUN/$id/$sc/capacity.md" ]; then cat "$RUN/$id/$sc/capacity.md"; fi
+  done
+  if [ "$rc" -ne 0 ]; then
+    collect_logs
+    say "capacity tests FAILED after $((SECONDS - t0)) s. Reports and logs: $RUN"
+    exit 1
+  fi
+  say "capacity tests passed in $((SECONDS - t0)) s. Results: $RUN/$id"
+}
+
 cmd_down() {
   if [ -n "$(compose ps -aq 2>/dev/null)" ]; then collect_logs; fi
   compose down -v --remove-orphans >&2
@@ -192,7 +260,8 @@ case "${1:-}" in
   up) cmd_up ;;
   smoke) cmd_smoke ;;
   campaign) cmd_campaign ;;
+  capacity) cmd_capacity ;;
   down) cmd_down ;;
   config) build_tools; render; cat "$RUN/compose.json" ;;
-  *) echo "usage: $0 up|smoke|campaign|down|config" >&2; exit 2 ;;
+  *) echo "usage: $0 up|smoke|campaign|capacity|down|config" >&2; exit 2 ;;
 esac

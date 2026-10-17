@@ -73,6 +73,10 @@ e2e-smoke: ## Place one AI outbound call in the end-to-end environment and check
 e2e-campaign: ## Run the campaign scenarios and probes in the end-to-end environment (two campaigns, US and CN; a few minutes)
 	deploy/e2e/e2e.sh campaign
 
+.PHONY: e2e-capacity
+e2e-capacity: ## Run the capacity scenarios (bot-slot overflow, DID line limit) in the end-to-end environment, each in its own application start
+	deploy/e2e/e2e.sh capacity
+
 .PHONY: e2e-down
 e2e-down: ## Collect logs and remove the end-to-end environment, its volumes and its network
 	deploy/e2e/e2e.sh down

@@ -11,6 +11,7 @@ API, with a scoped API key.
 make e2e-up        # fresh database, application built from the working tree
 make e2e-smoke     # one AI outbound call; checks the callee's record and the CDR
 make e2e-campaign  # two campaigns (US, CN): answered and unanswered outcomes, SIP probes, run-wide invariants
+make e2e-capacity  # bot-slot overflow (K1) and the DID outbound line limit (K2), each in its own application start
 make e2e-down      # collect logs, remove containers, volumes and the network
 ```
 
@@ -208,6 +209,74 @@ call id, leg id or SIP Call-ID, sliced by `e2e.sh` from `logs/aicc.log` and
 `logs/freeswitch-file.log` (the switch's own log file, which prefixes a call's
 lines with its channel uuid, the leg id).
 
+## Capacity tests
+
+`make e2e-capacity` runs the tests of `internal/e2e/capacity*.go` (issue
+#247), from the same test binary as the campaign tests, against an
+environment that is up. Each scenario needs an application start of its own,
+so the limits it lowers never reach the other runs: `e2e.sh capacity`
+recreates the application container (`docker compose up --force-recreate
+--no-deps aicc`, the database and the switch untouched) with the scenario's
+settings, renders and guards the configuration it used, and the driver
+refuses to run when that configuration does not hold the scenario's values.
+K1 runs first; K2 runs on the defaults, so the environment is left as `e2e.sh
+up` started it. The settings come from `E2E_BOT_MAX_CALLS`,
+`E2E_BOT_INBOUND_RESERVE` and `E2E_OVERFLOW_HOLD` in the compose overlay, which
+only `e2e.sh capacity` sets (empty is the application's default). The
+simulator is restarted first, as for the campaign tests.
+
+| scenario | setup | callee (`scenario.json`) | asserted |
+| --- | --- | --- | --- |
+| K1 | `AICC_BOT_MAX_CALLS=3`, `AICC_BOT_INBOUND_RESERVE=0`, `AICC_OVERFLOW_HOLD=1500ms`; one US campaign of three contacts, ring timeout 8 s; once all three are ringing, two single AI calls (`POST /calls`, `AI_OUTBOUND`) from a DID of their own | contacts `+1 202 555 0121`–`23`: 180, 200 at 5 s, BYE 6 s after the answer; slot holders `…0131`, `…0132`: 200 at 300 ms, BYE 12 s later | 1 `ANSWERED` and 2 `OVERFLOW`; each `OVERFLOW` leg: CDR cause `OVERFLOW`, answered, no `BOT` leg, hung up by the platform with a BYE, no downlink window above silence; the `ANSWERED` leg was heard (so the measurement works on this path); every contact `DONE`, one attempt, one INVITE (no redial); `aicc_bot_overflow_total` and `aicc_campaign_overflow_total` moved by 2 |
+| K2 | the defaults; two campaigns (US, CN) at once, each on its own DID created with `maxOutboundChannels: 2`, ring timeout 8 s, `maxAttempts` 1 | six contacts per country (`…0141`–`46`, `+86 139 8888 6641`–`46`): 180, never answered | per DID, the simulator's peak of dialogs up at once is 2: never above the limit, and reaching it; all six contacts attempted once, `NO_ANSWER`, cancelled, `EXHAUSTED`; the line gauge never read above 2 in its samples; the dialer counted `DID_LINES` as a reason to hold back |
+
+Why K1 is not "bot slot limit 1": the dialer admits a call only while slots
+held, plus the expected answers of the legs ringing, plus one fit in the
+capacity, and a campaign with fewer than fifty rung samples expects every
+ringing leg to answer (design 10 section 6.3, `internal/dialer/admit.go`). With
+one slot no second leg ever rings, whatever the callee does, so three
+contacts can never answer together. K1 therefore lets the campaign put three
+contacts on the line with three free slots, and then takes two slots away the
+way a production deployment loses them, to calls the campaign does not see
+(design 10 names an inbound surge): two single AI calls that answer at once
+and stay up. When the contacts answer, one slot is free. The run first holds
+itself to that order (every contact ringing before the first answer, both slot
+holders answered before it and still up after the last overflow) and fails
+when it did not hold, rather than report a split it did not set up. Which
+contact gets the slot is a race between three answers; the scenario asserts
+the split, not the winner. The one free slot is global, so K1 uses one
+country: a second one would share it and neither could be held to one
+`ANSWERED` and two `OVERFLOW`.
+
+Reported, never asserted: each call's answer and end times from the run's
+first INVITE, each `OVERFLOW` leg's hold (200 OK to the platform's BYE) next to
+the configured hold, the spread of the three answers, the application's own
+mean hold (`aicc_bot_overflow_hold_ms`), the line gauge's sampled peak, and
+whether a campaign read `AT_CAPACITY`.
+
+The run-wide invariants (`AfterRunChecks`) run on both, with these
+adaptations, each written into the check it changes:
+
+- provider sessions: an `OVERFLOW` attempt was answered and met no bot, so it
+  opens no session and its CDR must have no `BOT` leg; a direct call that was
+  answered opens one. The counts are held to answered dialogs − `OVERFLOW` +
+  answered direct calls. K1 has no call that only rings, so that check is
+  recorded as not applicable (and fails if one did); in K2, nothing opens a
+  session, and the application, started for the run, may have no series of
+  its session counter, which then reads as zero;
+- no INVITE after an answer: K2 answers nothing, so it must answer no number,
+  and its cardinality is that it dialled;
+- capacity released: K2's application start may have no bot slot series
+  (nothing took a slot), which reads as zero; K1's direct calls' DID must have
+  its line series back at 0 too;
+- the direct calls' dialogs are not the campaigns' (`RunView.Direct`), so
+  "every attempt that created a channel has one CDR" and "every dialog belongs
+  to a contact" count only the campaigns' dialogs.
+
+A run writes `capacity-<time>/K1/` and `capacity-<time>/K2/`: `report.json`
+(every assertion and every call) and `capacity.md` (the tables, also printed
+by `e2e.sh`).
+
 ## Reading a run
 
 `bin/e2e/<project>/run/` (git-ignored) holds, after a run:
@@ -220,7 +289,8 @@ lines with its channel uuid, the leg id).
 | `campaign-<time>/report.json` | the campaign run: every assertion, per region, case and attempt |
 | `campaign-<time>/probes.md` | the measured table, one block per country, and the first-audio times |
 | `campaign-<time>/bundles/` | per failed attempt: attempt, dialog, CDRs and the sliced logs |
-| `logs/<service>.log` | each container's output, written on a failed up, smoke or campaign run and by `e2e-down` |
+| `capacity-<time>/K1/`, `capacity-<time>/K2/` | each capacity scenario's `report.json` and `capacity.md` |
+| `logs/<service>.log` | each container's output, written on a failed up, smoke, campaign or capacity run and by `e2e-down` |
 | `logs/freeswitch-file.log` | the switch's log file, each call's lines prefixed with its leg id |
 | `logs/sofia-status.txt` | the switch's gateways |
 | `compose.json` | the resolved configuration the guard checked |

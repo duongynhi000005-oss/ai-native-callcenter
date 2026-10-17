@@ -181,7 +181,7 @@ func runCall(ctx context.Context, cfg SmokeConfig, c *httpc, sum *Summary, col *
 	if err := c.signInWithKey(ctx, cfg.Username, cfg.Password, "e2e-smoke", keyScopes); err != nil {
 		return err
 	}
-	if _, err := c.publishFlowAndDID(ctx, cfg.FlowFile, "e2e-smoke-"+cfg.DID, "e2e smoke "+cfg.DID, cfg.DID); err != nil {
+	if _, err := c.publishFlowAndDID(ctx, cfg.FlowFile, "e2e-smoke-"+cfg.DID, "e2e smoke "+cfg.DID, cfg.DID, nil); err != nil {
 		return err
 	}
 
@@ -254,8 +254,9 @@ func (c *httpc) signInWithKey(ctx context.Context, username, password, keyName s
 }
 
 // publishFlowAndDID publishes the flow in flowFile under slug and name, and
-// creates an enabled DID that allows outbound calls and runs it.
-func (c *httpc) publishFlowAndDID(ctx context.Context, flowFile, slug, name, number string) (api.DID, error) {
+// creates an enabled DID that allows outbound calls and runs it, with
+// maxOutbound as its outbound line limit (nil: none).
+func (c *httpc) publishFlowAndDID(ctx context.Context, flowFile, slug, name, number string, maxOutbound *int) (api.DID, error) {
 	specBytes, err := os.ReadFile(flowFile)
 	if err != nil {
 		return api.DID{}, err
@@ -277,6 +278,7 @@ func (c *httpc) publishFlowAndDID(ctx context.Context, flowFile, slug, name, num
 	var did api.DID
 	if err := c.do(ctx, http.MethodPost, "/dids", api.DIDWrite{
 		Number: number, FlowID: &flowID, AllowOutbound: &yes, AllowInbound: &no, IsEnabled: &yes,
+		MaxOutboundChannels: maxOutbound,
 	}, &did, http.StatusCreated); err != nil {
 		return api.DID{}, fmt.Errorf("create did: %w", err)
 	}

@@ -51,6 +51,13 @@ services:
       AICC_CAMPAIGN_FREQUENCY_WINDOW: "0"
       # Open all day, so a run never waits for the callee's local morning.
       AICC_OUTBOUND_HOURS: 00:00-24:00
+      # Capacity tests (make e2e-capacity, internal/e2e/capacity*.go): e2e.sh
+      # capacity recreates the application with a scenario's bot capacity and
+      # overflow hold, and then with these empty again. Empty is unset, the
+      # application's default; nothing else sets them.
+      AICC_BOT_MAX_CALLS: ${E2E_BOT_MAX_CALLS:-}
+      AICC_BOT_INBOUND_RESERVE: ${E2E_BOT_INBOUND_RESERVE:-}
+      AICC_OVERFLOW_HOLD: ${E2E_OVERFLOW_HOLD:-}
       AICC_LOG_LEVEL: ${AICC_LOG_LEVEL:-info}
 
   freeswitch:
