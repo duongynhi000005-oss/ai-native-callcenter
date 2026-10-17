@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The end-to-end smoke test: one AI outbound call through the isolated compose
+# environment of deploy/e2e (internal network, callee simulator, mock
+# provider), checked against the simulator's record and the call ledger.
+#
+# Path-filtered to what can break an outbound call. The application is built
+# from the checkout; the switch image is the published one the base compose
+# file pins, pulled and never built here.
+name: e2e
+
+on:
+  pull_request:
+    paths:
+      - 'internal/campaign/**'
+      - 'internal/dialer/**'
+      - 'internal/outbound/**'
+      - 'internal/voice/**'
+      - 'internal/telephony/**'
+      - 'internal/mockprovider/**'
+      - 'internal/calleesim/**'
+      - 'internal/e2e/**'
+      - 'freeswitch/**'
+      - 'deploy/e2e/**'
+      - 'cmd/aicc-calleesim/**'
+      - 'cmd/aicc-mockprovider/**'
+      - 'cmd/aicc-e2e/**'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/campaign/**'
+      - 'internal/dialer/**'
+      - 'internal/outbound/**'
+      - 'internal/voice/**'
+      - 'internal/telephony/**'
+      - 'internal/mockprovider/**'
+      - 'internal/calleesim/**'
+      - 'internal/e2e/**'
+      - 'freeswitch/**'
+      - 'deploy/e2e/**'
+      - 'cmd/aicc-calleesim/**'
+      - 'cmd/aicc-mockprovider/**'
+      - 'cmd/aicc-e2e/**'
+      - '.github/workflows/e2e.yml'
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The refusal rules are plain Go; fail on them before building images.
+      - name: Guard tests
+        run: go test -race ./internal/e2e/
+
+      - name: Start the environment
+        run: make e2e-up
+
+      - name: Smoke
+        run: make e2e-smoke
+
+      # The run directory holds the simulator's record, the CDRs, the smoke
+      # summary and every container's log; a failed up or smoke has already
+      # written the logs by the time this runs.
+      - name: Upload the run directory
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-run
+          path: bin/e2e/*/run
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: make e2e-down
