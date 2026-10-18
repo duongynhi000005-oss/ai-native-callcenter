@@ -237,13 +237,30 @@ to a deployment.
 
 ### The shape of a PSTN trunk
 
-Which trunk a deployment writes depends on where it sits.
+The image ships no trunk. The `PSTN_GATEWAY_*` variables only become
+`vars.xml` settings; nothing in the image reads them. A trunk is two files the
+deployment mounts:
+
+* a gateway in `conf/sip_profiles/external/` that reads the variables, so that
+  `sofia/gateway/<name>/%s` (`AICC_OUTBOUND_ENDPOINT`) resolves, and
+* an outbound route in `conf/dialplan/aicc/` that bridges a dialled number to
+  that gateway, for agents' calls and callbacks.
+
+Inbound calls need no third file: the gateway puts them in the `public`
+context, where the shipped `dialplan/public/05_aicc.xml` already routes DIDs.
+`deploy/dev/freeswitch/` holds both files as the worked example
+(`sip_profiles/external/pstn_gateway.xml`, `dialplan/aicc/00_pstn_gateway.xml`).
+Setting the variables without mounting a gateway starts the switch cleanly and
+leaves outbound calls with no way out: `fs_cli -x 'sofia status gateway
+pstn_gateway'` answers `Invalid Gateway`.
+
+Which values the variables take depends on where the trunk sits.
 
 * **LAN only, no carrier.** No SBC is needed. Either use the simulated PSTN
   (`deploy/freeswitch/`, which mounts no gateway file at all), or name one IP
   trunk address: set `PSTN_GATEWAY_HOST` and `PSTN_GATEWAY_PORT` (the
-  `pstn_gateway_host` and `pstn_gateway_port` variables on a native install).
-  That is the whole configuration; `PSTN_GATEWAY_PROXY` defaults to the same
+  `pstn_gateway_host` and `pstn_gateway_port` variables on a native install)
+  and mount the two files above. `PSTN_GATEWAY_PROXY` defaults to the same
   address.
 * **A public carrier** is expected to sit behind FreeSBC v2, and uses the
   two-address form. `PSTN_GATEWAY_HOST`/`PORT` are the SBC's private socket,
@@ -253,9 +270,6 @@ Which trunk a deployment writes depends on where it sits.
   matches the entry exactly. On a native install add the
   `pstn_gateway_proxy` line from `vars.d.example.xml` to `vars.xml`; there is
   no entrypoint to default it, and `install.sh` warns when it is missing.
-
-The gateway file that reads these is the worked example in
-`deploy/dev/freeswitch/sip_profiles/external/pstn_gateway.xml`.
 
 ### Where recordings go
 
