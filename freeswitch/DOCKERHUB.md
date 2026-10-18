@@ -90,7 +90,7 @@ DSN format: `pgsql://hostaddr=10.0.0.5 dbname=aicc user=aicc password='secret'`.
 
 ### PSTN trunk
 
-There is no trunk in the image. `PSTN_GATEWAY_HOST` and `PSTN_GATEWAY_PORT` name the transport peer: where outbound datagrams are sent (the gateway's `outbound-proxy`). A trunk with one address needs nothing more. A public carrier behind FreeSBC v2 also sets `PSTN_GATEWAY_PROXY`.
+There is no trunk in the image, and these variables do not create one: they only feed the gateway file a deployment mounts into `conf/sip_profiles/external/`, alongside an outbound route in `conf/dialplan/aicc/`. Without that gateway, `sofia/gateway/pstn_gateway/%s` fails with `INVALID_GATEWAY`. `deploy/dev/freeswitch/` in the repository has both files as a worked example. `PSTN_GATEWAY_HOST` and `PSTN_GATEWAY_PORT` name the transport peer: where outbound datagrams are sent (the gateway's `outbound-proxy`). A trunk with one address sets nothing more. A public carrier behind FreeSBC v2 also sets `PSTN_GATEWAY_PROXY`.
 
 | Variable | Injected into | Unset |
 |---|---|---|

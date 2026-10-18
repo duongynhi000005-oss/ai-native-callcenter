@@ -16,8 +16,11 @@ Two directories, both mounted read-only onto the switch by
 Together they let the whole product be exercised on one machine with no
 carrier. A real deployment replaces these files with its trunk in the same two
 directories, and mounts its gateway into `conf/sip_profiles/external/` as a
-third. A LAN-only deployment needs no SBC: it keeps these files, or names one
-IP trunk address with `PSTN_GATEWAY_HOST`/`PSTN_GATEWAY_PORT`. A public carrier
+third. The image ships no gateway, and the `PSTN_GATEWAY_*` variables only feed
+the gateway file a deployment mounts: setting them alone gives the switch no
+way out. A LAN-only deployment needs no SBC: it keeps these files, or mounts a
+gateway and an outbound route and names one IP trunk address with
+`PSTN_GATEWAY_HOST`/`PSTN_GATEWAY_PORT`. A public carrier
 is expected to sit behind FreeSBC v2 and adds `PSTN_GATEWAY_PROXY`, the
 carrier's directory entry, while HOST/PORT become the SBC's private socket.
 `deploy/dev/freeswitch/` is a worked example and
