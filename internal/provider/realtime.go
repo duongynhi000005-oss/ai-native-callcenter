@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/obs"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider/wsconn"
 )
 
@@ -35,7 +36,60 @@ const (
 	// per-call actor forwarding to a paced send queue, so it should never come
 	// close.
 	eventBuffer = 256
+	// responseCreatedTimeout bounds the wait between this client sending a
+	// response.create and the provider creating the response. An engine may
+	// drop a request without a word (grok-findings 5.2: no response.created,
+	// no error), and nothing else would end that wait: the watchdog watches a
+	// response that is open, and this one never opens. See onRequestExpired.
+	//
+	// Measured 2026-10-19, request sent to response.created reported, mid-call
+	// (TestLiveResponseCreatedLatency, nearest-rank figures): openai n=8,
+	// median 232 ms, max 561 ms; qwen n=8, median 180 ms, max 550 ms; grok
+	// n=4, median 272 ms, max 351 ms, with 4 more bare requests that grok
+	// never answered within 30 s (every other one, each followed by one it
+	// did answer). Earlier dev-stack logs: qwen n=12, median 236 ms, max
+	// 445 ms; grok n=1, 125 ms. The bound is four times the largest sample,
+	// rounded up to a whole second: long enough that a slow answer is not
+	// mistaken for a drop, short enough that a dropped line is not heard as a
+	// call gone dead.
+	responseCreatedTimeout = 3 * time.Second
 )
+
+// responseKind is what asked for a response: the label the WARN and the
+// aicc_provider_response_unanswered_total metric name an unanswered request by.
+type responseKind string
+
+const (
+	// responseKindOpening is the greeting Start asks for.
+	responseKindOpening responseKind = "OPENING"
+	// responseKindLine is a line SpeakText asked for.
+	responseKindLine responseKind = "LINE"
+	// responseKindTool is the turn a tool result asks for (SendToolResult).
+	responseKindTool responseKind = "TOOL"
+	// responseKindCue is the reply to a text cue (SendUserText).
+	responseKindCue responseKind = "CUE"
+	// responseKindOwed is a turn owed to a tool result or a cue, asked for once
+	// the floor came free (releaseOwedTurn).
+	responseKindOwed responseKind = "OWED"
+)
+
+// responseRequest describes one response.create: what asked for it and, for a
+// line, how it was asked, which is what asking again needs.
+type responseRequest struct {
+	kind responseKind
+	// text and isClosing are a line's, as SpeakText was given them. direction
+	// is the SayExactly demand the request carries as its override; empty for
+	// a bare request.
+	text      string
+	isClosing bool
+	direction string
+	// isDirectionInConversation means the direction was also put in the
+	// conversation as a caller message ahead of the request (askForLine, or
+	// the opening cue where the profile needs one).
+	isDirectionInConversation bool
+	// isRetry marks the one retry of a request that was never created.
+	isRetry bool
+}
 
 // Realtime is a session against any provider speaking the realtime protocol.
 // Vendor differences live entirely in its Profile.
@@ -80,9 +134,11 @@ type Realtime struct {
 	// because a newer line supersedes an older one rather than joining a
 	// queue. isResponseRequested covers the window between asking for a turn
 	// and the provider creating it, in which there is nothing to cancel and a
-	// second request would be refused. isPreemptedForSpeak remembers that the
-	// turn now ending was stopped to make room, which is what keeps the
-	// interruption from being reported as the caller's.
+	// second request would be refused. That window is bounded: a request the
+	// provider never creates gives the floor back after
+	// responseCreatedDeadline (onRequestExpired). isPreemptedForSpeak
+	// remembers that the turn now ending was stopped to make room, which is
+	// what keeps the interruption from being reported as the caller's.
 	pendingSpeak string
 	// isPendingSpeakClosing is SpeakText's isClosing for pendingSpeak.
 	isPendingSpeakClosing bool
@@ -108,6 +164,26 @@ type Realtime struct {
 	isTurnOwed       bool
 	isOwedPastCreate bool
 	isCallerSpeaking bool
+
+	// The fields that bound the wait for response.created. See
+	// onRequestExpired.
+	//
+	// request is the response.create isResponseRequested stands for.
+	// requestGen numbers every request, so a deadline that fires after its
+	// request was created, failed or was replaced knows it is stale.
+	// requestTimer is that request's deadline and requestSentAt when it was
+	// claimed.
+	request       responseRequest
+	requestGen    uint64
+	requestTimer  *time.Timer
+	requestSentAt time.Time
+	// recoverySentAt is when this client last sent a request in place of one
+	// that was never created: its retry, or a line that superseded it. If the
+	// first one was only late, the provider refuses the one sent in its place
+	// (see isAnsweredRecovery). recoveryLine is that superseding line, if a
+	// line is what was sent, so it can be asked for again.
+	recoverySentAt time.Time
+	recoveryLine   *responseRequest
 
 	// callItems are the function calls the response now open has begun and not
 	// yet finished, by item id (the call id as the value), and finishedCalls the
@@ -139,6 +215,8 @@ type Realtime struct {
 	// behaviour that is measured in seconds on a real call.
 	firstAudioDeadline time.Duration
 	deltaStallDeadline time.Duration
+	// responseCreatedDeadline is responseCreatedTimeout, held the same way.
+	responseCreatedDeadline time.Duration
 }
 
 // The names this client knows the watchdog's signals by.
@@ -176,8 +254,9 @@ func New(profile Profile, log *slog.Logger) (*Realtime, error) {
 		events:  make(chan Event, eventBuffer),
 		ready:   make(chan struct{}),
 
-		firstAudioDeadline: firstAudioTimeout,
-		deltaStallDeadline: deltaStallTimeout,
+		firstAudioDeadline:      firstAudioTimeout,
+		deltaStallDeadline:      deltaStallTimeout,
+		responseCreatedDeadline: responseCreatedTimeout,
 	}, nil
 }
 
@@ -250,10 +329,12 @@ func (r *Realtime) Start(ctx context.Context, cfg SessionConfig) error {
 	// what every call did before a phase could carry a line — and the request
 	// is the bare one it always was. Naming a line asks for that line instead.
 	opening := map[string]any{"type": "response.create"}
+	request := responseRequest{kind: responseKindOpening}
 	cue := greetingCue(cfg)
 	if cfg.OpeningText != "" {
 		direction := sayExactly(cfg.OpeningText, cfg.Language)
 		opening["response"] = map[string]any{"instructions": direction}
+		request.text, request.direction = cfg.OpeningText, direction
 		// Where the conversation may not be empty, the direction is also the
 		// cue. Anything else would steer the same turn two ways at once, and
 		// there is no second thing worth saying to a provider that is about to
@@ -265,8 +346,9 @@ func (r *Realtime) Start(ctx context.Context, cfg SessionConfig) error {
 			r.conn.Close()
 			return fmt.Errorf("prompt opening turn: %w", err)
 		}
+		request.isDirectionInConversation = true
 	}
-	if err := r.requestResponse(opening); err != nil {
+	if err := r.requestResponse(request, opening); err != nil {
 		r.conn.Close()
 		return fmt.Errorf("request opening turn: %w", err)
 	}
@@ -324,6 +406,10 @@ func (r *Realtime) SendAudio(audio []byte) error {
 // accepted by qwen, but that is the one provider it was measured on, and the
 // cue cannot tell here whether a cancel just went out; the wait is the
 // cheaper mistake than a refused cue.
+//
+// A request the cue's reply rides on, or its own, that the provider never
+// creates is not waited on for ever: onRequestExpired retries it once and then
+// asks for whatever is still owed.
 func (r *Realtime) SendUserText(text string) error {
 	if err := r.sendEvent(userTextItem(text)); err != nil {
 		return err
@@ -344,7 +430,8 @@ func (r *Realtime) SendUserText(text string) error {
 		r.log.Debug("a response holds the floor; the reply to this cue waits for it to end")
 		return nil
 	}
-	return r.requestResponse(map[string]any{"type": "response.create"})
+	return r.requestResponse(responseRequest{kind: responseKindCue},
+		map[string]any{"type": "response.create"})
 }
 
 // SpeakText says a line the flow chose, in place of whatever is being said now.
@@ -370,7 +457,9 @@ func (r *Realtime) SendUserText(text string) error {
 //     cancel yet, so the line waits, and the turn is stopped the moment it
 //     exists. SendToolResult asks for a turn on its way out, and a phase
 //     change is decided on that very result, so this is the ordinary case
-//     rather than the exotic one.
+//     rather than the exotic one. The wait is bounded: if the provider never
+//     creates that turn, the line is asked for once responseCreatedDeadline
+//     has passed (onRequestExpired).
 //
 // When the floor is free it is claimed under the same lock that found it
 // free, before anything is written: a second SpeakText arriving while the
@@ -395,12 +484,13 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 		r.isPreemptedForSpeak = true
 	}
 	r.pendingSpeak, r.isPendingSpeakClosing = "", false
+	var request responseRequest
 	if isDeferred {
 		r.pendingSpeak, r.isPendingSpeakClosing = text, isClosing
 	} else {
-		r.claimFloorLocked()
+		request = r.lineRequestLocked(text, isClosing)
+		r.claimFloorLocked(request)
 	}
-	language := r.cfg.Language
 	r.mu.Unlock()
 
 	if isCancelNeeded {
@@ -411,22 +501,74 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 	if isDeferred {
 		return nil
 	}
-	return r.askForLine(text, language, isClosing)
+	return r.askForLine(request)
 }
 
 // claimFloorLocked records that a turn is on its way before anything asks for
-// it: the state requestResponse sets, set early. The caller holds mu.
-func (r *Realtime) claimFloorLocked() {
+// it, and starts the wait for the provider to create it: the deadline
+// onRequestExpired enforces. Every response.create this client sends is
+// claimed here first. The caller holds mu.
+//
+// Any claim discharges an owed turn: the tool output or cue is already in the
+// conversation, so whatever turn comes next is made with it in view, and a
+// second request on top of this one would be refused.
+func (r *Realtime) claimFloorLocked(request responseRequest) {
 	r.isResponseRequested = true
 	r.isTurnOwed = false
 	r.isOwedPastCreate = false
+
+	r.request = request
+	r.requestGen++
+	r.requestSentAt = time.Now()
+	if r.requestTimer != nil {
+		r.requestTimer.Stop()
+	}
+	deadline := r.responseCreatedDeadline
+	if deadline <= 0 {
+		deadline = responseCreatedTimeout
+	}
+	gen := r.requestGen
+	// A timer rather than a goroutine that sleeps: nothing runs until it
+	// fires, and a stopped one leaves nothing behind.
+	r.requestTimer = time.AfterFunc(deadline, func() { r.onRequestExpired(gen) })
+}
+
+// settleRequestLocked records that the request in flight is over — created,
+// refused, or never sent — and stops its deadline. The caller holds mu.
+func (r *Realtime) settleRequestLocked() {
+	r.isResponseRequested = false
+	r.stopRequestTimerLocked()
+}
+
+// stopRequestTimerLocked stops the deadline of the request in flight, if there
+// is one. A deadline already firing finds its generation stale or the request
+// settled and does nothing. The caller holds mu.
+func (r *Realtime) stopRequestTimerLocked() {
+	if r.requestTimer != nil {
+		r.requestTimer.Stop()
+		r.requestTimer = nil
+	}
+}
+
+// lineRequestLocked describes the request for one line: the direction it
+// carries as its override and whether that direction goes in the conversation
+// too (see askForLine for when). The caller holds mu.
+func (r *Realtime) lineRequestLocked(text string, isClosing bool) responseRequest {
+	return responseRequest{
+		kind:      responseKindLine,
+		text:      text,
+		isClosing: isClosing,
+		direction: sayExactly(text, r.cfg.Language),
+		isDirectionInConversation: r.profile.IgnoresOverrideOnceTalking ||
+			(isClosing && r.profile.NeedsDirectedLineInConversation),
+	}
 }
 
 // askForLine asks for the turn that says one line, on a floor the caller has
-// already claimed (claimFloorLocked): the request carrying the direction as a
-// per-response override and, for a line that ends the call on a profile that
-// needs it (NeedsDirectedLineInConversation), the same direction put in the
-// conversation as a caller message first. The item goes strictly before the
+// already claimed for it (claimFloorLocked): the request carrying the direction
+// as a per-response override and, for a line that ends the call on a profile
+// that needs it (NeedsDirectedLineInConversation), the same direction put in
+// the conversation as a caller message first. The item goes strictly before the
 // request, so the turn the request makes is made with it in view.
 //
 // Where the engine ignores the override alone once the conversation has a turn
@@ -442,20 +584,18 @@ func (r *Realtime) claimFloorLocked() {
 // the turn that held it has ended — so a line is steered the same way whichever
 // one it took. If nothing could be asked for, the claim is released so that
 // the next line is not left waiting for a turn that will never come.
-func (r *Realtime) askForLine(text, language string, isClosing bool) error {
-	direction := sayExactly(text, language)
+func (r *Realtime) askForLine(request responseRequest) error {
 	err := func() error {
-		if r.profile.IgnoresOverrideOnceTalking ||
-			(isClosing && r.profile.NeedsDirectedLineInConversation) {
-			if err := r.sendEvent(userTextItem(direction)); err != nil {
+		if request.isDirectionInConversation {
+			if err := r.sendEvent(userTextItem(request.direction)); err != nil {
 				return err
 			}
 		}
-		return r.sendEvent(speakRequest(direction))
+		return r.sendEvent(speakRequest(request.direction))
 	}()
 	if err != nil {
 		r.mu.Lock()
-		r.isResponseRequested = false
+		r.settleRequestLocked()
 		r.mu.Unlock()
 	}
 	return err
@@ -493,20 +633,136 @@ func SayExactly(text, language string) string {
 // sayExactly is the name this client's call sites know it by.
 var sayExactly = SayExactly
 
-// requestResponse asks the model for a turn and records that one is on its way.
-// Between here and response.created there is nothing to cancel, which is what
-// SpeakText has to know before it asks for anything.
-//
-// Any request discharges an owed turn: the tool output or cue is already in the
-// conversation, so whatever turn comes next is made with it in view, and a
-// second request on top of this one would be refused.
-func (r *Realtime) requestResponse(request map[string]any) error {
+// requestResponse asks the model for a turn and records that one is on its way
+// (claimFloorLocked). Between here and response.created there is nothing to
+// cancel, which is what SpeakText has to know before it asks for anything. If
+// the frame could not be sent, the claim is released.
+func (r *Realtime) requestResponse(request responseRequest, frame map[string]any) error {
 	r.mu.Lock()
-	r.isResponseRequested = true
-	r.isTurnOwed = false
-	r.isOwedPastCreate = false
+	r.claimFloorLocked(request)
 	r.mu.Unlock()
-	return r.sendEvent(request)
+	err := r.sendEvent(frame)
+	if err != nil {
+		r.mu.Lock()
+		r.settleRequestLocked()
+		r.mu.Unlock()
+	}
+	return err
+}
+
+// onRequestExpired ends the wait for a response the provider never created.
+// The request's deadline calls it on the timer's own goroutine.
+//
+// An engine can drop a response.create without a word: grok drops one that
+// carries only an override once the conversation has a turn (grok-findings
+// 5.2), with no response.created and no error. Without a bound the floor would
+// stay claimed for the rest of the call: every later line would wait in
+// pendingSpeak, every tool result would ride on a turn that never comes, and
+// the watchdog would never fire, because no response is open. The call goes
+// quiet while it is still up.
+//
+// So the floor is given back, and then, in this order:
+//
+//   - a line waiting for the floor is asked for. It supersedes the dropped
+//     request, as a newer line always supersedes an older one; the dropped
+//     request is not asked for again.
+//   - otherwise the request is retried once. A line goes again with its
+//     direction put in the conversation, the form an engine that drops the
+//     override alone was measured to answer (grok-findings 5.2), unless the
+//     first request already put it there; then only the request is resent,
+//     never a second identical item. A bare request is resent bare. The retry
+//     claims the floor like any request, so a cue or tool result that arrived
+//     during the wait rides on it.
+//   - otherwise the retry was dropped too, and the request is given up: the
+//     turn owed to anything that arrived meanwhile is asked for, and nothing is
+//     reported to the consumer. An armed ending waiting for a closing line that
+//     never came still ends on the consumer's own cap.
+//
+// Each expiry logs one WARN and counts one aicc_provider_response_unanswered_total.
+//
+// Nothing happens if the request has moved on: created, refused, replaced by a
+// newer one, or the session ended.
+func (r *Realtime) onRequestExpired(gen uint64) {
+	if r.conn != nil {
+		select {
+		case <-r.conn.Done():
+			return
+		default:
+		}
+	}
+	r.mu.Lock()
+	if gen != r.requestGen || !r.isResponseRequested || r.isResponseOpen.Load() {
+		r.mu.Unlock()
+		return
+	}
+	expired := r.request
+	waited := time.Since(r.requestSentAt)
+	r.isResponseRequested = false
+	r.requestTimer = nil
+
+	var outcome string
+	retry := expired
+	switch {
+	case r.pendingSpeak != "":
+		outcome = obs.ResponseUnansweredSuperseded
+	case !expired.isRetry:
+		outcome = obs.ResponseUnansweredRetried
+		retry.isRetry = true
+		r.claimFloorLocked(retry)
+		r.recoverySentAt, r.recoveryLine = time.Now(), nil
+	default:
+		outcome = obs.ResponseUnansweredDropped
+	}
+	r.mu.Unlock()
+
+	obs.RecordResponseUnanswered(r.profile.Name, string(expired.kind), outcome)
+	// The profile's name is on every line already (the logger's provider).
+	attrs := []any{"kind", expired.kind, "waitedMs", waited.Milliseconds(),
+		"isRetry", expired.isRetry}
+
+	switch outcome {
+	case obs.ResponseUnansweredSuperseded:
+		r.log.Warn("the provider never created the response this client asked for; "+
+			"asking for the line that was waiting for the floor instead", attrs...)
+		r.dispatchPendingSpeak(true)
+		r.releaseOwedTurn()
+
+	case obs.ResponseUnansweredRetried:
+		isDirectionAdded := expired.direction != "" && !expired.isDirectionInConversation
+		r.log.Warn("the provider never created the response this client asked for; asking once more",
+			append(attrs, "isDirectionAdded", isDirectionAdded)...)
+		if err := r.sendRetry(expired); err != nil {
+			r.mu.Lock()
+			r.settleRequestLocked()
+			r.mu.Unlock()
+			r.log.Debug("could not ask again for the response that was never created", "error", err)
+		}
+
+	default:
+		r.log.Warn("the provider never created the response this client asked for, "+
+			"nor the retry; giving it up and freeing the floor", attrs...)
+		r.releaseOwedTurn()
+	}
+}
+
+// sendRetry asks again for a request that was never created, on a floor
+// onRequestExpired has already claimed for the retry.
+//
+// If the first request was only late, both may reach the provider, and it
+// refuses the second because the first is running; that refusal is expected
+// (isAnsweredRecovery) and the turn is made once. A retry that put the
+// direction in the conversation leaves that item in the history even then:
+// the cost of one caller message asking for a line the late turn says anyway.
+func (r *Realtime) sendRetry(expired responseRequest) error {
+	if expired.direction == "" {
+		return r.sendEvent(map[string]any{"type": "response.create"})
+	}
+	if !expired.isDirectionInConversation {
+		if err := r.sendEvent(userTextItem(expired.direction)); err != nil {
+			return err
+		}
+	}
+	return r.sendEvent(speakRequest(expired.direction))
 }
 
 // onResponseCreated stops a turn that was superseded before it existed.
@@ -516,7 +772,7 @@ func (r *Realtime) requestResponse(request map[string]any) error {
 // moment there is something to stop.
 func (r *Realtime) onResponseCreated() {
 	r.mu.Lock()
-	r.isResponseRequested = false
+	r.settleRequestLocked()
 	r.isCallerSpeaking = false
 	// Whoever asked for this response — this client or the provider's own
 	// turn detection answering the caller — it is made with the tool output
@@ -544,25 +800,35 @@ func (r *Realtime) onResponseCreated() {
 }
 
 // dispatchPendingSpeak asks for the line that was waiting, now that the turn
-// holding the floor has ended. It reports whether that turn was stopped to make
-// room, which is what decides who the interruption is attributed to.
-func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
+// holding the floor has ended or the request holding it was never created. It
+// reports whether that turn was stopped to make room, which is what decides who
+// the interruption is attributed to.
+//
+// isRecovery says the line goes out in place of a request that was never
+// created (onRequestExpired), which is what lets the provider's refusal of it
+// be recognised if that request turns out to have been only late.
+func (r *Realtime) dispatchPendingSpeak(isRecovery bool) (wasPreempted bool) {
 	r.mu.Lock()
 	text, isClosing := r.pendingSpeak, r.isPendingSpeakClosing
 	wasPreempted = r.isPreemptedForSpeak
-	language := r.cfg.Language
 	r.pendingSpeak, r.isPendingSpeakClosing = "", false
 	r.isPreemptedForSpeak = false
 	r.isCancelSentForSpeak = false
+	var request responseRequest
 	if text != "" {
-		r.claimFloorLocked()
+		request = r.lineRequestLocked(text, isClosing)
+		r.claimFloorLocked(request)
+		if isRecovery {
+			line := request
+			r.recoverySentAt, r.recoveryLine = time.Now(), &line
+		}
 	}
 	r.mu.Unlock()
 
 	if text == "" {
 		return wasPreempted
 	}
-	if err := r.askForLine(text, language, isClosing); err != nil {
+	if err := r.askForLine(request); err != nil {
 		r.log.Warn("could not ask for the line that was waiting for the floor", "error", err)
 	}
 	return wasPreempted
@@ -588,7 +854,9 @@ func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
 // response.created nothing is open, so the next result would ask again and be
 // refused (qwen-findings W-Q6). A turn already asked for and not yet started
 // covers the results that follow it, so one batch of results asks for exactly
-// one response.
+// one response. A turn that is never started covers them only until
+// responseCreatedDeadline: then it is asked for again, with the results in the
+// conversation for it to read (onRequestExpired).
 func (r *Realtime) SendToolResult(toolCallID, output string) error {
 	if err := r.sendEvent(map[string]any{
 		"type": "conversation.item.create",
@@ -622,7 +890,8 @@ func (r *Realtime) SendToolResult(toolCallID, output string) error {
 			"toolCallId", toolCallID)
 		return nil
 	}
-	return r.requestResponse(map[string]any{"type": "response.create"})
+	return r.requestResponse(responseRequest{kind: responseKindTool},
+		map[string]any{"type": "response.create"})
 }
 
 // releaseOwedTurn asks for the turn a tool result is owed, now that the
@@ -667,7 +936,8 @@ func (r *Realtime) releaseOwedTurn() {
 	r.mu.Unlock()
 
 	r.log.Debug("the floor is free; asking for the owed turn (a tool result or a cue was waiting)")
-	if err := r.requestResponse(map[string]any{"type": "response.create"}); err != nil {
+	if err := r.requestResponse(responseRequest{kind: responseKindOwed},
+		map[string]any{"type": "response.create"}); err != nil {
 		r.log.Warn("could not ask for the owed turn", "error", err)
 	}
 }
@@ -821,9 +1091,41 @@ func (r *Realtime) isAnsweredCancel(err *wireError) bool {
 	return !sentAt.IsZero() && time.Since(sentAt) <= cancelAnswerWindow
 }
 
+// isAnsweredRecovery reports whether an error is the provider refusing a
+// request this client sent in place of one that was never created (a retry, or
+// a line that superseded it) because the first one turned out to be only late
+// and is now running. line is the superseding line, if that is what was
+// refused. Spent once matched: one recovery draws at most one refusal.
+//
+// Matched like isAnsweredCancel: within cancelAnswerWindow of the recovery and
+// before any response has ended since (handleResponseDone), on the words the
+// providers refuse a second response with (OpenAI
+// "conversation_already_has_active_response", qwen "another response is in
+// progress"), because the error names neither the frame it refuses nor the
+// response that is running.
+func (r *Realtime) isAnsweredRecovery(err *wireError) (isRecovery bool, line *responseRequest) {
+	message := strings.ToLower(err.Message)
+	if err.Code != "conversation_already_has_active_response" &&
+		!strings.Contains(message, "already has an active response") &&
+		!strings.Contains(message, "another response is in progress") {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.recoverySentAt.IsZero() || time.Since(r.recoverySentAt) > cancelAnswerWindow {
+		return false, nil
+	}
+	line = r.recoveryLine
+	r.recoverySentAt, r.recoveryLine = time.Time{}, nil
+	return true, line
+}
+
 // Close ends the session.
 func (r *Realtime) Close(_ context.Context) error {
 	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.stopRequestTimerLocked()
+		r.mu.Unlock()
 		if r.conn != nil {
 			r.conn.Close()
 		}
@@ -948,6 +1250,10 @@ func (r *Realtime) readLoop() {
 			// that cannot be rebuilt, so a lost socket ends the session and
 			// the call is routed somewhere a person can take it.
 			r.finishStart(err)
+			// Nothing will be created on a connection that is gone.
+			r.mu.Lock()
+			r.stopRequestTimerLocked()
+			r.mu.Unlock()
 			if !isNormalClosure(err) {
 				r.emit(Event{
 					Type: EventTypeError, Err: err, IsFatal: true,
@@ -1085,6 +1391,12 @@ func (r *Realtime) handle(event *wireEvent) {
 
 func (r *Realtime) handleResponseDone(event *wireEvent) {
 	r.isResponseOpen.Store(false)
+	// A refusal of a request sent in place of a late one arrives while the late
+	// turn is still running, so once a turn has ended there is none left to
+	// expect: the same words after this are someone else's, and are reported.
+	r.mu.Lock()
+	r.recoverySentAt, r.recoveryLine = time.Time{}, nil
+	r.mu.Unlock()
 	cancelledFor := r.takeCancelReason()
 	r.signal(watchResponseEnded)
 	// Before anything asks for a turn, so that turn is made from a
@@ -1093,7 +1405,7 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	// The floor is free: a line that was waiting for it goes out before the
 	// turn is reported, so the next words are already being made while the
 	// consumer catches up.
-	isPreemptedForSpeak := r.dispatchPendingSpeak()
+	isPreemptedForSpeak := r.dispatchPendingSpeak(false)
 	// Then the turn a tool result answered mid-response is owed, unless the
 	// line just asked for is that turn.
 	r.releaseOwedTurn()
@@ -1299,13 +1611,34 @@ func (r *Realtime) handleError(event *wireEvent) {
 		return
 	}
 
+	// A request sent in place of one the provider was only late to create is
+	// refused because that one is now running: the late turn is the turn, and
+	// the state belongs to it, so nothing here is cleared or reported. A line
+	// that superseded the late request is asked for again, pre-empting it as
+	// any line does, because a newer line is the one still true.
+	if isRecovery, line := r.isAnsweredRecovery(err); isRecovery {
+		r.log.Debug("the provider refused the request sent in place of one it was only late to create",
+			"code", err.Code, "message", err.Message, "isLineAskedAgain", line != nil)
+		if line != nil {
+			r.mu.Lock()
+			isNewerLine := r.pendingSpeak != ""
+			r.mu.Unlock()
+			if !isNewerLine {
+				if speakErr := r.SpeakText(line.text, line.isClosing); speakErr != nil {
+					r.log.Warn("could not ask again for the line the late turn displaced", "error", speakErr)
+				}
+			}
+		}
+		return
+	}
+
 	// A request for a turn that the provider refused for any reason but a
 	// response already running will never be created, so it must not go on
 	// covering the tool results that follow it (SendToolResult).
 	if !strings.Contains(err.Message, "another response is in progress") {
 		r.mu.Lock()
 		if !r.isResponseOpen.Load() {
-			r.isResponseRequested = false
+			r.settleRequestLocked()
 		}
 		r.mu.Unlock()
 	}
@@ -1353,7 +1686,7 @@ func (r *Realtime) onResponseStalled(hasAudioArrived bool) {
 		"hasAudioArrived", hasAudioArrived)
 	// This path never reaches handleResponseDone, so a line waiting for
 	// a turn the provider walked away from would wait for ever.
-	r.dispatchPendingSpeak()
+	r.dispatchPendingSpeak(false)
 	// Nor would a tool result's turn that was waiting for it.
 	r.releaseOwedTurn()
 	// Not fatal: the session is still usable, and the caller has heard

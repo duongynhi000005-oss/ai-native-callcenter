@@ -23,24 +23,25 @@ import (
 // across five packages is one nobody can read. Every name carries the aicc_
 // prefix.
 var (
-	turnLatency      metric.Int64Histogram
-	callsActive      metric.Int64UpDownCounter
-	rtpLateTicks     metric.Int64Counter
-	rtpFramesSent    metric.Int64Counter
-	jitterLost       metric.Int64Counter
-	jitterDropped    metric.Int64Counter
-	jitterFilled     metric.Int64Counter
-	providerFirstAud metric.Int64Histogram
-	providerErrors   metric.Int64Counter
-	providerSessions metric.Int64Counter
-	botInterruptions metric.Int64Counter
-	botSessionLimits metric.Int64Counter
-	botUnbacked      metric.Int64Counter
-	botFirstMedia    metric.Int64Histogram
-	botFirstAudio    metric.Int64Histogram
-	botSlots         metric.Int64UpDownCounter
-	botOverflow      metric.Int64Counter
-	botOverflowHold  metric.Int64Histogram
+	turnLatency        metric.Int64Histogram
+	callsActive        metric.Int64UpDownCounter
+	rtpLateTicks       metric.Int64Counter
+	rtpFramesSent      metric.Int64Counter
+	jitterLost         metric.Int64Counter
+	jitterDropped      metric.Int64Counter
+	jitterFilled       metric.Int64Counter
+	providerFirstAud   metric.Int64Histogram
+	providerErrors     metric.Int64Counter
+	providerSessions   metric.Int64Counter
+	providerUnanswered metric.Int64Counter
+	botInterruptions   metric.Int64Counter
+	botSessionLimits   metric.Int64Counter
+	botUnbacked        metric.Int64Counter
+	botFirstMedia      metric.Int64Histogram
+	botFirstAudio      metric.Int64Histogram
+	botSlots           metric.Int64UpDownCounter
+	botOverflow        metric.Int64Counter
+	botOverflowHold    metric.Int64Histogram
 
 	transcribeFramesDropped metric.Int64Counter
 	transcribeFramesSent    metric.Int64Counter
@@ -111,6 +112,12 @@ func init() {
 			"rate-limit session creation rather than concurrency — doubao allows 60 a "+
 			"minute per application id — so the rate of opening them is a quota a busy "+
 			"minute can exhaust while every other number here looks healthy."))
+	providerUnanswered, _ = meter.Int64Counter("aicc_provider_response_unanswered_total",
+		metric.WithDescription("Requests for a response (response.create) the provider never "+
+			"created within the client's bound, by provider, kind (OPENING, LINE, TOOL, CUE, "+
+			"OWED) and outcome: SUPERSEDED (a line waiting for the floor was asked for "+
+			"instead), RETRIED (asked once more) or DROPPED (the retry was not created "+
+			"either and the request was given up). Each one is dead air the caller heard."))
 	botSessionLimits, _ = meter.Int64Counter("aicc_bot_session_limits_total",
 		metric.WithDescription("AI calls the platform ended because they reached the "+
 			"flow's time limit (global.maxDurationSec), by how: TRANSFER, counted "+
@@ -350,6 +357,30 @@ func RecordProviderError(provider string) {
 	}
 	providerErrors.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("provider", provider)))
+}
+
+// The outcomes of aicc_provider_response_unanswered_total.
+const (
+	ResponseUnansweredSuperseded = "SUPERSEDED"
+	ResponseUnansweredRetried    = "RETRIED"
+	ResponseUnansweredDropped    = "DROPPED"
+)
+
+// RecordResponseUnanswered counts one request for a response the provider
+// never created, by what asked for it and what was done instead
+// (ResponseUnanswered*).
+//
+// An engine that drops a request says nothing, so this is the only trace of
+// it beyond a log line: a rate that climbs after a model or vendor update says
+// the engine has started dropping a frame shape it used to answer.
+func RecordResponseUnanswered(provider, kind, outcome string) {
+	if providerUnanswered == nil {
+		return
+	}
+	providerUnanswered.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("provider", provider),
+		attribute.String("kind", kind),
+		attribute.String("outcome", outcome)))
 }
 
 // RecordTranscribeAudio publishes one recognition session's frame accounting

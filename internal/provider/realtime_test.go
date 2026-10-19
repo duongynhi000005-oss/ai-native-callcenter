@@ -444,7 +444,7 @@ func TestASecondLineWhileTheFirstIsBeingAskedForWaits(t *testing.T) {
 	// Claimed exactly as SpeakText claims it, and left claimed: the window
 	// between the claim and the request going out, held open.
 	session.mu.Lock()
-	session.claimFloorLocked()
+	session.claimFloorLocked(responseRequest{kind: responseKindLine})
 	session.mu.Unlock()
 
 	if err := session.SpeakText("感谢来电，再见。", true); err != nil {

@@ -175,7 +175,22 @@ the history cost): the user-item-plus-override form is 3/3. The opening line is 
 override alone works (empty conversation). Caveat: this is a strong dependency on the exact
 frame; re-run `TestLiveGrokResponseOverride` when the model version changes. The silent drop
 also means the client's turn bookkeeping (`isResponseRequested`) would wait forever on a
-`response.create` that never produces `response.created`.
+`response.create` that never produces `response.created`. Since #231 that wait is bounded
+(`responseCreatedTimeout` in `internal/provider/realtime.go`): the floor is given back and
+the request retried once or superseded (docs/provider-extension.md, Grok).
+`TestLiveGrokRecoversADroppedLine` (2026-10-19, trait turned off on a copy of the profile, one
+caller audio turn, then a closing line override-only): grok dropped the request 5/5; the
+retry with the direction put in the conversation started 220–355 ms after the bound and was
+VERBATIM 5/5, one turn each.
+
+A second drop shape, MEASURED 2026-10-19 (`TestLiveResponseCreatedLatency`, grok-voice-3.0, one
+session): after the greeting, eight **bare** `response.create`s, each sent 500 ms after the
+previous response ended, with room tone and nothing new in the conversation between them. 4/8 got
+no `response.created` within 30 s, and they alternated: requests 1, 3, 5 and 7 were dropped, each
+followed by one that was answered. Not yet known whether grok drops a bare request that has a new
+item ahead of it (a tool result, a cue), which is the shape a real call sends; variant (b) above
+(tool result plus bare `response.create`) was 3/3. Watch `aicc_provider_response_unanswered_total`
+with `provider=grok` on live calls before relying on the bare request.
 
 ### 5.3 AcceptsTemperature
 
