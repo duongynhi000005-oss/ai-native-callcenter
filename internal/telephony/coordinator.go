@@ -1395,15 +1395,26 @@ func (c *Coordinator) Transfer(ctx context.Context, callID, agentID uuid.UUID, d
 	if strings.TrimSpace(destination) == "" {
 		return fmt.Errorf("transfer destination is required")
 	}
-	// The caller is the leg that must survive the transfer.
+	// The caller is the leg that must survive the transfer. The requesting
+	// agent's own live leg is the permission: the caller's leg is somebody
+	// else's, so without it any agent who knew a call id could move a
+	// colleague's customer away from them (#239).
 	var callerChannel string
 	var callType events.CallType
+	var isOnCall bool
 	err := c.registry.Do(callID, func(call *Call) {
 		callType = call.CallType
 		for _, p := range call.Parties {
-			if p.IsActive() && p.AgentID == nil {
-				callerChannel = p.ChannelID
-				return
+			if !p.IsActive() {
+				continue
+			}
+			switch {
+			case p.AgentID == nil:
+				if callerChannel == "" {
+					callerChannel = p.ChannelID
+				}
+			case *p.AgentID == agentID:
+				isOnCall = true
 			}
 		}
 	})
@@ -1413,7 +1424,7 @@ func (c *Coordinator) Transfer(ctx context.Context, callID, agentID uuid.UUID, d
 	if callType == events.CallTypeInternal {
 		return ErrNotForCallType
 	}
-	if callerChannel == "" {
+	if !isOnCall || callerChannel == "" {
 		return ErrNotCallParty
 	}
 	// No context named here: the adapter knows the one this deployment runs.
