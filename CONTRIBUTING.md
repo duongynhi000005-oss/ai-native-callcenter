@@ -40,3 +40,39 @@ own documentation is the right place for it.
 If the tool contract cannot express something your integration needs, open an
 issue describing the missing capability in vendor-neutral terms. A generic
 gap in the flow DSL or the API is in scope; a hook for one product is not.
+
+## Tests with goroutines, fakes, sockets or timers
+
+A test that waits for another goroutine (a fake server's read loop, a reader
+on a socket, a timer) can pass every time on a fast machine and still fail in
+CI. The fast machine finishes the racing goroutine before the assertion, so
+running the test again and again never opens the window; a 4-vCPU CI runner
+busy with the whole suite does. #185, #191, #253, #254 and #256 were all found
+that way, and each was a real timing assumption in the test or its harness,
+not CI being slow. The fix belongs in the test, never in CI's load or timeouts.
+
+So a pull request that adds or changes such a test runs two checks on the
+packages it touches, and its description says so and names the hand-offs the
+second check covered:
+
+1. **Stress the packages the way CI loads them.**
+
+   ```sh
+   make test-stress PKG=./internal/calleesim RUN=TestCodecIsNegotiatedPerOffer
+   ```
+
+   This runs `go test -race -count=20 -cpu 1,2,8` on `PKG` while a looping
+   `go test -race ./...` and one busy loop per CPU share a few CPUs with it:
+   four pinned with `taskset` on Linux, the efficiency cores on Apple silicon.
+   Load alone is not enough on a machine with many cores; the CPUs have to be
+   few and busy, as on the runner. `PKG` is required and may name several
+   packages, but never `./...`; `RUN`, `COUNT`, `CPU` and `CORES` are optional
+   (see `scripts/test-stress.sh`). A pass is evidence, not proof: run it more
+   than once, or raise `COUNT` for a fast test.
+
+2. **Inject a sleep at each hand-off.** Find every point where the test
+   relies on one goroutine having done something before another looks: a
+   frame recorded, a reply written, a socket closed. Add a temporary
+   `time.Sleep` of tens of milliseconds there, and confirm the test fails. Fix
+   the test or the harness, confirm it passes with the sleep still in place,
+   then remove the sleep.

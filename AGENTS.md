@@ -26,6 +26,7 @@ Commit messages, code comments and documentation are in English (owner directive
 go build ./...
 go test -race ./...                               # always -race (`make test` runs this, then the web tests)
 go test -race -run TestName ./internal/voice/     # one test
+make test-stress PKG=./internal/x RUN=TestY       # -race -count=20 -cpu 1,2,8 on 4 CPUs kept busy as on CI (CONTRIBUTING.md)
 go test -run XXX -bench . -benchmem ./internal/media/ ./internal/aicall/  # hot paths: 0 allocs/op, CI fails otherwise
 make lint                                         # go vet + gofmt + oxlint
 sqlc generate                                     # after editing internal/store/sql/*.sql or a migration (pinned version: SQLC_VERSION in Makefile)
@@ -53,6 +54,8 @@ make e2e-up && make e2e-smoke; make e2e-down    # isolated outbound-call smoke t
 ```
 
 Load harness: `docs/load-tests.md`.
+
+A PR that adds or changes a test with goroutines, fakes, sockets or timers runs `make test-stress` on the touched packages and the injected-sleep check, and its description says so (`CONTRIBUTING.md`).
 
 ## Database and migrations
 

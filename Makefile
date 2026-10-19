@@ -174,6 +174,14 @@ test: ## Run Go (with -race) and frontend tests, as CI does
 	fi; \
 	exit $$status
 
+# A new or changed test with goroutines, fakes, sockets or timers runs here
+# before its pull request (CONTRIBUTING.md): PKG is required and never ./...
+COUNT ?= 20
+
+.PHONY: test-stress
+test-stress: ## Stress tests the way CI loads them: PKG=./internal/x [RUN=TestY] [COUNT=20] [CPU=1,2,8] [CORES=4]
+	@PKG='$(PKG)' RUN='$(RUN)' COUNT='$(COUNT)' CPU='$(CPU)' CORES='$(CORES)' scripts/test-stress.sh
+
 .PHONY: lint
 lint: ## Vet Go code and lint the frontend
 	go vet ./...
