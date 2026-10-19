@@ -1962,6 +1962,7 @@ export interface components {
             isRegistered: boolean;
             /** @description The identifier the switch knows this agent by. */
             callcenterName: string;
+            /** @description The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says. */
             isAutoAnswer: boolean;
             /**
              * Format: uuid
@@ -1981,6 +1982,7 @@ export interface components {
              */
             userId: string;
             callcenterName: string;
+            /** @description The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says. */
             isAutoAnswer: boolean;
             /** Format: uuid */
             defaultExtensionId?: string;
@@ -1994,6 +1996,7 @@ export interface components {
             userId?: string;
             /** @description Reaches the switch as an identifier: no spaces, @ or quotes. */
             callcenterName: string;
+            /** @description The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says. */
             isAutoAnswer?: boolean;
             /**
              * Format: uuid

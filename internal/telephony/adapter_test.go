@@ -218,6 +218,19 @@ func TestCommandStrings(t *testing.T) {
 				"user/1008@aicc.test &park()",
 		},
 		{
+			// The click-to-dial's own auto-answer header is dropped at answer
+			// (#266); the application and its argument stay one value.
+			name: "an execute_on_answer with an argument survives the block",
+			act: func(a *Adapter) error {
+				_, err := a.Originate(partyID, "user/1008@aicc.test",
+					map[string]string{"execute_on_answer": "unset sip_h_Call-Info", "sip_auto_answer": "true"})
+				return err
+			},
+			want: "originate {execute_on_answer='unset sip_h_Call-Info'," +
+				"ignore_early_media=true,origination_uuid=019ffa1d-0dc1-7b9e-b124-cffb41e90a3d,sip_auto_answer=true}" +
+				"user/1008@aicc.test &park()",
+		},
+		{
 			name: "hangup defaults to a normal cause",
 			act:  func(a *Adapter) error { return a.Hangup("chan-1", "") },
 			want: "uuid_kill chan-1 NORMAL_CLEARING",
