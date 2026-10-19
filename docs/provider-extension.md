@@ -133,10 +133,16 @@ dropped), so a caller utterance is exactly one line; a refused `response.cancel`
 window of one this client sent is not an error; a `conversation.item.truncate` on
 an unknown id gets no answer at all.
 
-The silent drop has a consequence this client does not recover from: a
-`response.create` that never yields `response.created` leaves
-`isResponseRequested` set, and the watchdog only watches an open response.
-Hence the trait above rather than a retry.
+The silent drop is why the trait exists, and the client no longer waits on it
+for ever: every `response.create` it sends waits at most
+`responseCreatedTimeout` for `response.created` (the watchdog only watches an
+open response, so nothing else would end that wait). On expiry the floor is
+given back with one WARN and a count in `aicc_provider_response_unanswered_total`;
+a line waiting for the floor is then asked for instead, otherwise the request is
+retried once (a line with its direction put in the conversation), and a retry
+that is dropped too is given up. A request that was only late makes the provider
+refuse the retry, which the client recognises as its own and does not report.
+The same holds on every Realtime profile, with no branch on the name.
 
 One ordering rule is new: audio sent before the session configuration is
 acknowledged leaves the session deaf, with no error. `Start` returns only after
