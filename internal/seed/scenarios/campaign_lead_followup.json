@@ -121,13 +121,13 @@
       "isCampaign": true,
       "caller": "18688886666",
       "steps": [
-        {"say": "Not really interested, thanks."},
-        {"call": "record_lead", "args": {"intent": "NONE", "notes": "not interested"}, "expect": {"phase": "talk"}},
+        {"say": "Not that keen, to be honest."},
+        {"call": "record_lead", "args": {"intent": "LOW", "notes": "not that keen"}, "expect": {"phase": "talk"}},
         {"botTurn": "reply"},
         {"say": "No, that's it. Bye."},
         {"call": "hangup", "expect": {"phase": "finish"}}
       ],
-      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "NONE"}}
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "LOW"}}
     },
     {
       "name": "记录态度、确认追问、客户没有别的事就挂断",
@@ -135,10 +135,34 @@
       "isCampaign": true,
       "caller": "18688886666",
       "steps": [
-        {"say": "不太感兴趣,谢谢。"},
-        {"call": "record_lead", "args": {"intent": "NONE", "notes": "不感兴趣"}, "expect": {"phase": "talk"}},
+        {"say": "兴趣不大,说实话。"},
+        {"call": "record_lead", "args": {"intent": "LOW", "notes": "兴趣不大"}, "expect": {"phase": "talk"}},
         {"botTurn": "reply"},
         {"say": "没有了,再见。"},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "LOW"}}
+    },
+    {
+      "name": "a clear no is recorded and hung up at once, with no confirming question",
+      "lang": "en",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "No, I'm not interested at all."},
+        {"call": "record_lead", "args": {"intent": "NONE", "notes": "not interested at all"}, "expect": {"phase": "talk", "instructionContains": ["(NONE)", "call hangup immediately with no confirmation and no further pitch"]}},
+        {"call": "hangup", "expect": {"phase": "finish"}}
+      ],
+      "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "NONE"}}
+    },
+    {
+      "name": "明确拒绝:记 NONE 后立即挂断,不再确认追问",
+      "lang": "zh",
+      "isCampaign": true,
+      "caller": "18688886666",
+      "steps": [
+        {"say": "不需要,我一点兴趣都没有。"},
+        {"call": "record_lead", "args": {"intent": "NONE", "notes": "一点兴趣都没有"}, "expect": {"phase": "talk", "instructionContains": ["明确没有兴趣记 NONE", "记录后立即调用 hangup,不必确认,也不要再介绍优惠"]}},
         {"call": "hangup", "expect": {"phase": "finish"}}
       ],
       "expect": {"path": ["talk", "finish"], "ending": "hangup", "toolsRun": ["record_lead", "hangup"], "lead": {"intent": "NONE"}}

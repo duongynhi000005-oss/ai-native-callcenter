@@ -260,7 +260,9 @@ func hasBothLanguages(t *testing.T, file, node string, line flow.Text) {
 // again when their stance clearly changes; the last call counts"). A `talk`
 // instruction that orders hangup right after recording an ordinary stance
 // makes that rule unreachable: the line is gone before the customer can speak
-// (issue #206). Only the DO_NOT_CALL sentence may order an immediate hangup.
+// (issue #206). Only the sentence that names DO_NOT_CALL may order an
+// immediate hangup; it also covers a clear no (NONE), which has nothing left to
+// confirm and ends at once (owner decision after the r3 live round).
 func TestCampaignTalkDoesNotHangUpRightAfterRecordingAStance(t *testing.T) {
 	t.Parallel()
 	spec := shippedFlows(t)["campaign_lead_followup.json"]
