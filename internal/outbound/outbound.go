@@ -487,8 +487,18 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		// click (walkthrough, 2026-08-28). One name only: inside an originate
 		// {…} block a comma separates variables, so a two-name export_vars
 		// would be cut in half.
-		"export_vars":                  "aicc_call_id",
-		"sip_auto_answer":              "true",
+		"export_vars":     "aicc_call_id",
+		"sip_auto_answer": "true",
+		// sip_auto_answer is the agent's phone picking up its own call, and
+		// nobody else's. mod_sofia turns it into sip_h_Call-Info=…;answer-after=0
+		// on this leg, and copies every sip_h_* of a leg onto each leg it dials
+		// from it: the trunk leg, then whatever that leg is transferred to. An
+		// extension it reached answered with no ring (#266). Gone once the
+		// agent answered, which is before the dialplan bridges anywhere: the
+		// answer runs this on the leg's own thread. Not
+		// sip_copy_custom_headers=false, which would stop every other header
+		// that should cross.
+		"execute_on_answer":            "unset sip_h_Call-Info",
 		"origination_caller_id_number": destination,
 		// No space in the name: it travels inside an originate {…} block,
 		// where a space ends the block and kills the call before it routes.

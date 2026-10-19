@@ -1338,7 +1338,9 @@ type Agent struct {
 	AgentID            openapi_types.UUID  `json:"agentId"`
 	CallcenterName     string              `json:"callcenterName"`
 	DefaultExtensionID *openapi_types.UUID `json:"defaultExtensionId,omitempty"`
-	IsAutoAnswer       bool                `json:"isAutoAnswer"`
+
+	// IsAutoAnswer The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says.
+	IsAutoAnswer bool `json:"isAutoAnswer"`
 
 	// UserID The account this agent identity belongs to. One user has at most one agent identity.
 	UserID openapi_types.UUID `json:"userId"`
@@ -1396,7 +1398,9 @@ type AgentWrite struct {
 
 	// DefaultExtensionID The phone this agent signs in at. Null unbinds them, after which they cannot sign in.
 	DefaultExtensionID *openapi_types.UUID `json:"defaultExtensionId,omitempty"`
-	IsAutoAnswer       *bool               `json:"isAutoAnswer,omitempty"`
+
+	// IsAutoAnswer The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says.
+	IsAutoAnswer *bool `json:"isAutoAnswer,omitempty"`
 
 	// UserID Required on create and ignored on update: an agent identity never moves between accounts.
 	UserID *openapi_types.UUID `json:"userId,omitempty"`
@@ -2776,9 +2780,11 @@ type RosterEntry struct {
 
 	// ExtensionNumber The phone the agent is signed in at right now; absent when signed out.
 	ExtensionNumber *string `json:"extensionNumber,omitempty"`
-	IsAutoAnswer    bool    `json:"isAutoAnswer"`
-	IsOnCall        bool    `json:"isOnCall"`
-	IsRegistered    bool    `json:"isRegistered"`
+
+	// IsAutoAnswer The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says.
+	IsAutoAnswer bool `json:"isAutoAnswer"`
+	IsOnCall     bool `json:"isOnCall"`
+	IsRegistered bool `json:"isRegistered"`
 
 	// Reason Why an agent is NOT_READY. LOGIN, AFTER_CALL_WORK, SYSTEM, SUPERVISOR and DEVICE_LOST are set by the platform, never chosen by the agent. DEVICE_LOST means the phone's registration expired or was flushed while the agent was READY.
 	Reason *NotReadyReason `json:"reason,omitempty"`

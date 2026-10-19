@@ -7424,7 +7424,8 @@
             "description": "The identifier the switch knows this agent by."
           },
           "isAutoAnswer": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says."
           },
           "defaultExtensionId": {
             "type": "string",
@@ -7467,7 +7468,8 @@
             "type": "string"
           },
           "isAutoAnswer": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says."
           },
           "defaultExtensionId": {
             "type": "string",
@@ -7495,7 +7497,8 @@
             "description": "Reaches the switch as an identifier: no spaces, @ or quotes."
           },
           "isAutoAnswer": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "The agent's phone answers a call a queue delivers to them without ringing. Every other call to their extension rings and is answered by hand: a direct dial, a transfer, a click-to-dial from a colleague. The agent's own click-to-dial always answers their phone by itself, whatever this says."
           },
           "defaultExtensionId": {
             "type": "string",

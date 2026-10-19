@@ -362,6 +362,11 @@ func TestDialIsAgentFirst(t *testing.T) {
 	if first.vars["sip_auto_answer"] != "true" {
 		t.Error("the agent clicked; their leg should auto-answer")
 	}
+	// Only theirs: the header it becomes is copied onto every leg dialled
+	// from this one, and a transfer target answered with no ring (#266).
+	if got := first.vars["execute_on_answer"]; got != "unset sip_h_Call-Info" {
+		t.Errorf("execute_on_answer = %q, want the auto-answer header cleared before the call goes anywhere", got)
+	}
 	// The next leg inherits this one's codec, and a G.711-only phone rejects
 	// an inherited opus offer outright (found live).
 	if pin := first.vars["absolute_codec_string"]; pin != "PCMU" {
