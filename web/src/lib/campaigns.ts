@@ -316,6 +316,17 @@ export function hasCallRecord(outcome: CampaignOutcome | undefined): boolean {
   return outcome !== 'DNC_SKIPPED' && outcome !== 'INVALID_NUMBER'
 }
 
+/**
+ * Whether a contact's last outcome says its last call certainly took place,
+ * so the call page has a record to show. Stricter than hasCallRecord: a lead
+ * row links only to a call that rang, and ORIGINATE_FAILED (perhaps no record)
+ * and UNKNOWN (reconciled because no record was found) do not promise one.
+ */
+export function isPlacedCall(outcome: CampaignOutcome | undefined): boolean {
+  return outcome !== undefined && hasCallRecord(outcome) &&
+    outcome !== 'ORIGINATE_FAILED' && outcome !== 'UNKNOWN'
+}
+
 export function isFinished(status: CampaignStatus): boolean {
   return status === 'COMPLETED' || status === 'CANCELLED'
 }

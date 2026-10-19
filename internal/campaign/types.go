@@ -167,7 +167,14 @@ type Contact struct {
 	LastOutcome    Outcome
 	LeadIntent     LeadIntent
 	LeadNotes      string
-	CreatedAt      time.Time
+	// LastAttemptID and LastCallID name the latest finished attempt and its
+	// call; nil before the first attempt has finished. They follow every
+	// attempt, while the lead is kept from the latest call that recorded one,
+	// so after a retry that recorded none they name a later call than the
+	// lead's (design 10 section 14).
+	LastAttemptID *uuid.UUID
+	LastCallID    *uuid.UUID
+	CreatedAt     time.Time
 }
 
 // ListFilter narrows and pages a listing of campaigns.

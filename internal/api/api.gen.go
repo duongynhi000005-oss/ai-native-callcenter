@@ -1766,6 +1766,12 @@ type CampaignContact struct {
 	CreatedAt  time.Time          `json:"createdAt"`
 	ID         openapi_types.UUID `json:"id"`
 
+	// LastAttemptID The id of the attempt lastCallId belongs to, or null before the first attempt has finished.
+	LastAttemptID *openapi_types.UUID `json:"lastAttemptId"`
+
+	// LastCallID The call of this contact's latest finished attempt, or null before its first attempt has finished. It changes with every attempt, so after a retry it names the retry's call, and leadIntent may still be the one an earlier call recorded when the retry recorded none. Not every attempt is a call that took place: after a DNC_SKIPPED, INVALID_NUMBER, ORIGINATE_FAILED or UNKNOWN attempt the ledger may hold no CDR for it. A HIGH lead's callback is found with listCallbacks?callId=.
+	LastCallID *openapi_types.UUID `json:"lastCallId"`
+
 	// LastOutcome How an attempt ended (design 10 section 7.2). A contact's lastOutcome is the latest attempt's.
 	LastOutcome *CampaignOutcome `json:"lastOutcome,omitempty"`
 
@@ -3203,8 +3209,11 @@ type ListAuditLogsParams struct {
 type ListCallbacksParams struct {
 	// Status Omitted or empty returns every status.
 	Status *CallbackStatus `form:"status,omitempty" json:"status,omitempty"`
-	Limit  *int            `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset *int            `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// CallID Only the callbacks filed by this call; omitted lists every call's. A campaign call files at most one (its HIGH lead's), so a contact's lastCallId resolves to that callback or to an empty list.
+	CallID *openapi_types.UUID `form:"callId,omitempty" json:"callId,omitempty"`
+	Limit  *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int                `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
 // GetCallTranscriptParams defines parameters for GetCallTranscript.
@@ -4958,6 +4967,19 @@ func (siw *ServerInterfaceWrapper) ListCallbacks(w http.ResponseWriter, r *http.
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "callId" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "callId", r.URL.Query(), &params.CallID, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "callId"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "callId", Err: err})
 		}
 		return
 	}

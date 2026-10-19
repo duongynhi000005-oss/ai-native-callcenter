@@ -196,6 +196,7 @@ final.
 | `next_attempt_at` | when it may be dialled next; NULL unless `ACTIVE` |
 | `last_outcome` | from the latest attempt |
 | `lead_intent`, `lead_notes` | latest recorded lead (§11); NULL means never recorded |
+| `last_attempt_id`, `last_call_id` | the latest finished attempt and its call; NULL before the first attempt finishes. Written with `last_outcome` when the latest attempt settles, so they follow every attempt while the lead is kept from the latest call that recorded one (§14). Not foreign keys, like `call_id` everywhere; migration 00042 backfilled them from the latest `FINISHED` attempt by `started_at` |
 
 ### 3.3 `campaign_attempts`
 
@@ -875,7 +876,12 @@ Contract first in `docs/openapi.json`; final shapes come with the PR.
   later admissions and not calls in flight; anything else is `CAMPAIGN_FIELD_LOCKED`. `DELETE` only
   in `DRAFT`.
 - `POST /campaigns/{campaignId}/start | pause | resume | cancel`
-- `POST/GET /campaigns/{campaignId}/contacts` (filter by `status`, `leadIntent`)
+- `POST/GET /campaigns/{campaignId}/contacts` (filter by `status`, `leadIntent`). A contact carries
+  `lastCallId` and `lastAttemptId`, required and `null` until its first attempt finishes (§3.2).
+- `GET /callbacks?callId=` (#188): only the callbacks one call filed. A campaign call files at most
+  one, so a `HIGH` lead resolves to its callback with the contact's `lastCallId`, never by comparing
+  phone numbers: one number can hold callbacks from several calls and campaigns, and `numberRaw` and
+  `phoneNumber` need not share a format.
 - `GET /campaigns/{campaignId}/attempts`
 - `GET /campaigns/settings` (`campaigns:read`): the rules a write is held to, so a form does not
   mirror them. `outboundHours` is `AICC_OUTBOUND_HOURS` as a `CampaignTimeRange` (callee-local; a
@@ -949,7 +955,24 @@ configuration today, so only the env names `AICC_OVERFLOW_HOLD` and the like app
 - contact import from CSV or Excel: parsed in the browser, sent to the import API, the per-row
   result shown;
 - live progress (SSE `CAMPAIGN_UPDATED`, including `activity` and `nextDialAt`);
-- leads: filtered by intent, a `HIGH` lead linked to its callback;
+- leads: filtered by intent, a `HIGH` lead linked to its callback (#188). The reader decision is
+  the second of the issue's two options: the lead row links to the call page
+  (`/admin/cdr/$callId`, ADMIN and SUPERVISOR, `getCDR` on `history:read:all`) by `lastCallId`, only
+  when `lastOutcome` says the call rang (not `DNC_SKIPPED`, `INVALID_NUMBER`, `ORIGINATE_FAILED` or
+  `UNKNOWN`), and shows the callback's status as text, resolved with `GET /callbacks?callId=`. The
+  callbacks screen keeps its `AGENT` guard because it is an agent's work queue (claim, complete,
+  release), not because of the API: `listCallbacks` is `calls:read:own` from role `NONE` and filters
+  nothing by caller, so a supervisor's session and a key with `campaigns:read` + `calls:read:own`
+  read the same rows.
+  - **A retry after a lead.** The link follows the latest attempt; the lead is kept from the latest
+    call that recorded one (§11). After a first call that recorded `HIGH` and a retry that recorded
+    `LOW`, the contact is `LOW` and links to the second call; the callback the first call filed is
+    left as it is, neither removed nor filed again, because callbacks are filed once per call and
+    never withdrawn. A retry can follow a lead only when the first attempt was not seen to be
+    answered: reconciliation finished it `UNKNOWN` with no CDR (§8.2).
+  - **Known gap.** Such an `UNKNOWN`-reconciled attempt that recorded a lead can be redialled, and
+    when the retry records no lead the contact keeps `HIGH` while `lastCallId` names the retry, so a
+    `HIGH` row can lose its callback link until that is fixed (#264).
 - DNC list: view, add, remove;
 - the DID form gains `maxOutboundChannels`.
 

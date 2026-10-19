@@ -116,7 +116,7 @@ func (q *Queries) DeferContacts(ctx context.Context, arg DeferContactsParams) (i
 }
 
 const dueCampaignContacts = `-- name: DueCampaignContacts :many
-SELECT c.id, c.campaign_id, c.number_e164, c.number_raw, c.time_zone, c.slots, c.status, c.attempts, c.system_failures, c.next_attempt_at, c.last_outcome, c.lead_intent, c.lead_notes, c.created_at, c.updated_at FROM campaign_contacts c
+SELECT c.id, c.campaign_id, c.number_e164, c.number_raw, c.time_zone, c.slots, c.status, c.attempts, c.system_failures, c.next_attempt_at, c.last_outcome, c.lead_intent, c.lead_notes, c.created_at, c.updated_at, c.last_attempt_id, c.last_call_id FROM campaign_contacts c
 WHERE c.campaign_id = $1
   AND c.status = 'ACTIVE'
   AND c.next_attempt_at <= $2::timestamptz
@@ -175,6 +175,8 @@ func (q *Queries) DueCampaignContacts(ctx context.Context, arg DueCampaignContac
 			&i.LeadNotes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastAttemptID,
+			&i.LastCallID,
 		); err != nil {
 			return nil, err
 		}
@@ -217,7 +219,7 @@ func (q *Queries) DueDNCContacts(ctx context.Context, rowLimit int32) ([]uuid.UU
 }
 
 const earliestPendingContact = `-- name: EarliestPendingContact :one
-SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at FROM campaign_contacts
+SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at, last_attempt_id, last_call_id FROM campaign_contacts
 WHERE campaign_id = $1 AND status = 'ACTIVE' AND next_attempt_at IS NOT NULL
 ORDER BY next_attempt_at, id
 LIMIT 1
@@ -242,6 +244,8 @@ func (q *Queries) EarliestPendingContact(ctx context.Context, campaignID uuid.UU
 		&i.LeadNotes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastAttemptID,
+		&i.LastCallID,
 	)
 	return i, err
 }

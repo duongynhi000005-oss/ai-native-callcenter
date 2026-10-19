@@ -160,6 +160,8 @@ type CampaignContact struct {
 	LeadNotes      *string            `json:"leadNotes"`
 	CreatedAt      pgtype.Timestamptz `json:"createdAt"`
 	UpdatedAt      pgtype.Timestamptz `json:"updatedAt"`
+	LastAttemptID  *uuid.UUID         `json:"lastAttemptId"`
+	LastCallID     *uuid.UUID         `json:"lastCallId"`
 }
 
 type Cdr struct {

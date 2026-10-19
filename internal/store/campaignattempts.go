@@ -330,6 +330,7 @@ func (f attemptFinisher) apply(ctx context.Context, q *queries.Queries, att quer
 	if err := q.SettleCampaignContact(ctx, queries.SettleCampaignContactParams{
 		ID: contact.ID, Attempts: int32(counters.Attempts), SystemFailures: int32(counters.SystemFailures),
 		Status: string(settled.Status), NextAttemptAt: next, LastOutcome: textPtr(string(e.Outcome)),
+		LastAttemptID: att.ID, LastCallID: att.CallID,
 		LeadIntent: leadIntent, LeadNotes: leadNotes,
 	}); err != nil {
 		return nil, fmt.Errorf("settle contact: %w", err)

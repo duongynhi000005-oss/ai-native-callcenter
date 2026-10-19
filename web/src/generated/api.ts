@@ -3535,6 +3535,16 @@ export interface components {
             lastOutcome?: components["schemas"]["CampaignOutcome"];
             leadIntent?: components["schemas"]["CampaignLeadIntent"];
             leadNotes?: string;
+            /**
+             * Format: uuid
+             * @description The call of this contact's latest finished attempt, or null before its first attempt has finished. It changes with every attempt, so after a retry it names the retry's call, and leadIntent may still be the one an earlier call recorded when the retry recorded none. Not every attempt is a call that took place: after a DNC_SKIPPED, INVALID_NUMBER, ORIGINATE_FAILED or UNKNOWN attempt the ledger may hold no CDR for it. A HIGH lead's callback is found with listCallbacks?callId=.
+             */
+            lastCallId: string | null;
+            /**
+             * Format: uuid
+             * @description The id of the attempt lastCallId belongs to, or null before the first attempt has finished.
+             */
+            lastAttemptId: string | null;
             /** Format: date-time */
             createdAt: string;
         };
@@ -5687,6 +5697,8 @@ export interface operations {
             query?: {
                 /** @description Omitted or empty returns every status. */
                 status?: components["schemas"]["CallbackStatus"];
+                /** @description Only the callbacks filed by this call; omitted lists every call's. A campaign call files at most one (its HIGH lead's), so a contact's lastCallId resolves to that callback or to an empty list. */
+                callId?: string;
                 limit?: number;
                 offset?: number;
             };

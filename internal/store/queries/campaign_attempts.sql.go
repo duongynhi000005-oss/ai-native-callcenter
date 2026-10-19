@@ -270,7 +270,7 @@ func (q *Queries) LockAttemptByCall(ctx context.Context, callID uuid.UUID) (Camp
 }
 
 const lockCampaignContact = `-- name: LockCampaignContact :one
-SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at FROM campaign_contacts WHERE id = $1 FOR UPDATE
+SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at, last_attempt_id, last_call_id FROM campaign_contacts WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) LockCampaignContact(ctx context.Context, id uuid.UUID) (CampaignContact, error) {
@@ -292,6 +292,8 @@ func (q *Queries) LockCampaignContact(ctx context.Context, id uuid.UUID) (Campai
 		&i.LeadNotes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastAttemptID,
+		&i.LastCallID,
 	)
 	return i, err
 }
@@ -390,10 +392,11 @@ func (q *Queries) SetAttemptLead(ctx context.Context, arg SetAttemptLeadParams) 
 const settleCampaignContact = `-- name: SettleCampaignContact :exec
 UPDATE campaign_contacts
 SET attempts = $2, system_failures = $3, status = $4, next_attempt_at = $5,
-    last_outcome = $6,
-    lead_intent = coalesce($7::text, lead_intent),
-    lead_notes = CASE WHEN $7::text IS NULL THEN lead_notes
-                      ELSE $8::text END,
+    last_outcome = $6, last_attempt_id = $7::uuid,
+    last_call_id = $8::uuid,
+    lead_intent = coalesce($9::text, lead_intent),
+    lead_notes = CASE WHEN $9::text IS NULL THEN lead_notes
+                      ELSE $10::text END,
     updated_at = now()
 WHERE id = $1
 `
@@ -405,12 +408,16 @@ type SettleCampaignContactParams struct {
 	Status         string             `json:"status"`
 	NextAttemptAt  pgtype.Timestamptz `json:"nextAttemptAt"`
 	LastOutcome    *string            `json:"lastOutcome"`
+	LastAttemptID  uuid.UUID          `json:"lastAttemptId"`
+	LastCallID     uuid.UUID          `json:"lastCallId"`
 	LeadIntent     *string            `json:"leadIntent"`
 	LeadNotes      *string            `json:"leadNotes"`
 }
 
 // The contact after its latest attempt settled: counters, fate and schedule.
-// A recorded lead is kept (copied only when this attempt recorded one).
+// A recorded lead is kept (copied only when this attempt recorded one); the
+// last attempt and its call are always this one, so after a retry that
+// recorded no lead they name a later call than the lead's.
 func (q *Queries) SettleCampaignContact(ctx context.Context, arg SettleCampaignContactParams) error {
 	_, err := q.db.Exec(ctx, settleCampaignContact,
 		arg.ID,
@@ -419,6 +426,8 @@ func (q *Queries) SettleCampaignContact(ctx context.Context, arg SettleCampaignC
 		arg.Status,
 		arg.NextAttemptAt,
 		arg.LastOutcome,
+		arg.LastAttemptID,
+		arg.LastCallID,
 		arg.LeadIntent,
 		arg.LeadNotes,
 	)

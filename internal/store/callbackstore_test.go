@@ -73,7 +73,7 @@ func TestACallbackRemembersHowItsLastAttemptWent(t *testing.T) {
 		t.Fatalf("insert cdr: %v", err)
 	}
 
-	rows, err := ledger.ListCallbacks(ctx, "", 10, 0)
+	rows, err := ledger.ListCallbacks(ctx, "", nil, 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

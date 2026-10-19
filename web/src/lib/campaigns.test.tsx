@@ -9,7 +9,7 @@ import zh from '@/locales/zh/translation.json'
 
 import { ApiError } from './api'
 import {
-  CAMPAIGN_ERROR_CODES, CAMPAIGN_FIELDS, campaignApi, hasCallRecord, useCampaignMutations, actionsFor, applyCampaignUpdated, blankForm,
+  CAMPAIGN_ERROR_CODES, CAMPAIGN_FIELDS, campaignApi, hasCallRecord, isPlacedCall, useCampaignMutations, actionsFor, applyCampaignUpdated, blankForm,
   campaignFieldError, campaignKey, campaignPayloadOf, createBodyOf, describeState, formFrom,
   defaultTimeZone, isFieldEditable, patchOf, retryFields, rangesOutsideHours, formProblems,
   type CampaignWrite, type CampaignSettings, type Campaign, type CampaignStatus, type SseCampaignUpdatedPayload,
@@ -358,6 +358,17 @@ describe('which attempts link to a call record', () => {
   it('keeps it for every outcome that placed a call, and for a failed placement', () => {
     for (const o of ['ANSWERED', 'NO_ANSWER', 'BUSY', 'REJECTED', 'UNKNOWN', 'TRANSIENT', 'BOT_FAILED', 'OVERFLOW', 'ORIGINATE_FAILED'] as const) {
       expect(hasCallRecord(o)).toBe(true)
+    }
+  })
+})
+
+describe('which leads link to their last call', () => {
+  it('links only an outcome that says the call rang', () => {
+    for (const o of ['ANSWERED', 'NO_ANSWER', 'BUSY', 'REJECTED', 'TRANSIENT', 'BOT_FAILED', 'OVERFLOW'] as const) {
+      expect(isPlacedCall(o)).toBe(true)
+    }
+    for (const o of ['DNC_SKIPPED', 'INVALID_NUMBER', 'ORIGINATE_FAILED', 'UNKNOWN', undefined] as const) {
+      expect(isPlacedCall(o)).toBe(false)
     }
   })
 })

@@ -56,11 +56,14 @@ SET state = 'FINISHED', outcome = $2, hangup_cause = $3, talk_sec = $4,
 WHERE id = $1;
 
 -- The contact after its latest attempt settled: counters, fate and schedule.
--- A recorded lead is kept (copied only when this attempt recorded one).
+-- A recorded lead is kept (copied only when this attempt recorded one); the
+-- last attempt and its call are always this one, so after a retry that
+-- recorded no lead they name a later call than the lead's.
 -- name: SettleCampaignContact :exec
 UPDATE campaign_contacts
 SET attempts = $2, system_failures = $3, status = $4, next_attempt_at = $5,
-    last_outcome = $6,
+    last_outcome = $6, last_attempt_id = sqlc.arg('last_attempt_id')::uuid,
+    last_call_id = sqlc.arg('last_call_id')::uuid,
     lead_intent = coalesce(sqlc.narg('lead_intent')::text, lead_intent),
     lead_notes = CASE WHEN sqlc.narg('lead_intent')::text IS NULL THEN lead_notes
                       ELSE sqlc.narg('lead_notes')::text END,

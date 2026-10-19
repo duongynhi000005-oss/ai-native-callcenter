@@ -374,7 +374,7 @@ func (q *Queries) InsertCampaignContacts(ctx context.Context, arg InsertCampaign
 }
 
 const listCampaignContacts = `-- name: ListCampaignContacts :many
-SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at FROM campaign_contacts
+SELECT id, campaign_id, number_e164, number_raw, time_zone, slots, status, attempts, system_failures, next_attempt_at, last_outcome, lead_intent, lead_notes, created_at, updated_at, last_attempt_id, last_call_id FROM campaign_contacts
 WHERE campaign_id = $1
   AND ($2::text = '' OR status = $2)
   AND ($3::text = '' OR lead_intent = $3)
@@ -421,6 +421,8 @@ func (q *Queries) ListCampaignContacts(ctx context.Context, arg ListCampaignCont
 			&i.LeadNotes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastAttemptID,
+			&i.LastCallID,
 		); err != nil {
 			return nil, err
 		}
