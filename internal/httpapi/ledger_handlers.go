@@ -159,7 +159,7 @@ func (s *Server) ListCallbacks(w http.ResponseWriter, r *http.Request, params ap
 	if params.Status != nil {
 		status = string(*params.Status)
 	}
-	items, err := s.ledger.ListCallbacks(r.Context(), status,
+	items, err := s.ledger.ListCallbacks(r.Context(), status, params.CallID,
 		intOr(params.Limit, 50), intOr(params.Offset, 0))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, CodeStorageDown, "cannot list callbacks", nil)

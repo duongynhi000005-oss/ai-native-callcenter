@@ -557,6 +557,7 @@ func campaignContactOut(c campaign.Contact) api.CampaignContact {
 		Slots: c.Slots, Status: api.CampaignContactStatus(c.Status),
 		Attempts: c.Attempts, SystemFailures: c.SystemFailures,
 		NextAttemptAt: c.NextAttemptAt, CreatedAt: c.CreatedAt,
+		LastAttemptID: c.LastAttemptID, LastCallID: c.LastCallID,
 	}
 	if out.Slots == nil {
 		out.Slots = map[string]string{}

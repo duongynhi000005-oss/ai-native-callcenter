@@ -874,18 +874,25 @@ func (q *Queries) ListCDRs(ctx context.Context, arg ListCDRsParams) ([]Cdr, erro
 const listCallbacks = `-- name: ListCallbacks :many
 SELECT id, call_id, queue_id, phone_number, message, status, created_at, handled_by, handled_at, last_attempt_call_id, last_attempt_at, last_attempt_status FROM callbacks
 WHERE ($1::text = '' OR status = $1)
+  AND ($2::uuid IS NULL OR call_id = $2)
 ORDER BY created_at DESC
-LIMIT $3 OFFSET $2
+LIMIT $4 OFFSET $3
 `
 
 type ListCallbacksParams struct {
-	Status     string `json:"status"`
-	PageOffset int32  `json:"pageOffset"`
-	PageLimit  int32  `json:"pageLimit"`
+	Status     string     `json:"status"`
+	CallID     *uuid.UUID `json:"callId"`
+	PageOffset int32      `json:"pageOffset"`
+	PageLimit  int32      `json:"pageLimit"`
 }
 
 func (q *Queries) ListCallbacks(ctx context.Context, arg ListCallbacksParams) ([]Callback, error) {
-	rows, err := q.db.Query(ctx, listCallbacks, arg.Status, arg.PageOffset, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listCallbacks,
+		arg.Status,
+		arg.CallID,
+		arg.PageOffset,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -765,13 +765,14 @@ func (l *LedgerStore) InsertCallback(ctx context.Context, callID, queueID *uuid.
 	return callbackFromRow(row), nil
 }
 
-// ListCallbacks pages the work queue; an empty status lists everything.
-func (l *LedgerStore) ListCallbacks(ctx context.Context, status string, limit, offset int) ([]Callback, error) {
+// ListCallbacks pages the work queue; an empty status lists everything, and
+// a nil callID every call's callbacks.
+func (l *LedgerStore) ListCallbacks(ctx context.Context, status string, callID *uuid.UUID, limit, offset int) ([]Callback, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := l.q.ListCallbacks(ctx, queries.ListCallbacksParams{
-		Status: status, PageLimit: int32(limit), PageOffset: int32(offset),
+		Status: status, CallID: callID, PageLimit: int32(limit), PageOffset: int32(offset),
 	})
 	if err != nil {
 		return nil, err

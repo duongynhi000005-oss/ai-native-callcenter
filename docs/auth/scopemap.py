@@ -96,7 +96,10 @@ OPS = {
     "createCall":               (["calls:create"], N, True),
     "monitorCall":              (["calls:monitor"], S, True),
 
-    # Callbacks: work on a call that has not happened yet.
+    # Callbacks: work on a call that has not happened yet. listCallbacks
+    # filters nothing by caller, so a supervisor running a campaign reads the
+    # same queue and resolves a HIGH lead's callback with ?callId= (design 10
+    # section 14, #188); a key needs campaigns:read plus calls:read:own for it.
     "listCallbacks":            (["calls:read:own"], N, True),
     "claimCallback":            (["calls:control"], N, True),
     "releaseCallback":          (["calls:control"], N, True),

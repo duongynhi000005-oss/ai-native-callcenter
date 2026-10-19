@@ -483,6 +483,7 @@ func contactOf(r queries.CampaignContact) (campaign.Contact, error) {
 		ID: r.ID, CampaignID: r.CampaignID, Number: r.NumberE164, NumberRaw: r.NumberRaw,
 		Status: campaign.ContactStatus(r.Status), Attempts: int(r.Attempts),
 		SystemFailures: int(r.SystemFailures), NextAttemptAt: timeOrNil(r.NextAttemptAt),
+		LastAttemptID: r.LastAttemptID, LastCallID: r.LastCallID,
 		CreatedAt: r.CreatedAt.Time, Slots: map[string]string{},
 	}
 	if r.TimeZone != nil {

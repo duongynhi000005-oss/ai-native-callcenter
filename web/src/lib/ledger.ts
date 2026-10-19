@@ -104,6 +104,9 @@ export const ledgerApi = {
   callbacks: (status?: string) =>
     request<{ items: Callback[] }>(`/callbacks${query({ status })}`),
 
+  callbacksOfCall: (callId: string) =>
+    request<{ items: Callback[] }>(`/callbacks${query({ callId })}`),
+
   claimCallback: (id: string) =>
     request<Callback>(`/callbacks/${id}/claim`, { method: 'POST' }),
 
@@ -203,6 +206,20 @@ export function useCallbacks(status?: string) {
   return useQuery({
     queryKey: [...CALLBACKS_KEY, status ?? 'all'],
     queryFn: () => ledgerApi.callbacks(status),
+  })
+}
+
+/**
+ * The callback a call filed, if any: a campaign call files at most one (its
+ * HIGH lead's), so the first row is the one. Resolved by call id, never by
+ * phone number, which one person's several calls share.
+ */
+export function useCallbackOfCall({ callId }: { callId: string | undefined }) {
+  return useQuery({
+    queryKey: [...CALLBACKS_KEY, 'call', callId],
+    enabled: callId !== undefined,
+    queryFn: () => ledgerApi.callbacksOfCall(callId as string),
+    select: (page): Callback | null => page.items[0] ?? null,
   })
 }
 

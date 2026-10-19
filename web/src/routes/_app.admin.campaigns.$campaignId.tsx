@@ -1,10 +1,11 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { Pause, Play, Upload } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CampaignFormView } from '@/components/campaign-form'
 import { CampaignImportDialog } from '@/components/campaign-import'
+import { CampaignLeads } from '@/components/campaign-leads'
 import { CampaignState } from '@/components/campaign-state'
 import { ConfirmAction } from '@/components/confirm-action'
 import { KpiCard } from '@/components/kpi-card'
@@ -24,7 +25,7 @@ import {
 } from '@/lib/campaigns'
 import { describeError } from '@/lib/errors'
 import { requireRole } from '@/lib/guards'
-import { formatDuration, useCallbacks } from '@/lib/ledger'
+import { formatDuration } from '@/lib/ledger'
 
 /**
  * One campaign: its state and counters (live), its settings, its contacts,
@@ -181,7 +182,7 @@ function CampaignDetail() {
           <ContactsTab campaign={data} />
         </TabsContent>
         <TabsContent value="leads" className="pt-4">
-          <LeadsTab campaign={data} />
+          <CampaignLeads campaign={data} />
         </TabsContent>
         <TabsContent value="attempts" className="pt-4">
           <AttemptsTab campaign={data} />
@@ -362,80 +363,6 @@ function ContactsTab({ campaign }: { campaign: Campaign }) {
               </Td>
             </Tr>
           ))}
-        </TBody>
-      </DataTable>
-      <Pager page={page} pageSize={PAGE_SIZE} total={data?.total ?? 0} onPage={setPage} />
-    </>
-  )
-}
-
-/**
- * Leads: the contacts the bot rated, by intent. A HIGH lead has a callback
- * waiting for a person; the callback is found by its number, since the
- * contract carries no id from a contact to its callback.
- */
-function LeadsTab({ campaign }: { campaign: Campaign }) {
-  const { t } = useTranslation()
-  const [intent, setIntent] = useState<CampaignLeadIntent>('HIGH')
-  const [page, setPage] = useState(0)
-  const { data, isPending, isError, error } = useCampaignContacts(campaign.id, {
-    leadIntent: intent,
-    limit: PAGE_SIZE,
-    offset: page * PAGE_SIZE,
-  })
-  const callbacks = useCallbacks()
-  const byNumber = useMemo(() => {
-    const map = new Map<string, NonNullable<typeof callbacks.data>['items'][number]>()
-    for (const cb of callbacks.data?.items ?? []) {
-      const key = cb.phoneNumber.replace(/\D/g, '')
-      // The newest callback for a number wins; the list is newest first.
-      if (!map.has(key)) map.set(key, cb)
-    }
-    return map
-  }, [callbacks.data])
-  const rows = data?.items ?? []
-
-  return (
-    <>
-      <div className="mb-3 flex gap-2">
-        <Select
-          ariaLabel={t('campaign.leadIntent')}
-          value={intent}
-          onChange={(next) => {
-            setIntent(next as CampaignLeadIntent)
-            setPage(0)
-          }}
-          options={LEAD_INTENTS.map((s) => ({ value: s, label: t(`campaign.intents.${s}`) }))}
-        />
-      </div>
-      <DataTable>
-        <THead>
-          <Th>{t('campaign.number')}</Th>
-          <Th>{t('campaign.leadIntent')}</Th>
-          <Th>{t('campaign.leadNotes')}</Th>
-          <Th>{t('campaign.callback')}</Th>
-        </THead>
-        <TBody>
-          {isPending && <TableMessage colSpan={4}>{t('common.loading')}</TableMessage>}
-          {isError && <TableMessage colSpan={4}>{describeError(error, t)}</TableMessage>}
-          {!isPending && !isError && rows.length === 0 && (
-            <TableMessage colSpan={4}>{t('campaign.noLeads')}</TableMessage>
-          )}
-          {rows.map((row) => {
-            const callback = row.leadIntent === 'HIGH' ? byNumber.get(row.number.replace(/\D/g, '')) : undefined
-            return (
-              <Tr key={row.id}>
-                <Td className="tabular">{row.number}</Td>
-                <Td className="text-xs">{row.leadIntent ? t(`campaign.intents.${row.leadIntent}`) : '—'}</Td>
-                <Td className="max-w-96 truncate text-xs text-muted-foreground">
-                  <span title={row.leadNotes}>{row.leadNotes || '—'}</span>
-                </Td>
-                <Td className="text-xs text-muted-foreground">
-                  {callback ? t(`callbacks.statuses.${callback.status}`) : '—'}
-                </Td>
-              </Tr>
-            )
-          })}
         </TBody>
       </DataTable>
       <Pager page={page} pageSize={PAGE_SIZE} total={data?.total ?? 0} onPage={setPage} />
