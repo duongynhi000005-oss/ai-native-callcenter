@@ -81,8 +81,8 @@ type Event struct {
 	// the queue; the armed ending needs it to tell an acknowledgement of the
 	// closing line ("bye now") from a caller cutting in on it.
 	Unplayed time.Duration
-	// HasAudio is, on a PLAYBACK_DONE, whether the turn queued any audio for
-	// the caller. A turn that only made a tool call plays nothing, and its
+	// HasAudio is, on a TURN_DONE or a PLAYBACK_DONE, whether the turn queued
+	// any audio for the caller. A turn that only made a tool call plays nothing, and its
 	// playback "finishes" at once.
 	HasAudio bool
 
@@ -188,6 +188,11 @@ type Session struct {
 	// audioTurns counts the turns that finished generating with audio queued
 	// for the caller. A turn that only carried a tool call has none.
 	audioTurns int
+	// lastAudioTurn is the number (turnSeq) of the latest turn that finished
+	// generating with audio queued; zero before any. Unlike audioTurns it can
+	// be compared with a turn id, to ask whether anything was said aloud after
+	// a given turn (audioSince).
+	lastAudioTurn int
 	// isBotSpeaking gates barge-in: there is nothing to interrupt otherwise.
 	isBotSpeaking bool
 	// isResponding is true from a model turn's start to its end, audio or
@@ -718,8 +723,8 @@ func (s *Session) handleModelEvent(event provider.Event) {
 		s.beginTurn()
 
 	case provider.EventTypeResponseDone:
-		s.endTurn()
-		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn()})
+		hasAudio := s.endTurn()
+		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn(), HasAudio: hasAudio})
 
 	case provider.EventTypeInputTranscript:
 		s.emit(Event{Type: EventTypeCustomerSaid, Text: event.Text, IsFinal: event.IsFinal})
@@ -943,6 +948,16 @@ func (s *Session) audioProgress() (finishedTurns int, isCurrentSpeaking bool) {
 	return s.audioTurns, s.framesQueued > 0
 }
 
+// audioSince reports whether a turn after the given one has finished with
+// audio, and whether the current turn has audio queued now. beginTurn resets
+// the queued count, so the leftover frames of an earlier turn never read as the
+// current turn speaking.
+func (s *Session) audioSince(turn int) (hasSpoken, isCurrentSpeaking bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAudioTurn > turn, s.framesQueued > 0
+}
+
 // currentTurn reports which model turn is in progress.
 func (s *Session) currentTurn() int {
 	s.mu.Lock()
@@ -951,7 +966,7 @@ func (s *Session) currentTurn() int {
 }
 
 // endTurn closes out generation and hands the turn to the playback watcher.
-func (s *Session) endTurn() {
+func (s *Session) endTurn() (hasAudio bool) {
 	s.mu.Lock()
 	// The tail of the last sentence is worth padding out rather than losing.
 	s.framer.flush(s.queueFrame)
@@ -959,9 +974,10 @@ func (s *Session) endTurn() {
 	s.isResponding = false
 	s.openTurns = max(s.openTurns-1, 0)
 	s.drainGeneration++
-	hasAudio := s.framesQueued > 0
+	hasAudio = s.framesQueued > 0
 	if hasAudio {
 		s.audioTurns++
+		s.lastAudioTurn = s.turnSeq
 	}
 	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq, hasAudio: hasAudio}
 	s.mu.Unlock()
@@ -971,6 +987,7 @@ func (s *Session) endTurn() {
 	default:
 		s.log.Warn("playback watcher is behind; a turn boundary was not tracked")
 	}
+	return hasAudio
 }
 
 // playbackMarker identifies one turn's handoff to the playback watcher.

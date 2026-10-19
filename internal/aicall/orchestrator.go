@@ -584,7 +584,7 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				if event.IsInterrupted {
 					claims.onTurnInterrupted()
 				}
-				actions.onTurnDone(event.Turn, event.IsInterrupted)
+				actions.onTurnDone(event.Turn, event.IsInterrupted, event.HasAudio)
 				wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
 				o.closeToolBatch(&batch, session, runtime, log)
 
@@ -829,6 +829,12 @@ func (o *Orchestrator) enterPhase(moved string, session *Session,
 	}
 	if runtime.Engine().IsTerminal() {
 		o.armTheEnding(moved, session, actions, log)
+		// A closing line owed to the caller keeps an audio-less turn from
+		// ending the call (callActions.expectClosingLine). Doubao says its
+		// line itself and is not asked to.
+		if runtime.Announce() != "" && !o.cfg.Profile.RequiresTerminalAnnounce {
+			actions.expectClosingLine()
+		}
 	}
 }
 

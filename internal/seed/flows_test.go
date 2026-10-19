@@ -3,6 +3,7 @@
 package seed
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -252,5 +253,70 @@ func hasBothLanguages(t *testing.T, file, node string, line flow.Text) {
 	if line.EN == "" || line.ZH == "" {
 		t.Errorf("%s: phase %q has no line to speak in %s", file, node,
 			map[bool]string{true: "English", false: "Chinese"}[line.EN == ""])
+	}
+}
+
+// The campaign flow's global rules let a customer change their mind ("call it
+// again when their stance clearly changes; the last call counts"). A `talk`
+// instruction that orders hangup right after recording an ordinary stance
+// makes that rule unreachable: the line is gone before the customer can speak
+// (issue #206). Only the sentence that names DO_NOT_CALL may order an
+// immediate hangup; it also covers a clear no (NONE), which has nothing left to
+// confirm and ends at once (owner decision after the r3 live round).
+func TestCampaignTalkDoesNotHangUpRightAfterRecordingAStance(t *testing.T) {
+	t.Parallel()
+	spec := shippedFlows(t)["campaign_lead_followup.json"]
+	if spec == nil {
+		t.Fatal("campaign_lead_followup.json is not embedded")
+	}
+	talk, ok := spec.Nodes["talk"]
+	if !ok {
+		t.Fatal("campaign flow has no talk phase")
+	}
+
+	type lang struct {
+		name        string
+		instruction string
+		rules       []string
+		hurried     *regexp.Regexp // hangup ordered with no room for a reply
+		sentences   *regexp.Regexp
+		changeRule  string
+		confirmAsk  string
+	}
+	langs := []lang{
+		{"en", talk.Instruction.EN, spec.Global.Rules.EN,
+			regexp.MustCompile(`(?i)immediately|right after|straight away|at once`),
+			regexp.MustCompile(`[.;:]\s+`), "again", "anything else"},
+		{"zh", talk.Instruction.ZH, spec.Global.Rules.ZH,
+			regexp.MustCompile(`立即|马上|立刻|随即`),
+			regexp.MustCompile(`[。;;]`), "再调用一次", "还有"},
+	}
+	for _, l := range langs {
+		if l.instruction == "" {
+			t.Fatalf("%s: talk has no instruction", l.name)
+		}
+		allowsChange := false
+		for _, r := range l.rules {
+			if strings.Contains(r, "record_lead") && strings.Contains(r, l.changeRule) {
+				allowsChange = true
+			}
+		}
+		if !allowsChange {
+			t.Fatalf("%s: the global rules no longer let a stance be recorded again; "+
+				"update this test with the rule", l.name)
+		}
+		for _, s := range l.sentences.Split(l.instruction, -1) {
+			if !strings.Contains(s, "hangup") || strings.Contains(s, "DO_NOT_CALL") {
+				continue
+			}
+			if l.hurried.MatchString(s) {
+				t.Errorf("%s: talk orders an immediate hangup outside DO_NOT_CALL, "+
+					"so a changed stance can never be recorded: %q", l.name, s)
+			}
+		}
+		if !strings.Contains(l.instruction, l.confirmAsk) {
+			t.Errorf("%s: talk no longer asks the customer once whether there is "+
+				"anything else before it hangs up", l.name)
+		}
 	}
 }

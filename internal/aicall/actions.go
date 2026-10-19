@@ -80,6 +80,17 @@ type callActions struct {
 	// isHangupRefused says the one refusal has been spent; a second hangup
 	// succeeds.
 	isHangupRefused bool
+	// isLineOwed says the armed ending is a hangup into a terminal phase that
+	// has a closing line of its own, and no uninterrupted turn with audio has
+	// finished since: the caller has not heard the line (expectClosingLine,
+	// #207). While it holds, a turn with no audio is not the line: it does not
+	// run the ending (onPlaybackDone) and does not count as the line spoken
+	// (onTurnDone). It is cleared when the model insists on hangup after its
+	// one refusal, and by lockEnding.
+	isLineOwed bool
+	// isLineRefused says the one refusal of a hangup made while the line is
+	// owed has been spent (refuseHangupWhileLineOwed).
+	isLineRefused bool
 	// armedGeneration lets a cap timer recognise the action it belongs to, and
 	// retires the timer when the cap is moved.
 	armedGeneration int
@@ -286,8 +297,14 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 		if a.refuseBareHangup() {
 			return flow.Failed("CALL_ENDING", a.interruptedHangupHint()), nil
 		}
+		if a.refuseHangupWhileLineOwed() {
+			return flow.Failed("CALL_ENDING", a.lineOwedHint()), nil
+		}
 		// A repeated hangup is the model's intent exactly; the ending runs on
-		// the playback of a turn that played audio (onPlaybackDone).
+		// the playback of a turn that played audio (onPlaybackDone), or, when
+		// it insisted after being asked for the closing line, on the playback
+		// of the turn that carries this call (insistedOnHangup).
+		a.insistedOnHangup()
 		return flow.Succeeded(nil, ""), nil
 	}
 	if a.recorder != nil {
@@ -331,6 +348,8 @@ func (a *callActions) armAs(_ context.Context, isTransfer bool, action func()) {
 	a.isLineSpoken = false
 	a.isInterrupted = false
 	a.isHangupRefused = false
+	a.isLineOwed = false
+	a.isLineRefused = false
 	graceCap := a.graceCap
 	if graceCap <= 0 {
 		graceCap = actionGraceCap
@@ -440,11 +459,80 @@ func (a *callActions) interruptedHangupHint() string {
 		"sentence; the call ends by itself right after it. Do not call hangup."
 }
 
+// expectClosingLine records that the armed hangup leads into a terminal phase
+// with a line of its own, which the caller must hear before the call ends
+// (#207). It does nothing for a transfer, for an ending the time limit has
+// decided, or when nothing is armed. The orchestrator calls it after the phase
+// has been entered, on profiles that do not speak the line themselves
+// (doubao's RequiresTerminalAnnounce).
+func (a *callActions) expectClosingLine() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.armed == nil || a.isArmedTransfer || a.isEndingLocked || a.isLineSpoken {
+		return
+	}
+	a.isLineOwed = true
+}
+
+// refuseHangupWhileLineOwed reports whether this hangup is the one to refuse:
+// the closing line is owed, nothing has been said aloud in a turn after the one
+// that armed the ending (finished, or so far in this one), and the refusal is unspent.
+// A model that answers the tool result carrying the line with a second bare
+// hangup would otherwise end the call on that audio-less turn, the line never
+// said (#207). Like refuseBareHangup it refuses once and restarts the cap, so
+// a model that never speaks still ends the call there.
+func (a *callActions) refuseHangupWhileLineOwed() bool {
+	a.mu.Lock()
+	armedInTurn := a.armedInTurn
+	a.mu.Unlock()
+	// Only a turn after the one that armed the ending counts: that turn may
+	// have spoken ("Great, noted.") before it called the tools.
+	hasSpoken, isSpeaking := a.session.audioSince(armedInTurn)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.armed == nil || !a.isLineOwed || a.isLineRefused || a.isInterrupted ||
+		isSpeaking || hasSpoken {
+		return false
+	}
+	a.isLineRefused = true
+	graceCap := a.graceCap
+	if graceCap <= 0 {
+		graceCap = actionGraceCap
+	}
+	a.startCapLocked(graceCap)
+	return true
+}
+
+// insistedOnHangup drops the owed line when the model calls hangup again after
+// its one refusal: it gets its hangup, which runs on the playback of the turn
+// that carries the call (audio-less or not) instead of waiting out the cap in
+// silence. No loop, as with refuseBareHangup.
+func (a *callActions) insistedOnHangup() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.armed == nil || !a.isLineOwed || !a.isLineRefused {
+		return
+	}
+	a.isLineOwed = false
+	a.log.Warn("the model insisted on hangup after being asked for the closing line; " +
+		"ending the call without it")
+}
+
+// lineOwedHint asks the model to say the closing line it has not said yet.
+func (a *callActions) lineOwedHint() string {
+	if a.session != nil && a.session.cfg.Session.Language == "zh" {
+		return "你还没有对来电者说结束语。请现在就说出来,通话会在这句话之后自动结束。不要再调用 hangup。"
+	}
+	return "You have not said your closing line to the caller yet. Say it now, out loud; " +
+		"the call ends by itself right after it. Do not call hangup again."
+}
+
 // lockEnding keeps the ending armed now — or already run — as the call's
 // ending, whatever the model asks for afterwards.
 func (a *callActions) lockEnding() {
 	a.mu.Lock()
 	a.isEndingLocked = true
+	a.isLineOwed = false
 	a.mu.Unlock()
 }
 
@@ -514,9 +602,17 @@ func (a *callActions) disarm() {
 // (the line's own turn carries audio, and an audio-less repeat of hangup in it
 // must still end the call), and the "bye now" acknowledgement never reaches
 // here (onBargeIn runs it directly). The cap bounds a model that never speaks.
+//
+// The same holds while the closing line is owed and unheard (isLineOwed, #207):
+// the tool result that carried the line can be answered with a bare hangup, an
+// audio-less turn that is not the line, and the caller was hung up on without
+// a word. A turn with other words (a paraphrase) has audio and ends the call.
+// A flow with no closing line (or a hangup outside a terminal phase) owes
+// nothing and keeps the rule above: an audio-less repeat of hangup ends it.
 func (a *callActions) onPlaybackDone(turn int, hasAudio bool) {
 	a.mu.Lock()
-	if a.armed == nil || turn <= a.armedInTurn || (a.isInterrupted && !hasAudio) {
+	if a.armed == nil || turn <= a.armedInTurn || (a.isInterrupted && !hasAudio) ||
+		(a.isLineOwed && !a.isLineSpoken && !hasAudio) {
 		a.mu.Unlock()
 		return
 	}
@@ -539,10 +635,14 @@ func (a *callActions) onPlaybackDone(turn int, hasAudio bool) {
 // Every later turn does this, not only the first: a caller who interrupts the
 // closing line gets an answer, and a model may answer in two turns (#147: a
 // second answer clipped by a cap that only the first had moved).
-func (a *callActions) onTurnDone(turn int, isInterrupted bool) {
+//
+// While the closing line is owed a turn with no audio is not the line either
+// (hasAudio, #207): it neither marks the line spoken nor moves the cap.
+func (a *callActions) onTurnDone(turn int, isInterrupted, hasAudio bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.armed == nil || turn <= a.armedInTurn || isInterrupted {
+	if a.armed == nil || turn <= a.armedInTurn || isInterrupted ||
+		(a.isLineOwed && !hasAudio) {
 		return
 	}
 	a.isLineSpoken = true
