@@ -63,9 +63,11 @@ func Fresh(ctx context.Context, st *store.Store, log *slog.Logger) error {
 		{"wrap-ups", `DELETE FROM wrap_ups WHERE call_id IN (` + seededCDRs + `)`, nil},
 		// The demo contacts are the people behind the seeded calls, so the
 		// history is what identifies them — and it has to be read before the
-		// calls themselves go.
+		// calls themselves go. Only the inbound ones, as the seed made them:
+		// an agent's own call comes from their extension, and a contact
+		// someone saved under that number is not the seed's to remove.
 		{"contacts", `DELETE FROM contacts WHERE phone_number IN (
-			SELECT from_number FROM cdrs WHERE tech->>'isSeeded' = 'true')`, nil},
+			SELECT from_number FROM cdrs WHERE tech->>'isSeeded' = 'true' AND call_type = 'INBOUND')`, nil},
 		{"recordings", `DELETE FROM recordings WHERE call_id IN (` + seededCDRs + `)`, nil},
 		{"queue events", `DELETE FROM queue_events WHERE call_id IN (` + seededCDRs + `)`, nil},
 		{"calls", `DELETE FROM cdrs WHERE tech->>'isSeeded' = 'true'`, nil},

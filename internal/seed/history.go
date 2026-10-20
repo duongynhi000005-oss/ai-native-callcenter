@@ -166,7 +166,7 @@ var demoDIDs = []struct {
 
 // planHistory lays out the last seven days. Everything derives from the
 // passed rng and the day grid, so one seed always tells the same story.
-func planHistory(now time.Time, agents []uuid.UUID, queues []QueueRef,
+func planHistory(now time.Time, agents []AgentRef, queues []QueueRef,
 	dispositions []string, rng *rand.Rand) Plan {
 	var plan Plan
 	queueByName := map[string]QueueRef{}
@@ -191,11 +191,11 @@ func planHistory(now time.Time, agents []uuid.UUID, queues []QueueRef,
 			plan.add(oneCall(startedAt, agents, queueByName, rng))
 		}
 
-		for _, agentID := range agents {
+		for _, agent := range agents {
 			if dayStart.Weekday() == time.Saturday || dayStart.Weekday() == time.Sunday {
 				continue
 			}
-			plan.StateLogs = append(plan.StateLogs, shift(dayStart, agentID, rng)...)
+			plan.StateLogs = append(plan.StateLogs, shift(dayStart, agent.ID, rng)...)
 		}
 	}
 	plan.seedContactsAndWrapUps(dispositions, rng)
@@ -223,7 +223,7 @@ func businessMoment(rng *rand.Rand) time.Duration {
 }
 
 // oneCall writes one believable story into a CDR and its queue movements.
-func oneCall(startedAt time.Time, agents []uuid.UUID, queues map[string]QueueRef, rng *rand.Rand) (store.CDR, []QueueEventRow) {
+func oneCall(startedAt time.Time, agents []AgentRef, queues map[string]QueueRef, rng *rand.Rand) (store.CDR, []QueueEventRow) {
 	did := demoDIDs[rng.Intn(len(demoDIDs))]
 	callID := deterministicUUID(rng)
 	caller := "138" + digits(rng, 8)
@@ -258,7 +258,7 @@ func oneCall(startedAt time.Time, agents []uuid.UUID, queues map[string]QueueRef
 		bot := 20 + rng.Intn(60)
 		wait := 5 + rng.Intn(40)
 		talk := 60 + rng.Intn(420)
-		agent := agents[rng.Intn(len(agents))]
+		agent := agents[rng.Intn(len(agents))].ID
 		cdr.AnsweredAt = startedAt
 		cdr.BotSec = bot
 		cdr.QueueWaitSec = wait
@@ -318,6 +318,9 @@ func oneCall(startedAt time.Time, agents []uuid.UUID, queues map[string]QueueRef
 		cdr.EndedAt = startedAt.Add(secs(short))
 		return cdr, nil
 
+	case roll < 94 && len(withPhones(agents)) > 0: // an agent dials a customer and hands them on
+		return handedOnDialOut(cdr, withPhones(agents), queue, hasQueue, rng)
+
 	default: // the platform dialed out and the bot ran the conversation
 		bot := 30 + rng.Intn(120)
 		cdr.CallType = "OUTBOUND"
@@ -332,6 +335,116 @@ func oneCall(startedAt time.Time, agents []uuid.UUID, queues map[string]QueueRef
 		cdr.EndedAt = startedAt.Add(secs(bot))
 		return cdr, nil
 	}
+}
+
+// withPhones are the agents who can place a call: those with a phone bound.
+func withPhones(agents []AgentRef) []AgentRef {
+	var out []AgentRef
+	for _, a := range agents {
+		if a.Extension != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// handedOnDialOut is an agent's own call that they passed on: they dialled a
+// customer, talked, and transferred them to a colleague, to a queue or to an
+// outside number — or to a colleague who never picked up, and the customer
+// gave up waiting. These are the rows whose journey once dropped the agent
+// who placed them (#267), so the detail page has to be shown one of each.
+//
+// The row is what the assembler writes for such a call: from the placer's
+// extension to the customer, billed from the customer answering, the placer
+// as the primary agent, the hangup cause their own leg's at the transfer, and
+// a journey of the placer, the customer's line, then whoever took over. The
+// one liberty is the seed's own convention that the phases add up to the
+// call: the ringing of whoever the customer was transferred to is counted in
+// ringSec, where the assembler counts only the customer's.
+func handedOnDialOut(cdr store.CDR, agents []AgentRef, queue QueueRef, hasQueue bool, rng *rand.Rand) (store.CDR, []QueueEventRow) {
+	at := rng.Intn(len(agents))
+	placer := agents[at]
+	var colleague *AgentRef
+	if len(agents) > 1 {
+		colleague = &agents[(at+1+rng.Intn(len(agents)-1))%len(agents)]
+	}
+	customer := cdr.FromNumber
+	ring := 4 + rng.Intn(12)    // the customer's phone ringing
+	first := 20 + rng.Intn(120) // the placer's stretch with them
+	second := 30 + rng.Intn(300)
+
+	placerID := placer.ID
+	cdr.CallType = "OUTBOUND"
+	cdr.FromNumber, cdr.ToNumber, cdr.DID = placer.Extension, customer, ""
+	cdr.AnsweredAt = cdr.StartedAt.Add(secs(ring))
+	cdr.PrimaryAgentID = &placerID
+	cdr.HangupCause = "NORMAL_CLEARING"
+	cdr.RingSec = ring
+	placerLeg := store.Leg{Kind: "AGENT", Label: placer.Extension, DurationSec: first}
+
+	const (
+		toColleague = iota
+		toQueue
+		toOutsideNumber
+		toColleagueWhoMissedIt
+	)
+	how := rng.Intn(4)
+	if how == toQueue && !hasQueue || how != toOutsideNumber && colleague == nil {
+		how = toOutsideNumber
+	}
+
+	var queueEvents []QueueEventRow
+	switch how {
+	case toColleague:
+		pickUp := 3 + rng.Intn(6)
+		cdr.RingSec += pickUp
+		cdr.TalkSec = first + second
+		cdr.AgentIDs = []uuid.UUID{colleague.ID, placer.ID}
+		cdr.Legs = []store.Leg{placerLeg,
+			{Kind: "TRUNK", Label: customer, DurationSec: first + pickUp + second},
+			{Kind: "AGENT", Label: colleague.Extension, DurationSec: second}}
+
+	case toQueue:
+		wait := 8 + rng.Intn(40)
+		cdr.QueueID = &queue.ID
+		cdr.QueueWaitSec = wait
+		cdr.TalkSec = first + second
+		cdr.AgentIDs = []uuid.UUID{colleague.ID, placer.ID}
+		cdr.Legs = []store.Leg{placerLeg,
+			{Kind: "TRUNK", Label: customer, DurationSec: first + wait + second},
+			{Kind: "QUEUE", Label: queue.Name, DurationSec: wait},
+			{Kind: "AGENT", Label: colleague.Extension, DurationSec: second}}
+		joined := cdr.AnsweredAt.Add(secs(first))
+		takerID := colleague.ID
+		queueEvents = []QueueEventRow{
+			{OccurredAt: joined, CallID: cdr.CallID, QueueID: queue.ID, Event: "JOINED"},
+			{OccurredAt: joined.Add(secs(wait)), CallID: cdr.CallID, QueueID: queue.ID, Event: "BRIDGED",
+				AgentID: &takerID, WaitMs: wait * 1000},
+		}
+
+	case toOutsideNumber:
+		pickUp := 5 + rng.Intn(10)
+		cdr.RingSec += pickUp
+		cdr.TalkSec = first + second
+		cdr.AgentIDs = []uuid.UUID{placer.ID}
+		cdr.Legs = []store.Leg{placerLeg,
+			{Kind: "TRUNK", Label: customer, DurationSec: first + pickUp + second},
+			{Kind: "TRUNK", Label: "139" + digits(rng, 8), DurationSec: second}}
+
+	default: // toColleagueWhoMissedIt
+		gaveUp := 10 + rng.Intn(20)
+		cdr.RingSec += gaveUp
+		cdr.TalkSec = first
+		cdr.AgentIDs = []uuid.UUID{colleague.ID, placer.ID}
+		cdr.Legs = []store.Leg{placerLeg,
+			{Kind: "TRUNK", Label: customer, DurationSec: first + gaveUp},
+			{Kind: "AGENT", Label: colleague.Extension, Note: "did not answer"}}
+	}
+
+	cdr.TotalSec = cdr.RingSec + cdr.QueueWaitSec + cdr.TalkSec
+	cdr.BillSec = cdr.TotalSec - ring
+	cdr.EndedAt = cdr.StartedAt.Add(secs(cdr.TotalSec))
+	return cdr, queueEvents
 }
 
 // shift is one agent's plausible weekday: sign in, work, wrap up what they

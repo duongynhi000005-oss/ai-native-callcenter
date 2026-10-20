@@ -432,22 +432,10 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 	}
 
 	if placed {
-		cdr.Legs = buildLegs(snap, originator, append(slices.Clone(agentLegs), dialled...), cdr.BotSec)
-		if metBot && len(dialled) == 0 {
-			// The agent is a party of a call they placed to a bot, and
-			// nothing else on the row names them.
-			leg := store.Leg{Kind: "AGENT", Label: originator.Number}
-			if originator.AnsweredAt != nil {
-				end := cdr.EndedAt
-				if originator.ReleasedAt != nil {
-					end = *originator.ReleasedAt
-				}
-				leg.DurationSec = max(0, int(end.Sub(*originator.AnsweredAt).Seconds()))
-			}
-			cdr.Legs = slices.Insert(cdr.Legs, 0, leg)
-		}
+		cdr.Legs = buildLegs(snap, originator, append(slices.Clone(agentLegs), dialled...), cdr.BotSec,
+			placerIsAHop(snap, originator, dialled, metBot, cdr.EndedAt), cdr.EndedAt)
 	} else {
-		cdr.Legs = buildLegs(snap, originator, agentLegs, cdr.BotSec)
+		cdr.Legs = buildLegs(snap, originator, agentLegs, cdr.BotSec, false, cdr.EndedAt)
 	}
 	cdr.UnbackedClaims = snap.Bot.UnbackedClaims
 	if snap.Bot.Summary != "" {
@@ -721,16 +709,119 @@ func isCallerGone(queue QueueFacts) bool {
 	return strings.EqualFold(strings.TrimSpace(queue.Cause), "Cancel")
 }
 
-// buildLegs writes the journey for the detail view, in order. botSec is the
-// reconciled figure rather than the raw stamp, so the journey and the row's
-// own bot_sec cannot disagree with each other.
-func buildLegs(snap Snapshot, originator *PartySnapshot, agentLegs []*PartySnapshot, botSec int) []store.Leg {
-	var legs []store.Leg
+// placerIsAHop reports whether the agent who placed the call belongs in its
+// journey as well as in its fromNumber.
+//
+// Ordinarily they do not. The row already names them, and the journey of a
+// call they stayed on to the end is the person they reached: one TRUNK leg,
+// or one DIALING leg if nobody was. Two shapes need them named all the same.
+// A call they placed to a bot has no leg dialled out, so nothing else on the
+// row says a person was on it. And a call they handed on is a conversation
+// carried by two people: the placer's stretch with the customer came first,
+// and leaving it out drew a journey that started with the colleague who took
+// over (#267) — while the same transfer on an inbound call names both agents.
+func placerIsAHop(snap Snapshot, originator *PartySnapshot, dialled []*PartySnapshot, metBot bool, end time.Time) bool {
+	return (metBot && len(dialled) == 0) || placerHandedOver(snap, originator, end)
+}
+
+// placerHandedOver reports whether the agent who placed the call passed it on
+// and left before it ended.
+//
+// Leaving early is not enough on its own. The call ends when its last leg
+// does, so whichever side hangs up first leaves a few milliseconds before the
+// end — an agent who says goodbye and hangs up would read as a transfer on
+// every call they ended themselves. What a transfer adds is somebody new:
+// the call went on to a queue, or a leg was dialled, after the placer's own
+// conversation had begun. The legs the placer dialled to reach the customer
+// were all created before that, so they never count.
+func placerHandedOver(snap Snapshot, originator *PartySnapshot, end time.Time) bool {
+	if originator.ReleasedAt == nil || !originator.ReleasedAt.Before(end) {
+		return false
+	}
+	talked := FirstBridgeAt([]*PartySnapshot{originator})
+	if talked.IsZero() {
+		// Nobody was reached, so there was nothing to hand over.
+		return false
+	}
+	if snap.Queue.JoinedAt.After(talked) {
+		return true
+	}
+	for i := range snap.Parties {
+		if p := &snap.Parties[i]; p.Role != RoleOriginator && p.CreatedAt.After(talked) {
+			return true
+		}
+	}
+	return false
+}
+
+// placerLeg is the hop of the agent who placed the call: their own time with
+// whoever was on the other side. That is their bridges, not their leg's
+// answer — click-to-dial rings the agent's phone first and it auto-answers in
+// front of them, so answered-to-released would count the far end's ringing as
+// the agent's. A leg the switch never bridged falls back to that span, which
+// is all there is.
+func placerLeg(originator *PartySnapshot, end time.Time) store.Leg {
+	leg := store.Leg{Kind: "AGENT", Label: originator.Number}
+	if originator.ReleasedAt != nil {
+		end = *originator.ReleasedAt
+	}
+	if bridged := BridgedSec([]*PartySnapshot{originator}, end); bridged > 0 {
+		leg.DurationSec = bridged
+	} else if originator.AnsweredAt != nil {
+		leg.DurationSec = max(0, int(end.Sub(*originator.AnsweredAt).Seconds()))
+	}
+	return leg
+}
+
+// joinedAt is when a leg joined the conversation, which is what the journey
+// is ordered by: its first bridge, since answering is not being heard; else
+// its answer; else when it was dialled. A leg that knows none of these is
+// placed at the call's start rather than before it.
+func joinedAt(snap Snapshot, p *PartySnapshot) time.Time {
+	at := FirstBridgeAt([]*PartySnapshot{p})
+	if at.IsZero() && p.AnsweredAt != nil {
+		at = *p.AnsweredAt
+	}
+	if at.IsZero() {
+		at = p.CreatedAt
+	}
+	if at.IsZero() {
+		at = snap.CreatedAt
+	}
+	return at
+}
+
+// buildLegs writes the journey for the detail view, in the order its legs
+// joined the conversation. botSec is the reconciled figure rather than the raw
+// stamp, so the journey and the row's own bot_sec cannot disagree with each
+// other. withPlacer adds the hop of the agent who placed the call
+// (placerIsAHop).
+//
+// In order of time, not of kind. The list used to be bot, queue, then the
+// parties in the order they were handed in, which is the order of time on an
+// inbound call that goes bot → queue → agent and on nothing else: an agent's
+// call they transferred to a colleague listed the colleague before the
+// customer the agent had dialled (#267), and an agent who passed a caller to
+// a queue appeared after it.
+func buildLegs(snap Snapshot, originator *PartySnapshot, parties []*PartySnapshot, botSec int, withPlacer bool, end time.Time) []store.Leg {
+	type hop struct {
+		leg    store.Leg
+		joined time.Time
+	}
+	var hops []hop
+	if withPlacer {
+		// The call is theirs from its first moment: they placed it.
+		hops = append(hops, hop{placerLeg(originator, end), snap.CreatedAt})
+	}
 	if botSec > 0 || snap.Bot.FlowID != nil {
 		// Labelled with the flow, as the bot labels the row it writes itself.
 		// Unlabelled, the same flow read one way on a contained call and
 		// another on a transferred one.
-		legs = append(legs, store.Leg{Kind: "BOT", Label: snap.Bot.FlowSlug, DurationSec: botSec})
+		joined := snap.CreatedAt
+		if bot := botLeg(snap); bot != nil {
+			joined = joinedAt(snap, bot)
+		}
+		hops = append(hops, hop{store.Leg{Kind: "BOT", Label: snap.Bot.FlowSlug, DurationSec: botSec}, joined})
 	}
 	if !snap.Queue.JoinedAt.IsZero() {
 		leg := store.Leg{Kind: "QUEUE", Label: snap.Queue.Name}
@@ -744,9 +835,9 @@ func buildLegs(snap Snapshot, originator *PartySnapshot, agentLegs []*PartySnaps
 		if snap.Queue.CancelReason != "" {
 			leg.Note = snap.Queue.CancelReason
 		}
-		legs = append(legs, leg)
+		hops = append(hops, hop{leg, snap.Queue.JoinedAt})
 	}
-	for _, agent := range agentLegs {
+	for _, agent := range parties {
 		// A leg belonging to an agent is theirs; one the agent dialled out
 		// of the building went through a carrier.
 		kind := "AGENT"
@@ -765,7 +856,15 @@ func buildLegs(snap Snapshot, originator *PartySnapshot, agentLegs []*PartySnaps
 		} else {
 			leg.Note = "did not answer"
 		}
-		legs = append(legs, leg)
+		hops = append(hops, hop{leg, joinedAt(snap, agent)})
+	}
+	// Stable, so legs that joined at the same moment keep the order above:
+	// the placer before anyone they reached, the bot before the queue it
+	// handed to, the queue before the phone it rang in the same second.
+	slices.SortStableFunc(hops, func(a, b hop) int { return a.joined.Compare(b.joined) })
+	var legs []store.Leg
+	for _, h := range hops {
+		legs = append(legs, h.leg)
 	}
 	if legs == nil && originator != nil {
 		legs = append(legs, store.Leg{Kind: "DIALING", Label: originator.Number})
