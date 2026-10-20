@@ -5,22 +5,26 @@ package httpapi
 // The contract gate.
 //
 // docs/openapi.json is the product surface, not documentation of it. These
-// three assertions are what makes that sentence checkable rather than a thing
-// people say: every route the server mounts is declared there with an
-// authorization rule, every error code it can return is spelled the same in
-// all four places it appears, and every operation a system could reasonably
-// need is reachable by an API key rather than only by a browser.
+// assertions are what makes that sentence checkable rather than a thing people
+// say: every route the server mounts is declared there with an authorization
+// rule, every error code it can return is spelled the same in all four places
+// it appears, every operation a system could reasonably need is reachable by
+// an API key rather than only by a browser, and every status a call operation
+// can answer is one that operation declares.
 //
 // They live in one file because they answer one question — is the contract
 // still the truth? — and because a reader chasing a failure in any of them
-// needs the other two beside it.
+// needs the others beside it.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"slices"
@@ -30,10 +34,13 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/api"
 	"github.com/rasonyang/ai-native-callcenter/internal/auth"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
+	"github.com/rasonyang/ai-native-callcenter/internal/esl"
+	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
 // ---------------------------------------------------------------------------
@@ -165,12 +172,20 @@ func compare(t *testing.T, leftName string, left []string, rightName string, rig
 	}
 }
 
-func contractErrorCodes(t *testing.T) []string {
+// readContract is docs/openapi.json as it is on disk now, which is what the
+// next generation and the next release will be built from.
+func readContract(t *testing.T) []byte {
 	t.Helper()
 	raw, err := os.ReadFile("../../docs/openapi.json")
 	if err != nil {
 		t.Fatalf("read the contract: %v", err)
 	}
+	return raw
+}
+
+func contractErrorCodes(t *testing.T) []string {
+	t.Helper()
+	raw := readContract(t)
 	var spec struct {
 		Components struct {
 			Schemas struct {
@@ -359,4 +374,256 @@ func TestEveryContractOperationHasASecurityRow(t *testing.T) {
 		t.Errorf("the security table has %d operations and the server interface has %d",
 			got, want)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// (d) Every status a call operation answers is one it declares.
+// ---------------------------------------------------------------------------
+
+// callFailures is every failure callResult gives an answer of its own, spelled
+// as its switch spells it. TestCallResultsBranchesAreTheOnesTheGateDrives
+// holds this list to that switch, so a branch added there and not here fails
+// rather than going undriven.
+var callFailures = map[string]error{
+	"telephony.ErrCallNotFound":   telephony.ErrCallNotFound,
+	"telephony.ErrNoAgentLeg":     telephony.ErrNoAgentLeg,
+	"telephony.ErrNotCallParty":   telephony.ErrNotCallParty,
+	"telephony.ErrNoExtensionLeg": telephony.ErrNoExtensionLeg,
+	"telephony.ErrNotForCallType": telephony.ErrNotForCallType,
+	"telephony.ErrInvalidDTMF":    telephony.ErrInvalidDTMF,
+	"esl.ErrDown":                 esl.ErrDown,
+}
+
+// Every operation can also succeed, find the switch unreachable, or have it
+// refuse the command for a reason of its own (callResult's default branch).
+var everyCallOutcome = []string{"", "esl.ErrDown", "the switch refused"}
+
+// callOperation is one operation answered through callResult, and the
+// failures the coordinator method behind it can actually return. The lists
+// are read from internal/telephony/coordinator.go, not from what would be
+// convenient: an operation is only held to a 409 it can produce.
+type callOperation struct {
+	operationID string
+	serve       func(*Server, http.ResponseWriter, *http.Request, uuid.UUID)
+	body        string
+	// as is who asks: an agent on the call, a supervisor with a phone, or a
+	// system with no leg of its own (hangupCall's other reading).
+	as    AuthContext
+	fails []string
+}
+
+func callOperations() []callOperation {
+	agent := AuthContext{Kind: SubjectUser, SubjectID: uuid.New(), AgentID: uuid.New(),
+		scopes: grantedScopes(auth.RoleAgent)}
+	supervisor := AuthContext{Kind: SubjectUser, SubjectID: uuid.New(), AgentID: uuid.New(),
+		scopes: grantedScopes(auth.RoleSupervisor)}
+	system := AuthContext{Kind: SubjectKey, SubjectID: uuid.New()}
+	// agentChannel: the call is gone, or the agent has no live leg on it.
+	onlyTheirLeg := []string{"telephony.ErrCallNotFound", "telephony.ErrNoAgentLeg"}
+	// handledChannel: agentChannel, refused first on an INTERNAL call.
+	handled := []string{"telephony.ErrCallNotFound", "telephony.ErrNotForCallType", "telephony.ErrNoAgentLeg"}
+	return []callOperation{
+		{"answerCall", (*Server).AnswerCall, "", agent, onlyTheirLeg},
+		{"holdCall", (*Server).HoldCall, "", agent, handled},
+		{"retrieveCall", (*Server).RetrieveCall, "", agent, handled},
+		{"muteCall", (*Server).MuteCall, "", agent, onlyTheirLeg},
+		{"unmuteCall", (*Server).UnmuteCall, "", agent, onlyTheirLeg},
+		// Hangup: agentLegAndCause, the same two as agentChannel.
+		{"hangupCall", (*Server).HangupCall, "", agent, onlyTheirLeg},
+		// EndCall: the call is gone, or nobody on it is at an extension.
+		{"hangupCall", (*Server).HangupCall, "", system,
+			[]string{"telephony.ErrCallNotFound", "telephony.ErrNoExtensionLeg"}},
+		// Transfer reads the call itself: INTERNAL first, then whether the
+		// asker and a caller are both on it.
+		{"transferCall", (*Server).TransferCall, `{"destination":"2001"}`, agent,
+			[]string{"telephony.ErrCallNotFound", "telephony.ErrNotForCallType", "telephony.ErrNotCallParty"}},
+		// SendDTMF: the digits, agentChannel, then a far end to send them to.
+		{"sendCallDTMF", (*Server).SendCallDTMF, `{"digits":"1"}`, agent,
+			[]string{"telephony.ErrInvalidDTMF", "telephony.ErrCallNotFound",
+				"telephony.ErrNoAgentLeg", "telephony.ErrNotCallParty"}},
+		// Monitor: the call is gone, or the agent named has no leg on it.
+		{"monitorCall", (*Server).MonitorCall, `{"mode":"LISTEN","agentId":"` + uuid.NewString() + `"}`,
+			supervisor, onlyTheirLeg},
+	}
+}
+
+// failingCalls answers every call operation with one error.
+type failingCalls struct {
+	stubCalls
+	err error
+}
+
+func (c failingCalls) Answer(context.Context, uuid.UUID, uuid.UUID) error   { return c.err }
+func (c failingCalls) Hold(context.Context, uuid.UUID, uuid.UUID) error     { return c.err }
+func (c failingCalls) Retrieve(context.Context, uuid.UUID, uuid.UUID) error { return c.err }
+func (c failingCalls) Mute(context.Context, uuid.UUID, uuid.UUID) error     { return c.err }
+func (c failingCalls) Unmute(context.Context, uuid.UUID, uuid.UUID) error   { return c.err }
+func (c failingCalls) Hangup(context.Context, uuid.UUID, uuid.UUID) error   { return c.err }
+func (c failingCalls) EndCall(context.Context, uuid.UUID) error             { return c.err }
+func (c failingCalls) Transfer(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return c.err
+}
+func (c failingCalls) SendDTMF(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return c.err
+}
+func (c failingCalls) Monitor(context.Context, uuid.UUID, uuid.UUID, string, string) error {
+	return c.err
+}
+
+// contractResponses is the status codes each operation declares, by
+// operation id.
+func contractResponses(t *testing.T) map[string][]string {
+	t.Helper()
+	var spec struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(readContract(t), &spec); err != nil {
+		t.Fatalf("parse the contract: %v", err)
+	}
+	declared := map[string][]string{}
+	for _, item := range spec.Paths {
+		for _, raw := range item {
+			// A path item also holds `parameters`, which is not an operation.
+			var op struct {
+				OperationID string                     `json:"operationId"`
+				Responses   map[string]json.RawMessage `json:"responses"`
+			}
+			if json.Unmarshal(raw, &op) != nil || op.OperationID == "" {
+				continue
+			}
+			for code := range op.Responses {
+				declared[op.OperationID] = append(declared[op.OperationID], code)
+			}
+			slices.Sort(declared[op.OperationID])
+		}
+	}
+	return declared
+}
+
+// An INTERNAL call was refused with a 409 that holdCall, retrieveCall and
+// transferCall described in prose and did not declare (#269), so a client
+// generated from the contract had no case for the answer the server gave.
+// Every outcome each operation can reach is driven through its handler here,
+// and the status that comes back must be one the operation declares.
+func TestEveryCallOperationDeclaresWhatItAnswers(t *testing.T) {
+	t.Parallel()
+	declared := contractResponses(t)
+	reached := map[string]bool{}
+	for _, op := range callOperations() {
+		codes, ok := declared[op.operationID]
+		if !ok {
+			t.Errorf("%s is not an operation in the contract", op.operationID)
+			continue
+		}
+		for _, outcome := range append(slices.Clone(everyCallOutcome), op.fails...) {
+			reached[outcome] = true
+			var err error
+			switch outcome {
+			case "":
+			case "the switch refused":
+				err = errors.New("-ERR no such channel")
+			default:
+				err = callFailures[outcome]
+				if err == nil {
+					t.Fatalf("%s lists %s, which callFailures does not name", op.operationID, outcome)
+				}
+			}
+
+			srv := &Server{calls: failingCalls{err: err}, agents: dialerPresence{}}
+			callID := uuid.New()
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/calls/"+callID.String(),
+				strings.NewReader(op.body))
+			r = r.WithContext(contextWithAuth(r.Context(), op.as))
+			w := httptest.NewRecorder()
+			op.serve(srv, w, r, callID)
+
+			if !slices.Contains(codes, strconv.Itoa(w.Code)) {
+				if outcome == "" {
+					outcome = "success"
+				}
+				t.Errorf("%s answers %d on %s, and the contract declares only %v: %s",
+					op.operationID, w.Code, outcome, codes, w.Body)
+			}
+		}
+	}
+	for name := range callFailures {
+		if !reached[name] {
+			t.Errorf("no operation can return %s, so its branch in callResult is never driven", name)
+		}
+	}
+}
+
+// The gate is only as good as its two lists, so both are held to the code
+// they describe: callFailures to the errors callResult's switch names, and
+// callOperations to the handlers that answer through callOp or callResult.
+func TestCallResultsBranchesAreTheOnesTheGateDrives(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "call_handlers.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse call_handlers.go: %v", err)
+	}
+
+	var branches, handlers []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || fn.Body == nil {
+			continue
+		}
+		switch fn.Name.Name {
+		case "callResult":
+			// Every pkg.ErrX a case of the switch names; not what the
+			// branches then do.
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				clause, ok := n.(*ast.CaseClause)
+				if !ok {
+					return true
+				}
+				for _, expr := range clause.List {
+					ast.Inspect(expr, func(n ast.Node) bool {
+						sel, ok := n.(*ast.SelectorExpr)
+						if !ok || !strings.HasPrefix(sel.Sel.Name, "Err") {
+							return true
+						}
+						if pkg, ok := sel.X.(*ast.Ident); ok {
+							branches = append(branches, pkg.Name+"."+sel.Sel.Name)
+						}
+						return true
+					})
+				}
+				return false
+			})
+		case "callOp":
+		default:
+			// An exported handler that answers through callOp or callResult.
+			if !fn.Name.IsExported() {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if ok && (sel.Sel.Name == "callOp" || sel.Sel.Name == "callResult") {
+					if !slices.Contains(handlers, fn.Name.Name) {
+						handlers = append(handlers, fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	named := make([]string, 0, len(callFailures))
+	for name := range callFailures {
+		named = append(named, name)
+	}
+	compare(t, "callResult", branches, "callFailures", named)
+
+	// Operation ids are the handler names with a lower-case first letter.
+	var driven []string
+	for _, op := range callOperations() {
+		handler := strings.ToUpper(op.operationID[:1]) + op.operationID[1:]
+		if !slices.Contains(driven, handler) {
+			driven = append(driven, handler)
+		}
+	}
+	compare(t, "call_handlers.go", handlers, "callOperations", driven)
 }

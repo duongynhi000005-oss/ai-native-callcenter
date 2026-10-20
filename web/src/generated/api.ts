@@ -3707,7 +3707,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED. Campaign operations answer CAMPAIGN_INVALID_TRANSITION (the operation does not exist in the campaign's status) or CAMPAIGN_FIELD_LOCKED (params.fields lists what cannot change in that status); publishing a flow revision or rebinding a DID that would give a campaign that has not finished a way to a person answers CAMPAIGN_FLOW_HAS_TRANSFER; clearing allowOutbound on a DID such a campaign dials from answers CAMPAIGN_DID_NOT_OUTBOUND. */
+        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED. Holding, retrieving and transferring an INTERNAL call answer OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. Campaign operations answer CAMPAIGN_INVALID_TRANSITION (the operation does not exist in the campaign's status) or CAMPAIGN_FIELD_LOCKED (params.fields lists what cannot change in that status); publishing a flow revision or rebinding a DID that would give a campaign that has not finished a way to a person answers CAMPAIGN_FLOW_HAS_TRANSFER; clearing allowOutbound on a DID such a campaign dials from answers CAMPAIGN_DID_NOT_OUTBOUND. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -4481,6 +4481,8 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description The call is INTERNAL: code OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. One extension calling another has no queue to put it back into, so there is nothing to hold it for. */
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["ServiceUnavailable"];
         };
@@ -4507,6 +4509,8 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description The call is INTERNAL: code OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. An internal call is never held, so there is nothing to retrieve. */
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["ServiceUnavailable"];
         };
@@ -4616,6 +4620,8 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description The call is INTERNAL: code OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. One extension calling another has no third party to pass it to. */
+            409: components["responses"]["Conflict"];
             422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["ServiceUnavailable"];
