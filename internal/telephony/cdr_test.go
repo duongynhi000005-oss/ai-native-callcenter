@@ -5,6 +5,7 @@ package telephony
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -596,6 +597,227 @@ func TestAssembleAttributesCallsTheAgentPlaced(t *testing.T) {
 	missed := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), unanswered)
 	if got := missed; got.Status != store.CDRStatusNoAnswer {
 		t.Errorf("nobody picked up, status = %q, want NO_ANSWER", got.Status)
+	}
+}
+
+// journey renders legs as KIND:label:seconds, or KIND:label:note for a leg
+// that carries one, so a test can state a whole journey in one line.
+func journey(legs []store.Leg) []string {
+	var out []string
+	for _, leg := range legs {
+		if leg.Note != "" {
+			out = append(out, fmt.Sprintf("%s:%s:%s", leg.Kind, leg.Label, leg.Note))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s:%s:%d", leg.Kind, leg.Label, leg.DurationSec))
+	}
+	return out
+}
+
+// An agent who places a call and hands it on is a hop of its journey, first,
+// with their own stretch of the conversation. Modelled on the live call of
+// 2026-10-19 (01a15229): wei (1008) click-dialled 18688886666, talked for
+// about 20 seconds and transferred the customer to 1020, who talked for 22.
+// The row read [AGENT 1020 22s, TRUNK 43s] — wei absent from the journey,
+// and the colleague listed before the customer wei had dialled (#267).
+//
+// The shape is the switch's: the transfer moves the customer's leg (the one
+// with no agent on it), so wei's own leg is released at the transfer and a
+// new leg is dialled to 1020 and bridged to the customer's.
+func TestAnAgentWhoPlacedACallAndHandedItOnIsInItsJourney(t *testing.T) {
+	t.Parallel()
+	wei, test1, ben := uuid.New(), uuid.New(), uuid.New()
+
+	// wei's phone auto-answers the click at 1, the customer answers at 6 and
+	// the two talk until wei transfers at 26.
+	placer := PartySnapshot{Role: RoleOriginator, Number: "1008", AgentID: &wei, ExtensionNumber: "1008",
+		ChannelID: "wei", CreatedAt: at(0), AnsweredAt: atPtr(1), ReleasedAt: atPtr(26),
+		ReleaseCause: "NORMAL_CLEARING",
+		Bridges:      []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(6), EndedAt: at(26)}}}
+	customer := func(end int, after ...BridgeSpan) PartySnapshot {
+		return PartySnapshot{Role: RoleTarget, Number: "18688886666", ChannelID: "customer",
+			CreatedAt: at(1), AnsweredAt: atPtr(6), ReleasedAt: atPtr(end),
+			Bridges: append([]BridgeSpan{{OtherChannelID: "wei", StartedAt: at(6), EndedAt: at(26)}}, after...)}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		snap  Snapshot
+		want  []string
+		check func(t *testing.T, cdr store.CDR)
+	}{
+		{
+			name: "to a colleague's extension",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: atPtr(49),
+				Parties: []PartySnapshot{placer,
+					customer(49, BridgeSpan{OtherChannelID: "test1", StartedAt: at(27), EndedAt: at(49)}),
+					{Role: RoleTarget, Number: "1020", AgentID: &test1, ExtensionNumber: "1020", ChannelID: "test1",
+						CreatedAt: at(26), AnsweredAt: atPtr(27), ReleasedAt: atPtr(49),
+						Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(27), EndedAt: at(49)}}},
+				},
+			},
+			want: []string{"AGENT:1008:20", "TRUNK:18688886666:43", "AGENT:1020:22"},
+			check: func(t *testing.T, cdr store.CDR) {
+				// The two agents' stretches are the customer's conversation,
+				// short only of the second 1020 took to pick up.
+				if sum, trunk := cdr.Legs[0].DurationSec+cdr.Legs[2].DurationSec, cdr.Legs[1].DurationSec; trunk-sum != 1 {
+					t.Errorf("wei %ds + 1020 %ds = %d against the customer's %ds; want one second short "+
+						"(1020 ringing)", cdr.Legs[0].DurationSec, cdr.Legs[2].DurationSec, sum, trunk)
+				}
+				if cdr.TalkSec != 42 {
+					t.Errorf("talkSec = %d, want 42 as on the live row", cdr.TalkSec)
+				}
+			},
+		},
+		{
+			name: "to a queue, answered by another agent",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: atPtr(70),
+				Queue: QueueFacts{Name: "support-en", JoinedAt: at(26), BridgedAt: at(40), LeftAt: at(70)},
+				Parties: []PartySnapshot{placer,
+					customer(70, BridgeSpan{OtherChannelID: "ben", StartedAt: at(40), EndedAt: at(70)}),
+					{Role: RoleTarget, Number: "1002", AgentID: &ben, ExtensionNumber: "1002", ChannelID: "ben",
+						CreatedAt: at(35), AnsweredAt: atPtr(40), ReleasedAt: atPtr(70),
+						Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(40), EndedAt: at(70)}}},
+				},
+			},
+			want: []string{"AGENT:1008:20", "TRUNK:18688886666:64", "QUEUE:support-en:14", "AGENT:1002:30"},
+		},
+		{
+			// Two TRUNK legs, which is all the row used to say: who dialled the
+			// first one was nowhere in it.
+			name: "to an external number",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: atPtr(60),
+				Parties: []PartySnapshot{placer,
+					customer(60, BridgeSpan{OtherChannelID: "onward", StartedAt: at(33), EndedAt: at(60)}),
+					{Role: RoleTarget, Number: "13900139000", ChannelID: "onward",
+						CreatedAt: at(26), AnsweredAt: atPtr(33), ReleasedAt: atPtr(60),
+						Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(33), EndedAt: at(60)}}},
+				},
+			},
+			want: []string{"AGENT:1008:20", "TRUNK:18688886666:54", "TRUNK:13900139000:27"},
+		},
+		{
+			// 1020 rang for twelve seconds and the customer gave up on it.
+			name: "to a colleague who never answered",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: atPtr(38),
+				Parties: []PartySnapshot{placer,
+					customer(38),
+					{Role: RoleTarget, Number: "1020", AgentID: &test1, ExtensionNumber: "1020", ChannelID: "test1",
+						CreatedAt: at(26), ReleasedAt: atPtr(38), ReleaseCause: "ORIGINATOR_CANCEL"},
+				},
+			},
+			want: []string{"AGENT:1008:20", "TRUNK:18688886666:32", "AGENT:1020:did not answer"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.snap.CallID = uuid.New()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tc.snap)
+			if got := journey(cdr.Legs); !slices.Equal(got, tc.want) {
+				t.Errorf("legs = %v, want %v", got, tc.want)
+			}
+			if cdr.FromNumber != "1008" {
+				t.Errorf("fromNumber = %q, want the placer's 1008", cdr.FromNumber)
+			}
+			if tc.check != nil {
+				tc.check(t, cdr)
+			}
+		})
+	}
+}
+
+// The agent's own leg ending a moment before the customer's is how every call
+// they hang up themselves ends — the call is over when its last leg is — and
+// it is not a handover. The journey stays the one leg they dialled.
+func TestAnAgentWhoHangsUpFirstHandedNothingOn(t *testing.T) {
+	t.Parallel()
+	agentID := uuid.New()
+	ms := func(sec int, milli int) *time.Time {
+		t := at(sec).Add(time.Duration(milli) * time.Millisecond)
+		return &t
+	}
+	snap := Snapshot{
+		CallID: uuid.New(), CallType: events.CallTypeOutbound,
+		CreatedAt: at(0), EndedAt: ms(30, 40),
+		Parties: []PartySnapshot{
+			{Role: RoleOriginator, Number: "1008", AgentID: &agentID, ExtensionNumber: "1008", ChannelID: "agent",
+				CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(30),
+				Bridges: []BridgeSpan{{OtherChannelID: "out", StartedAt: at(8), EndedAt: at(30)}}},
+			{Role: RoleTarget, Number: "18688886669", ChannelID: "out",
+				CreatedAt: at(2), AnsweredAt: atPtr(8), ReleasedAt: ms(30, 40),
+				Bridges: []BridgeSpan{{OtherChannelID: "agent", StartedAt: at(8), EndedAt: at(30)}}},
+		},
+	}
+	cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+	if got, want := journey(cdr.Legs), []string{"TRUNK:18688886669:22"}; !slices.Equal(got, want) {
+		t.Errorf("legs = %v, want %v", got, want)
+	}
+}
+
+// An inbound call passed between agents names the same legs it always did,
+// now in the order they joined. The two orders agree on the usual journey
+// (queue, then the agents it reached) and part where an agent who took the
+// caller directly passed them to a queue: by kind the queue came first,
+// although the agent had been talking to the caller for half a minute
+// before it existed.
+func TestAnInboundJourneyIsInTheOrderItHappened(t *testing.T) {
+	t.Parallel()
+	wei, ben := uuid.New(), uuid.New()
+
+	for _, tc := range []struct {
+		name string
+		snap Snapshot
+		want []string
+	}{
+		{
+			name: "queue, then one agent to another",
+			snap: Snapshot{
+				CallType: events.CallTypeInbound, CreatedAt: at(0), EndedAt: atPtr(200),
+				Queue: QueueFacts{Name: "support-en", JoinedAt: at(2), BridgedAt: at(100)},
+				Parties: []PartySnapshot{
+					{Role: RoleOriginator, Number: "18688886669", ChannelID: "caller",
+						AnsweredAt: atPtr(0), ReleasedAt: atPtr(200)},
+					{Role: RoleTarget, Number: "1008", AgentID: &wei, ChannelID: "wei",
+						CreatedAt: at(95), AnsweredAt: atPtr(100), ReleasedAt: atPtr(158),
+						Bridges: []BridgeSpan{{OtherChannelID: "caller", StartedAt: at(100), EndedAt: at(158)}}},
+					{Role: RoleTarget, Number: "1007", AgentID: &ben, ChannelID: "ben",
+						CreatedAt: at(158), AnsweredAt: atPtr(165), ReleasedAt: atPtr(200),
+						Bridges: []BridgeSpan{{OtherChannelID: "caller", StartedAt: at(165), EndedAt: at(200)}}},
+				},
+			},
+			want: []string{"QUEUE:support-en:98", "AGENT:1008:58", "AGENT:1007:35"},
+		},
+		{
+			name: "a direct extension that passed the caller to a queue",
+			snap: Snapshot{
+				CallType: events.CallTypeInbound, CreatedAt: at(0), EndedAt: atPtr(100),
+				Queue: QueueFacts{Name: "support-en", JoinedAt: at(40), BridgedAt: at(52)},
+				Parties: []PartySnapshot{
+					{Role: RoleOriginator, Number: "18688886669", ChannelID: "caller",
+						AnsweredAt: atPtr(0), ReleasedAt: atPtr(100)},
+					{Role: RoleTarget, Number: "1001", AgentID: &wei, ChannelID: "wei",
+						CreatedAt: at(1), AnsweredAt: atPtr(5), ReleasedAt: atPtr(40),
+						Bridges: []BridgeSpan{{OtherChannelID: "caller", StartedAt: at(5), EndedAt: at(40)}}},
+					{Role: RoleTarget, Number: "1002", AgentID: &ben, ChannelID: "ben",
+						CreatedAt: at(48), AnsweredAt: atPtr(52), ReleasedAt: atPtr(100),
+						Bridges: []BridgeSpan{{OtherChannelID: "caller", StartedAt: at(52), EndedAt: at(100)}}},
+				},
+			},
+			want: []string{"AGENT:1001:35", "QUEUE:support-en:12", "AGENT:1002:48"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.snap.CallID = uuid.New()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tc.snap)
+			if got := journey(cdr.Legs); !slices.Equal(got, tc.want) {
+				t.Errorf("legs = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

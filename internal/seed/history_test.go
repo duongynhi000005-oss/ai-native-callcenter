@@ -13,8 +13,10 @@ import (
 
 func fixedPlan() Plan {
 	now := time.Date(2026, 8, 14, 17, 0, 0, 0, time.UTC)
-	agents := []uuid.UUID{uuid.MustParse("11111111-1111-4111-8111-111111111111"),
-		uuid.MustParse("22222222-2222-4222-8222-222222222222")}
+	agents := []AgentRef{
+		{ID: uuid.MustParse("11111111-1111-4111-8111-111111111111"), Extension: "1001"},
+		{ID: uuid.MustParse("22222222-2222-4222-8222-222222222222"), Extension: "1000"},
+	}
 	queues := []QueueRef{
 		{ID: uuid.MustParse("33333333-3333-4333-8333-333333333333"), Name: "support-en"},
 		{ID: uuid.MustParse("44444444-4444-4444-8444-444444444444"), Name: "support-zh"},
@@ -82,7 +84,7 @@ func TestTheHistoryGivesTheAgentScreensSomethingToShow(t *testing.T) {
 func TestNoVocabularyMeansNoWrapUps(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 14, 17, 0, 0, 0, time.UTC)
-	agents := []uuid.UUID{uuid.MustParse("11111111-1111-4111-8111-111111111111")}
+	agents := []AgentRef{{ID: uuid.MustParse("11111111-1111-4111-8111-111111111111"), Extension: "1001"}}
 	queues := []QueueRef{{ID: uuid.MustParse("33333333-3333-4333-8333-333333333333"), Name: "support-en"}}
 
 	plan := planHistory(now, agents, queues, nil, rand.New(rand.NewSource(prngSeed)))
@@ -166,6 +168,54 @@ func TestHistoryArithmeticHoldsTogether(t *testing.T) {
 	for _, entry := range plan.StateLogs {
 		if entry.ExitedAt != nil && entry.ExitedAt.Before(entry.EnteredAt) {
 			t.Errorf("state log for %s exits before it enters", entry.AgentID)
+		}
+	}
+}
+
+// An agent's call that they handed on is in the history, in each of its
+// shapes, with the journey the assembler writes for it: the agent who placed
+// it first, then the customer's line, then whoever took over (#267). The CDR
+// list and detail pages are where a journey that dropped the placer was seen,
+// so the demo has to put one in front of them.
+func TestTheHistoryHasAgentsWhoHandedTheirOwnCallsOn(t *testing.T) {
+	t.Parallel()
+	shapes := map[string]int{}
+	for _, cdr := range fixedPlan().CDRs {
+		if cdr.CallType != "OUTBOUND" || cdr.DID != "" {
+			continue
+		}
+		if len(cdr.Legs) < 3 {
+			t.Fatalf("call %s: legs %+v, want the placer, the customer and who took over", cdr.CallID, cdr.Legs)
+		}
+		placer, customer := cdr.Legs[0], cdr.Legs[1]
+		if placer.Kind != "AGENT" || placer.Label != cdr.FromNumber {
+			t.Errorf("call %s: first leg %+v, want the placer at %s", cdr.CallID, placer, cdr.FromNumber)
+		}
+		if customer.Kind != "TRUNK" || customer.Label != cdr.ToNumber {
+			t.Errorf("call %s: second leg %+v, want the customer at %s", cdr.CallID, customer, cdr.ToNumber)
+		}
+		if customer.DurationSec != cdr.BillSec {
+			t.Errorf("call %s: the customer's leg reads %ds and the bill %ds", cdr.CallID,
+				customer.DurationSec, cdr.BillSec)
+		}
+		if cdr.PrimaryAgentID == nil || !slices.Contains(cdr.AgentIDs, *cdr.PrimaryAgentID) {
+			t.Errorf("call %s: primary agent %v is not among %v", cdr.CallID, cdr.PrimaryAgentID, cdr.AgentIDs)
+		}
+		last := cdr.Legs[len(cdr.Legs)-1]
+		switch {
+		case cdr.QueueID != nil:
+			shapes["queue"]++
+		case last.Kind == "TRUNK":
+			shapes["outside number"]++
+		case last.Note != "":
+			shapes["colleague who missed it"]++
+		default:
+			shapes["colleague"]++
+		}
+	}
+	for _, shape := range []string{"colleague", "queue", "outside number", "colleague who missed it"} {
+		if shapes[shape] == 0 {
+			t.Errorf("no agent's call in the history was handed on this way: %s (%v)", shape, shapes)
 		}
 	}
 }

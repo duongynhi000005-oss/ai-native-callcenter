@@ -290,9 +290,18 @@ type QueueRef struct {
 	Name string
 }
 
+// AgentRef is an agent the history can reference, with the extension their
+// phone is bound to: a call an agent places comes from that number, so the
+// history cannot have them dial anybody without it. Empty when the agent has
+// no phone bound.
+type AgentRef struct {
+	ID        uuid.UUID
+	Extension string
+}
+
 // ensureEntities creates the demo team and queues where they do not already
 // exist, and returns whatever agents and queues the database ends up with.
-func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger, password string) ([]uuid.UUID, []QueueRef, error) {
+func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger, password string) ([]AgentRef, []QueueRef, error) {
 	demoHash, err := auth.HashPassword(password)
 	if err != nil {
 		return nil, nil, err
@@ -395,18 +404,21 @@ func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger, pass
 	}
 
 	// The history references whatever actually exists, seeded or prior.
-	var agents []uuid.UUID
-	rows, err := st.Pool.Query(ctx, `SELECT id FROM agents ORDER BY created_at LIMIT 8`)
+	var agents []AgentRef
+	rows, err := st.Pool.Query(ctx, `
+		SELECT a.id, COALESCE(e.number, '') FROM agents a
+		LEFT JOIN extensions e ON e.id = a.default_extension_id
+		ORDER BY a.created_at LIMIT 8`)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var a AgentRef
+		if err := rows.Scan(&a.ID, &a.Extension); err != nil {
 			return nil, nil, err
 		}
-		agents = append(agents, id)
+		agents = append(agents, a)
 	}
 
 	var queues []QueueRef
