@@ -390,12 +390,14 @@ func TestALateCreatedAfterTheRetryMakesOneTurn(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			refused := make(chan struct{})
 			f := newCountingFake(t, func(f *fakeProvider, n int) {
 				// The third request is the retry: the late original
 				// arrives just behind it, and the retry is refused.
 				if n == 3 {
 					f.send(map[string]any{"type": "response.created"})
 					f.send(map[string]any{"type": "error", "error": tc.refusal})
+					close(refused)
 				}
 			})
 			session, logs := loggedSession(t, f, tc.profile)
@@ -411,6 +413,11 @@ func TestALateCreatedAfterTheRetryMakesOneTurn(t *testing.T) {
 				t.Fatalf("send tool result: %v", err)
 			}
 			awaitEvent(t, session, EventTypeResponseStarted)
+			// A provider refuses the retry while the late turn is running,
+			// so the refusal is on the wire before that turn's end. The
+			// fake writes it from its own goroutine: wait for it, or the
+			// end can overtake it.
+			<-refused
 			f.send(map[string]any{"type": "response.done",
 				"response": map[string]any{"status": "completed"}})
 
