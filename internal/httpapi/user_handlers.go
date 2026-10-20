@@ -4,8 +4,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base32"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -101,7 +99,7 @@ func (s *Server) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sipPassword, err := newSIPPassword()
+	sipPassword, err := catalog.NewSIPPassword()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "generate sip password", "error", err)
 		writeError(w, http.StatusInternalServerError, CodeInternal, "cannot create the account", nil)
@@ -140,7 +138,8 @@ func (s *Server) CreateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, accountOut(account))
 }
 
-// UpdateUser rewrites an account, provisioning what a promotion now needs.
+// UpdateUser rewrites an account, provisioning the identity or phone a
+// call-taking account lacks.
 func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
 	if s.accounts == nil {
 		writeError(w, http.StatusServiceUnavailable, CodeStorageDown, "cannot edit accounts", nil)
@@ -184,11 +183,13 @@ func (s *Server) UpdateUser(w http.ResponseWriter, r *http.Request, userID uuid.
 		return
 	}
 
-	// A promotion into a call-taking role needs the identity and phone the
-	// account never had. The reverse has no counterpart: demotion leaves the
-	// agent row alone, because the person's state history and filed wrap-ups
-	// hang off it.
-	if account.AgentID == nil && (account.Role == "AGENT" || account.Role == "SUPERVISOR") {
+	// A call-taking account without a phone gets one: a promotion out of
+	// ADMIN, which never had an identity, and an identity that never had a
+	// phone (accounts from before a phone came with every account). Saving
+	// the account unchanged is how an operator asks for it. The reverse has no
+	// counterpart: demotion leaves the agent row alone, because the person's
+	// state history and filed wrap-ups hang off it.
+	if account.ExtensionNumber == "" && (account.Role == "AGENT" || account.Role == "SUPERVISOR") {
 		account, err = s.provisionPhoneFor(r.Context(), account)
 		if err != nil {
 			s.writeAccountError(w, r, err)
@@ -227,9 +228,9 @@ func (s *Server) ResetUserPassword(w http.ResponseWriter, r *http.Request, userI
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// provisionPhoneFor gives a promoted account the identity and phone it lacks.
+// provisionPhoneFor gives a call-taking account the identity or phone it lacks.
 func (s *Server) provisionPhoneFor(ctx context.Context, account store.Account) (store.Account, error) {
-	sipPassword, err := newSIPPassword()
+	sipPassword, err := catalog.NewSIPPassword()
 	if err != nil {
 		return store.Account{}, err
 	}
@@ -291,20 +292,6 @@ func accountOut(a store.Account) api.User {
 // records and every historical row know an agent by this string, so renaming
 // the account must not rename it underneath them.
 func callcenterNameFor(username string) string { return "agent-" + username }
-
-// newSIPPassword mints a phone credential nobody has to invent.
-//
-// It is never returned by any write: an operator reads it back through the
-// extension's own reveal endpoint, which is ADMIN-only and audited (D5). Long
-// enough that it is not worth guessing, and unpadded base32 so it survives
-// being typed into a phone's configuration by hand.
-func newSIPPassword() (string, error) {
-	var raw [15]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:]), nil
-}
 
 func (s *Server) writeAccountError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {

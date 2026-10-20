@@ -145,6 +145,14 @@ func run() error {
 		}
 	}
 
+	// Agents from before a phone came with every account cannot sign in until
+	// they have one (#268). After the seed, so a seeded account is repaired on
+	// the start that seeded it rather than the next one.
+	var repairedAgents []store.Account
+	if low, high, err := cfg.ExtensionPool(); err == nil {
+		repairedAgents = repairPhonelessAgents(ctx, st.Accounts(), low, high, slog.Default())
+	}
+
 	authSvc := auth.NewService(st.Queries, cfg.SessionTTL)
 	hub := events.NewHub(events.NewSequence(seqReserver{st}, "events"))
 	// A callback learns how its last attempt went when that call's CDR lands;
@@ -419,6 +427,9 @@ func run() error {
 	// An originate that never makes a channel is recorded through the same
 	// single CDR write path as every other call.
 	outboundSvc.SetFailureLedger(st.Ledger())
+
+	// After connect(), so the reconnect pass has run before these are added.
+	link.OnConnect(mirrorOnFirstConnect(repairedAgents, agentSvc.MirrorAgent))
 
 	go link.Run(ctx)
 	go dispatchSwitchEvents(ctx, link, coordinator, agentSvc, outboundSvc)

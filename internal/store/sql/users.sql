@@ -51,3 +51,10 @@ RETURNING *;
 -- name: CountOtherActiveAdmins :one
 SELECT count(*) FROM users
 WHERE role = 'ADMIN' AND status = 'ACTIVE' AND id <> $1;
+
+-- The account a phone is being provisioned for, locked for the transaction:
+-- two edits of one account at once give it one phone, not two, and its role
+-- is read as it stands rather than as it stood a moment ago.
+
+-- name: LockUserForProvisioning :one
+SELECT role FROM users WHERE id = $1 FOR UPDATE;

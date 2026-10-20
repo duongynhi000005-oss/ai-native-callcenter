@@ -74,3 +74,23 @@ RETURNING *;
 UPDATE agent_state_logs
 SET exited_at = $2
 WHERE agent_id = $1 AND exited_at IS NULL;
+
+-- The identity a phone is about to be given, locked: whoever binds or rebinds
+-- it meanwhile waits rather than having their binding overwritten.
+-- name: GetAgentByUserIDForUpdate :one
+SELECT * FROM agents WHERE user_id = $1 FOR UPDATE;
+
+-- Gives a phoneless identity its phone. Only a phoneless one: a binding that
+-- appeared since the identity was read is not replaced.
+-- name: GiveAgentPhone :execrows
+UPDATE agents SET default_extension_id = $2
+WHERE id = $1 AND default_extension_id IS NULL;
+
+-- Every call-taking identity without a phone, the repair's work list. An
+-- administrator's leftover identity is not one: they take no calls.
+-- name: ListPhonelessCallTakers :many
+SELECT u.id
+FROM agents a
+JOIN users u ON u.id = a.user_id
+WHERE u.role IN ('AGENT', 'SUPERVISOR') AND a.default_extension_id IS NULL
+ORDER BY u.username;

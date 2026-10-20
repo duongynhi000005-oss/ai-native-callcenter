@@ -293,7 +293,7 @@ export interface paths {
         get?: never;
         /**
          * Edit an account
-         * @description Replaces the account's details. The last active administrator cannot be demoted or suspended — the alternative is a product nobody can administer.
+         * @description Replaces the account's details. A call-taking account (AGENT or SUPERVISOR) without a phone is given one from the extension pool (AICC_EXTENSION_RANGE) on the same request, so saving such an account unchanged is how it gets one; the agent identity it already has keeps its id, and with it its state history and filed wrap-ups. An exhausted pool is refused with 409 EXTENSION_POOL_EXHAUSTED and allocates nothing. The last active administrator cannot be demoted or suspended — the alternative is a product nobody can administer.
          */
         put: operations["updateUser"];
         post?: never;
@@ -735,7 +735,7 @@ export interface paths {
         post?: never;
         /**
          * Delete an extension
-         * @description Refused with 409 EXTENSION_ASSIGNED_TO_AGENT while an agent has the extension as their phone: deleting it would unbind them silently, and the next registration their phone attempts would fail with nothing in the application to say why. Unbind the agent first.
+         * @description Refused with 409 EXTENSION_ASSIGNED_TO_AGENT while an agent has the extension as their phone: the database refuses the delete (the agent's binding restricts it), because deleting it would unbind them silently, and the next registration their phone attempts would fail with nothing in the application to say why. To delete it, first move the agent to another extension or clear their binding with `PUT /agents/{agentId}` (`defaultExtensionId`; refused while they are signed in), or remove their agent identity with `DELETE /agents/{agentId}`. A call-taking account left without a phone is given a new one from the extension pool the next time the account is saved and when the server starts.
          */
         delete: operations["deleteExtension"];
         options?: never;
@@ -2019,7 +2019,7 @@ export interface components {
             agentId?: string;
             /** @description How the switch names this agent. Stamped when the identity is created and never renamed afterwards: it is what mod_callcenter, its tiers and every historical record know them by. */
             callcenterName?: string;
-            /** @description The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created. Absent for an account with no phone. */
+            /** @description The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created, or when a call-taking account without one was saved. Absent for an account with no phone. */
             extensionNumber?: string;
         };
         UserList: {
@@ -2041,7 +2041,7 @@ export interface components {
             password: string;
             locale?: string;
         };
-        /** @description The account as it should now read — a whole replacement, so read it, change what you meant, and send all of it back. Promoting an ADMIN to a call-taking role provisions the identity and phone they lack; demoting one never removes them, because their state history and filed wrap-ups hang off that identity. */
+        /** @description The account as it should now read — a whole replacement, so read it, change what you meant, and send all of it back. A call-taking account without a phone is given one from the extension pool: promoting an ADMIN provisions the identity and phone they lack, and an AGENT or SUPERVISOR whose identity has no phone gets a phone bound to that identity, so sending the account back unchanged is how to give it one. An ADMIN is never given a phone. Demoting an account never removes its identity or phone, because their state history and filed wrap-ups hang off that identity. */
         UserUpdate: {
             username: string;
             displayName?: string;

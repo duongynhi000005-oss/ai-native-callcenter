@@ -2964,7 +2964,7 @@ type User struct {
 	CallcenterName *string `json:"callcenterName,omitempty"`
 	DisplayName    string  `json:"displayName"`
 
-	// ExtensionNumber The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created. Absent for an account with no phone.
+	// ExtensionNumber The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created, or when a call-taking account without one was saved. Absent for an account with no phone.
 	ExtensionNumber *string `json:"extensionNumber,omitempty"`
 
 	// Role Ranked roles; a higher role passes every lower gate (ADMIN > SUPERVISOR > AGENT).
@@ -3015,7 +3015,7 @@ type UserList struct {
 // UserStatus Whether the account may sign in. A suspended account is refused on its next request, not at its next login: the session check reads the account, so suspending takes hold at once.
 type UserStatus string
 
-// UserUpdate The account as it should now read — a whole replacement, so read it, change what you meant, and send all of it back. Promoting an ADMIN to a call-taking role provisions the identity and phone they lack; demoting one never removes them, because their state history and filed wrap-ups hang off that identity.
+// UserUpdate The account as it should now read — a whole replacement, so read it, change what you meant, and send all of it back. A call-taking account without a phone is given one from the extension pool: promoting an ADMIN provisions the identity and phone they lack, and an AGENT or SUPERVISOR whose identity has no phone gets a phone bound to that identity, so sending the account back unchanged is how to give it one. An ADMIN is never given a phone. Demoting an account never removes its identity or phone, because their state history and filed wrap-ups hang off that identity.
 type UserUpdate struct {
 	DisplayName *string `json:"displayName,omitempty"`
 	Locale      *string `json:"locale,omitempty"`

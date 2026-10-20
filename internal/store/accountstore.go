@@ -123,12 +123,24 @@ func (a *AccountStore) Provision(ctx context.Context, in NewAccount) (Account, e
 	return account, nil
 }
 
-// EnsureAgentIdentity gives an existing account the identity and phone its
+// EnsureAgentIdentity gives a call-taking account the identity and phone its
 // role needs, and does nothing when it already has them.
 //
-// This is what promotion runs: an administrator who becomes a supervisor has
-// an account but has never had a phone. The reverse has no counterpart on
-// purpose — see Update.
+// Two accounts reach it. An administrator promoted to supervisor has never had
+// either, and gets both. An agent whose identity exists without a phone — an
+// account from before a phone came with every account — gets a phone, bound
+// to the identity it already has: that identity's id is what its state
+// history and filed wrap-ups hang off, so a new one would orphan the record of
+// what the person did.
+//
+// It decides from the account as it stands inside the transaction, not as the
+// caller last read it. The account's row is locked first, so two edits of one
+// phoneless account at once queue here and the second finds the phone the
+// first gave; the identity's row is locked next, so a binding made meanwhile
+// through the agent configuration is waited for rather than overwritten. An
+// account whose role takes no calls is left as it is, whatever identity it
+// kept from before a demotion. The reverse has no counterpart on purpose — see
+// Update.
 func (a *AccountStore) EnsureAgentIdentity(ctx context.Context, userID uuid.UUID,
 	in NewAccount) (Account, error) {
 	tx, err := a.pool.Begin(ctx)
@@ -138,14 +150,35 @@ func (a *AccountStore) EnsureAgentIdentity(ctx context.Context, userID uuid.UUID
 	defer func() { _ = tx.Rollback(ctx) }()
 	qtx := a.q.WithTx(tx)
 
-	if _, err := qtx.GetAgentByUserID(ctx, userID); err == nil {
-		return a.Get(ctx, userID) // already has one; nothing to do
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return Account{}, fmt.Errorf("look up agent identity: %w", err)
+	role, err := qtx.LockUserForProvisioning(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Account{}, ErrNoSuchAccount
+		}
+		return Account{}, fmt.Errorf("lock account: %w", err)
+	}
+	// The answers that change nothing are read on the transaction's own
+	// connection. Asking the pool for a second one while holding these locks
+	// is how a burst of edits on one account would starve it: every waiter
+	// holds a connection, and the holder could not get one to finish with.
+	if !takesCalls(role) {
+		return readAccount(ctx, qtx, userID)
 	}
 
-	if _, _, err := provisionAgentTx(ctx, qtx, userID, in); err != nil {
-		return Account{}, err
+	agent, err := qtx.GetAgentByUserIDForUpdate(ctx, userID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if _, _, err := provisionAgentTx(ctx, qtx, userID, in); err != nil {
+			return Account{}, err
+		}
+	case err != nil:
+		return Account{}, fmt.Errorf("look up agent identity: %w", err)
+	case agent.DefaultExtensionID != nil:
+		return readAccount(ctx, qtx, userID) // already has one; nothing to do
+	default:
+		if err := givePhoneTx(ctx, qtx, agent.ID, in); err != nil {
+			return Account{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Account{}, fmt.Errorf("commit agent identity: %w", err)
@@ -153,11 +186,43 @@ func (a *AccountStore) EnsureAgentIdentity(ctx context.Context, userID uuid.UUID
 	return a.Get(ctx, userID)
 }
 
-// provisionAgentTx writes the ACD identity and its phone on a transaction
-// somebody else owns.
-func provisionAgentTx(ctx context.Context, qtx *queries.Queries, userID uuid.UUID,
-	in NewAccount) (queries.Agent, queries.Extension, error) {
-	phone, err := allocateExtensionTx(ctx, qtx, catalog.Extension{
+// PhonelessCallTakers is every call-taking account whose identity has no
+// phone, whatever its status: the work list of the startup repair. A
+// suspended account is on it, because reinstating somebody should not hand
+// back an account that cannot sign in.
+func (a *AccountStore) PhonelessCallTakers(ctx context.Context) ([]uuid.UUID, error) {
+	ids, err := a.q.ListPhonelessCallTakers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list phoneless agents: %w", err)
+	}
+	return ids, nil
+}
+
+// givePhoneTx allocates a phone from the pool and binds it to an identity that
+// has none, on a transaction somebody else owns.
+func givePhoneTx(ctx context.Context, qtx *queries.Queries, agentID uuid.UUID, in NewAccount) error {
+	phone, err := allocateExtensionTx(ctx, qtx, phoneFor(in), in.ExtensionLow, in.ExtensionHigh)
+	if err != nil {
+		return err
+	}
+	n, err := qtx.GiveAgentPhone(ctx, queries.GiveAgentPhoneParams{
+		ID: agentID, DefaultExtensionID: &phone.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("bind phone %s: %w", phone.Number, err)
+	}
+	if n != 1 {
+		// Unreachable while the caller holds the identity's row lock; said
+		// rather than assumed, because committing would leave a phone nobody
+		// is bound to.
+		return fmt.Errorf("bind phone %s: the identity already has one", phone.Number)
+	}
+	return nil
+}
+
+// phoneFor is the extension a person's phone is created as.
+func phoneFor(in NewAccount) catalog.Extension {
+	return catalog.Extension{
 		ID:       uuid.Must(uuid.NewV7()),
 		Password: in.SIPPassword,
 		// Named after the person rather than the number: a directory of
@@ -165,7 +230,14 @@ func provisionAgentTx(ctx context.Context, qtx *queries.Queries, userID uuid.UUI
 		// nothing about who sits there.
 		DisplayName: in.DisplayName,
 		IsEnabled:   true,
-	}, in.ExtensionLow, in.ExtensionHigh)
+	}
+}
+
+// provisionAgentTx writes the ACD identity and its phone on a transaction
+// somebody else owns.
+func provisionAgentTx(ctx context.Context, qtx *queries.Queries, userID uuid.UUID,
+	in NewAccount) (queries.Agent, queries.Extension, error) {
+	phone, err := allocateExtensionTx(ctx, qtx, phoneFor(in), in.ExtensionLow, in.ExtensionHigh)
 	if err != nil {
 		return queries.Agent{}, queries.Extension{}, err
 	}
@@ -259,7 +331,12 @@ func (a *AccountStore) List(ctx context.Context) ([]Account, error) {
 
 // Get is one account.
 func (a *AccountStore) Get(ctx context.Context, userID uuid.UUID) (Account, error) {
-	r, err := a.q.GetAccount(ctx, userID)
+	return readAccount(ctx, a.q, userID)
+}
+
+// readAccount is Get on whichever connection the caller is using.
+func readAccount(ctx context.Context, q *queries.Queries, userID uuid.UUID) (Account, error) {
+	r, err := q.GetAccount(ctx, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Account{}, ErrNoSuchAccount
