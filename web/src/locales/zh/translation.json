@@ -776,6 +776,7 @@
     },
     "extension": "分机",
     "noPhone": "无",
+    "assignPhone": "分配话机",
     "noUsers": "还没有账号。",
     "initialPassword": "初始口令",
     "newPassword": "新口令",

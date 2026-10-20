@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { useState } from 'react'
-import { KeyRound, Pencil, Plus } from 'lucide-react'
+import { KeyRound, Pencil, Phone, Plus } from 'lucide-react'
 
 import { PageHeader } from '@/components/page-header'
 import { Field, Input, RecordDialog, Select, useRecordForm } from '@/components/record-dialog'
@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import type { Role } from '@/lib/api'
 import { describeError, fieldErrorText } from '@/lib/errors'
 import { requireRole } from '@/lib/guards'
-import { useUserMutations, useUsers, type User, type UserDraft } from '@/lib/users'
+import { needsPhone, useUserMutations, useUsers, type User, type UserDraft } from '@/lib/users'
 
 /**
  * The people who use this product, and what each of them was given.
@@ -33,7 +33,7 @@ const ROLES: Role[] = ['AGENT', 'SUPERVISOR', 'ADMIN']
 function UsersAdmin() {
   const { t } = useTranslation()
   const { data, isPending, isError, error } = useUsers()
-  const { create, update, resetPassword } = useUserMutations()
+  const { create, update, assignPhone, resetPassword } = useUserMutations()
   const [editing, setEditing] = useRecordForm<UserDraft>(create, update)
   const [resetting, setResetting] = useState<User | null>(null)
   const [newPassword, setNewPassword] = useState('')
@@ -115,7 +115,32 @@ function UsersAdmin() {
                     they take no calls, which is different from a phone that
                     was unbound. */}
                 {user.extensionNumber ?? (
-                  <span className="text-muted-foreground">{t('users.noPhone')}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="text-muted-foreground">{t('users.noPhone')}</span>
+                    {/* A call-taking account with no phone cannot sign in.
+                        Saving it unchanged is what gives it one, from the
+                        extension pool; nobody picks the number. */}
+                    {needsPhone(user) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={assignPhone.isPending}
+                        onClick={() => assignPhone.mutate(user)}
+                      >
+                        <Phone />
+                        {t('users.assignPhone')}
+                      </Button>
+                    )}
+                  </span>
+                )}
+                {assignPhone.isError && assignPhone.variables?.userId === user.userId && (
+                  <span
+                    role="alert"
+                    className="block text-xs"
+                    style={{ color: 'var(--state-breach)' }}
+                  >
+                    {describeError(assignPhone.error, t)}
+                  </span>
                 )}
               </Td>
               <Td align="right">

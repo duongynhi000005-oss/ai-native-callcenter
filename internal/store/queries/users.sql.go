@@ -257,6 +257,21 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const lockUserForProvisioning = `-- name: LockUserForProvisioning :one
+
+SELECT role FROM users WHERE id = $1 FOR UPDATE
+`
+
+// The account a phone is being provisioned for, locked for the transaction:
+// two edits of one account at once give it one phone, not two, and its role
+// is read as it stands rather than as it stood a moment ago.
+func (q *Queries) LockUserForProvisioning(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, lockUserForProvisioning, id)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
 const touchUserLogin = `-- name: TouchUserLogin :exec
 UPDATE users SET last_login_at = now() WHERE id = $1
 `

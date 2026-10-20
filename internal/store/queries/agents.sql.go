@@ -128,6 +128,26 @@ func (q *Queries) GetAgentByUserID(ctx context.Context, userID uuid.UUID) (Agent
 	return i, err
 }
 
+const getAgentByUserIDForUpdate = `-- name: GetAgentByUserIDForUpdate :one
+SELECT id, user_id, callcenter_name, is_auto_answer, default_extension_id, created_at FROM agents WHERE user_id = $1 FOR UPDATE
+`
+
+// The identity a phone is about to be given, locked: whoever binds or rebinds
+// it meanwhile waits rather than having their binding overwritten.
+func (q *Queries) GetAgentByUserIDForUpdate(ctx context.Context, userID uuid.UUID) (Agent, error) {
+	row := q.db.QueryRow(ctx, getAgentByUserIDForUpdate, userID)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.CallcenterName,
+		&i.IsAutoAnswer,
+		&i.DefaultExtensionID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getAgentState = `-- name: GetAgentState :one
 SELECT agent_id, state, reason, extension_number, entered_at, wrap_up_call_id FROM agent_states WHERE agent_id = $1
 `
@@ -144,6 +164,26 @@ func (q *Queries) GetAgentState(ctx context.Context, agentID uuid.UUID) (AgentSt
 		&i.WrapUpCallID,
 	)
 	return i, err
+}
+
+const giveAgentPhone = `-- name: GiveAgentPhone :execrows
+UPDATE agents SET default_extension_id = $2
+WHERE id = $1 AND default_extension_id IS NULL
+`
+
+type GiveAgentPhoneParams struct {
+	ID                 uuid.UUID  `json:"id"`
+	DefaultExtensionID *uuid.UUID `json:"defaultExtensionId"`
+}
+
+// Gives a phoneless identity its phone. Only a phoneless one: a binding that
+// appeared since the identity was read is not replaced.
+func (q *Queries) GiveAgentPhone(ctx context.Context, arg GiveAgentPhoneParams) (int64, error) {
+	result, err := q.db.Exec(ctx, giveAgentPhone, arg.ID, arg.DefaultExtensionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const listAgentRoster = `-- name: ListAgentRoster :many
@@ -215,6 +255,36 @@ func (q *Queries) ListAgentRoster(ctx context.Context) ([]ListAgentRosterRow, er
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPhonelessCallTakers = `-- name: ListPhonelessCallTakers :many
+SELECT u.id
+FROM agents a
+JOIN users u ON u.id = a.user_id
+WHERE u.role IN ('AGENT', 'SUPERVISOR') AND a.default_extension_id IS NULL
+ORDER BY u.username
+`
+
+// Every call-taking identity without a phone, the repair's work list. An
+// administrator's leftover identity is not one: they take no calls.
+func (q *Queries) ListPhonelessCallTakers(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPhonelessCallTakers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

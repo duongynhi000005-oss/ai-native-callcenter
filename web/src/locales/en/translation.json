@@ -779,6 +779,7 @@
     },
     "extension": "Phone",
     "noPhone": "none",
+    "assignPhone": "Assign a phone",
     "noUsers": "No accounts yet.",
     "initialPassword": "Initial password",
     "newPassword": "New password",

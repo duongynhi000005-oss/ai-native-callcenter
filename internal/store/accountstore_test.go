@@ -161,6 +161,13 @@ func TestPromotingAnAdministratorGivesThemAPhone(t *testing.T) {
 		t.Fatalf("provision: %v", err)
 	}
 
+	// The role first, as the edit writes it; the store decides from the
+	// account as it stands, not from what it was asked to provision.
+	if _, err := acc.Update(ctx, boss.UserID, Changes{
+		Username: "boss", DisplayName: "boss", Role: "SUPERVISOR", Status: "ACTIVE",
+	}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
 	promoted, err := acc.EnsureAgentIdentity(ctx, boss.UserID, newAccount("boss", "SUPERVISOR"))
 	if err != nil {
 		t.Fatalf("ensure identity: %v", err)

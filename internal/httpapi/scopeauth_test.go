@@ -67,6 +67,14 @@ func newFixture(t *testing.T, opts ...func(*Deps)) *fixture {
 // fixture is built on (a service of its own over the same database).
 func newFixtureWithStore(t *testing.T, opts ...func(*store.Store, *Deps)) *fixture {
 	t.Helper()
+	return newFixtureWithConfig(t, nil, opts...)
+}
+
+// newFixtureWithConfig is newFixtureWithStore for a test that needs a setting
+// the default configuration leaves empty (the extension range, say).
+func newFixtureWithConfig(t *testing.T, configure func(*config.Config),
+	opts ...func(*store.Store, *Deps)) *fixture {
+	t.Helper()
 	dsn := testdb.ScratchDSN(t, "scopetest")
 
 	ctx := context.Background()
@@ -80,6 +88,9 @@ func newFixtureWithStore(t *testing.T, opts ...func(*store.Store, *Deps)) *fixtu
 	}
 
 	cfg := config.Config{SessionCookie: "aicc_session", SessionTTL: time.Hour}
+	if configure != nil {
+		configure(&cfg)
+	}
 	deps := Deps{
 		Auth:      auth.NewService(st.Queries, cfg.SessionTTL),
 		Agents:    stubAgents{},
