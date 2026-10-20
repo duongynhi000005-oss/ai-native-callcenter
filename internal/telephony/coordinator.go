@@ -42,6 +42,8 @@ type AgentLookup interface {
 	// BeginAfterCallWork starts an agent's wrap-up for the call whose agent
 	// leg just ended. Fire and forget: a call is over whether or not presence
 	// could be recorded, so this reports nothing back to the switch path.
+	// Which legs owe it is decided by the caller: an answered leg of any call
+	// that is not INTERNAL.
 	BeginAfterCallWork(ctx context.Context, agentID, callID uuid.UUID)
 }
 
@@ -362,17 +364,24 @@ func (c *Coordinator) Handle(ctx context.Context, ev SwitchEvent) {
 		// After-call work is for a conversation that happened. A leg that
 		// rang and was never answered — a decline, a phone nobody picked up —
 		// left the agent nothing to write up.
-		if ended.wasAnswered {
+		//
+		// Nor is it for one colleague calling another (#272): that is not a
+		// customer's call, and writing it up would cost both of them a
+		// disposition and hold both out of the queue. The stamped type
+		// decides, so an internal call later transferred out to a customer
+		// still owes nobody a wrap-up: the type says what the call was.
+		if ended.wasAnswered && ended.callType != events.CallTypeInternal {
 			c.agents.BeginAfterCallWork(ctx, ended.agentID, ended.callID)
 		}
 	}
 }
 
 // endedLeg is what an agent's hangup means for that agent: which call it was,
-// and whether they ever spoke on it.
+// what kind of call, and whether they ever spoke on it.
 type endedLeg struct {
 	agentID     uuid.UUID
 	callID      uuid.UUID
+	callType    events.CallType
 	wasAnswered bool
 }
 
@@ -1149,6 +1158,7 @@ func (c *Coordinator) agentLegEnded(channelID string) *endedLeg {
 		ended = &endedLeg{
 			agentID:     *p.AgentID,
 			callID:      call.CallID,
+			callType:    call.CallType,
 			wasAnswered: !p.AnsweredAt.IsZero(),
 		}
 	})
