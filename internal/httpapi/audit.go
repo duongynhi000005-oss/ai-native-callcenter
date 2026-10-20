@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -96,15 +97,38 @@ func (s *Server) auditTrail(next http.Handler) http.Handler {
 
 		action := r.Method + " " + routePattern(r)
 		targetKind, targetID := targetFrom(r)
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-
-		if err := s.auditor.Audit(r.Context(), auditSubject(r),
-			action, targetKind, targetID, detail, ip); err != nil {
-			// The action already happened; losing its audit row is worth a
-			// loud log line but not a failed response.
-			s.logAuditFailure(r, err)
-		}
+		s.writeAudit(r, action, targetKind, targetID, detail)
 	})
+}
+
+// writeAudit records one audit row for r and logs, rather than returns, a
+// failure: the action already happened, so losing its row is worth a loud log
+// line but not a failed response.
+//
+// The write outlives the client. By the time it runs the action has taken
+// effect, and a client that went away (a navigation, an aborted fetch, a
+// closed tab) cancels r.Context(): writing on it lost exactly the row that
+// says who did it. WithoutCancel keeps the trace and the values; the timeout
+// keeps a dead database from holding the request goroutine.
+func (s *Server) writeAudit(r *http.Request, action, targetKind, targetID string, detail map[string]any) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.auditWriteTimeout())
+	defer cancel()
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	who := auditSubject(r)
+	if err := s.auditor.Audit(ctx, who, action, targetKind, targetID, detail, ip); err != nil {
+		s.logAuditFailure(r, who, err)
+	}
+}
+
+// auditWriteTimeout bounds one audit insert. Generous for a single-row insert,
+// short enough that a stalled database does not pile up request goroutines.
+const auditWriteTimeout = 5 * time.Second
+
+func (s *Server) auditWriteTimeout() time.Duration {
+	if s.auditTimeout > 0 {
+		return s.auditTimeout
+	}
+	return auditWriteTimeout
 }
 
 // redactSecrets prepares a request body for the audit row, replacing the value
@@ -240,7 +264,10 @@ func (r *statusRecorder) Flush() {
 }
 
 // logAuditFailure is split out so the middleware body stays readable.
-func (s *Server) logAuditFailure(r *http.Request, err error) {
+// The subject goes in the line because the row that would have named it does
+// not exist.
+func (s *Server) logAuditFailure(r *http.Request, who store.AuditSubject, err error) {
 	slog.ErrorContext(r.Context(), "audit write failed",
-		"method", r.Method, "path", r.URL.Path, "error", err)
+		"method", r.Method, "path", r.URL.Path,
+		"subjectKind", who.Kind, "subjectName", who.Name, "error", err)
 }

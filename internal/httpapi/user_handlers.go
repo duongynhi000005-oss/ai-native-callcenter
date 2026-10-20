@@ -8,7 +8,6 @@ import (
 	"encoding/base32"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -360,11 +359,7 @@ func (s *Server) RevealExtensionPassword(w http.ResponseWriter, r *http.Request,
 	// Recorded before the answer leaves: a disclosure whose record failed is
 	// still a disclosure, and the log line says so loudly.
 	if s.auditor != nil {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if err := s.auditor.Audit(r.Context(), auditSubject(r),
-			"GET "+routePattern(r), "extension", extensionID.String(), nil, ip); err != nil {
-			s.logAuditFailure(r, err)
-		}
+		s.writeAudit(r, "GET "+routePattern(r), "extension", extensionID.String(), nil)
 	}
 	writeJSON(w, http.StatusOK, api.ExtensionSecret{Password: password})
 }

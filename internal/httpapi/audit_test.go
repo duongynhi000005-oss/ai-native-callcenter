@@ -4,12 +4,15 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -459,5 +462,344 @@ func TestTheAuditTrailKeepsNoSecrets(t *testing.T) {
 		if _, ok := redactSecrets([]byte(body)); ok {
 			t.Errorf("stored a body it could not inspect: %q", body)
 		}
+	}
+}
+
+// storeAuditor writes the way the real store does: pgx refuses to start a
+// query on a context that is already done, so an insert on a cancelled request
+// context fails with that context's error. With stall set it is a database
+// that never answers, holding the insert until the context gives up.
+type storeAuditor struct {
+	fakeAuditor
+	stall bool
+
+	mu    sync.Mutex
+	calls []error   // what each Audit call returned, recorded before it returns
+	done  chan bool // optional: one send per call, true when the row was written
+}
+
+func (f *storeAuditor) Audit(ctx context.Context, who store.AuditSubject,
+	action, targetKind, targetID string, detail map[string]any, ip string) error {
+	if f.stall {
+		<-ctx.Done()
+	}
+	err := ctx.Err()
+	if err == nil {
+		err = f.fakeAuditor.Audit(ctx, who, action, targetKind, targetID, detail, ip)
+	}
+	f.mu.Lock()
+	f.calls = append(f.calls, err)
+	f.mu.Unlock()
+	if f.done != nil {
+		f.done <- err == nil
+	}
+	return err
+}
+
+func (f *storeAuditor) results() []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]error(nil), f.calls...)
+}
+
+// auditedRoute mounts one audited POST, shaped like the real tree, for a
+// request made by ac. The handler answers 201 and then runs after, which is
+// where a test makes the client go away.
+func auditedRoute(s *Server, ac AuthContext, after func(w http.ResponseWriter, r *http.Request)) http.Handler {
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(contextWithAuth(req.Context(), ac)))
+		})
+	})
+	r.Use(s.auditTrail)
+	r.Post("/api/v1/queues/{queueId}/agents", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		if after != nil {
+			after(w, req)
+		}
+	})
+	return r
+}
+
+// The two credentials a request can carry. They are equals, and an audit row
+// has to survive the client for both.
+func auditIdentities() []struct {
+	name string
+	ac   AuthContext
+	want store.AuditSubject
+} {
+	userID, keyID, agentID := uuid.New(), uuid.New(), uuid.New()
+	return []struct {
+		name string
+		ac   AuthContext
+		want store.AuditSubject
+	}{
+		{
+			name: "a session",
+			ac: AuthContext{Kind: SubjectUser, SubjectID: userID, SubjectName: "alice",
+				User: auth.Identity{UserID: userID, Username: "alice", Role: auth.RoleAdmin}},
+			want: store.AuditSubject{Kind: "USER", ID: &userID, Name: "alice", ActorID: &userID},
+		},
+		{
+			name: "an API key acting for an agent",
+			ac:   AuthContext{Kind: SubjectKey, SubjectID: keyID, SubjectName: "crm-sync", AgentID: agentID},
+			want: store.AuditSubject{Kind: "API_KEY", ID: &keyID, Name: "crm-sync", AgentID: &agentID},
+		},
+	}
+}
+
+func checkAuditRow(t *testing.T, rows []auditRow, want store.AuditSubject, queueID uuid.UUID) {
+	t.Helper()
+	if len(rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1: the action happened and nobody knows who did it", len(rows))
+	}
+	row := rows[0]
+	if !reflect.DeepEqual(row.subject, want) {
+		t.Errorf("subject = %+v, want %+v", row.subject, want)
+	}
+	if row.action != "POST /api/v1/queues/{queueId}/agents" {
+		t.Errorf("action = %q, want the route pattern", row.action)
+	}
+	if row.targetKind != "queue" || row.targetID != queueID.String() {
+		t.Errorf("target = %s/%s, want queue/%s", row.targetKind, row.targetID, queueID)
+	}
+	if request, _ := row.detail["request"].(string); !strings.Contains(request, "agentId") {
+		t.Errorf("detail lost the request body: %v", row.detail)
+	}
+}
+
+// #273: the row was written on the request's context after the handler had
+// answered, so a client that had already gone (a navigation, an aborted
+// fetch, a closed tab) cancelled the insert, and an action that took effect
+// left no record of who took it.
+func TestAnAuditRowOutlivesTheClient(t *testing.T) {
+	t.Parallel()
+	for _, id := range auditIdentities() {
+		t.Run(id.name, func(t *testing.T) {
+			t.Parallel()
+			auditor := &storeAuditor{}
+			ctx, hangUp := context.WithCancel(context.Background())
+			defer hangUp()
+			// The client goes away the moment it has its answer.
+			server := auditedRoute(&Server{auditor: auditor}, id.ac,
+				func(http.ResponseWriter, *http.Request) { hangUp() })
+
+			queueID := uuid.New()
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost,
+				"/api/v1/queues/"+queueID.String()+"/agents", strings.NewReader(`{"agentId":"x"}`))
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201", rec.Code)
+			}
+			if req.Context().Err() == nil {
+				t.Fatal("the request context was not cancelled; the test proves nothing")
+			}
+			if errs := auditor.results(); len(errs) != 1 || errs[0] != nil {
+				t.Fatalf("audit writes returned %v, want one success", errs)
+			}
+			checkAuditRow(t, auditor.all(), id.want, queueID)
+		})
+	}
+}
+
+// The same, over a real connection: the client reads the answer's headers and
+// hangs up, the server notices the connection close, and only then does the
+// trail write.
+func TestAnAuditRowOutlivesAClosedConnection(t *testing.T) {
+	t.Parallel()
+	id := auditIdentities()[0]
+	auditor := &storeAuditor{done: make(chan bool, 1)}
+	server := httptest.NewServer(auditedRoute(&Server{auditor: auditor}, id.ac,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.(http.Flusher).Flush()
+			// Hold the answer open until the server has seen the client go,
+			// so the trail runs on a request context that is already done.
+			<-r.Context().Done()
+		}))
+	defer server.Close()
+
+	queueID := uuid.New()
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		server.URL+"/api/v1/queues/"+queueID.String()+"/agents", strings.NewReader(`{"agentId":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	}
+	hangUp() // closes the connection before the body is read
+	_ = resp.Body.Close()
+
+	select {
+	case written := <-auditor.done:
+		if !written {
+			t.Fatalf("the audit write failed after the client hung up: %v", auditor.results())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the trail never wrote after the client hung up")
+	}
+	checkAuditRow(t, auditor.all(), id.want, queueID)
+}
+
+// failureLog counts "audit write failed" lines for one path.
+type failureLog struct {
+	path  string
+	mu    sync.Mutex
+	lines []slog.Record
+}
+
+func (l *failureLog) Enabled(context.Context, slog.Level) bool { return true }
+func (l *failureLog) WithAttrs([]slog.Attr) slog.Handler       { return l }
+func (l *failureLog) WithGroup(string) slog.Handler            { return l }
+func (l *failureLog) Handle(_ context.Context, r slog.Record) error {
+	if r.Message != "audit write failed" {
+		return nil
+	}
+	ours := false
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "path" && a.Value.String() == l.path {
+			ours = true
+		}
+		return true
+	})
+	if ours {
+		l.mu.Lock()
+		l.lines = append(l.lines, r.Clone())
+		l.mu.Unlock()
+	}
+	return nil
+}
+
+func (l *failureLog) records() []slog.Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]slog.Record(nil), l.lines...)
+}
+
+// Outliving the client must not mean outliving everything: a database that
+// stops answering gets a bounded wait, the request goroutine is handed back,
+// and the lost row is said once, loudly, with who it would have named.
+//
+// Not parallel: it swaps the default logger, which parallel tests would
+// otherwise write into. The handler also keeps only this test's path.
+func TestAStalledAuditStoreIsGivenUpOn(t *testing.T) {
+	id := auditIdentities()[1]
+	queueID := uuid.New()
+	path := "/api/v1/queues/" + queueID.String() + "/agents"
+
+	logged := &failureLog{path: path}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(logged))
+	defer slog.SetDefault(prev)
+
+	auditor := &storeAuditor{stall: true}
+	server := auditedRoute(&Server{auditor: auditor, auditTimeout: 50 * time.Millisecond}, id.ac, nil)
+
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"agentId":"x"}`))
+	rec := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		server.ServeHTTP(rec, req)
+	}()
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second): // well under the 5 s default: the override took
+		t.Fatal("the trail held the request past its audit timeout")
+	}
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want the handler's 201: a lost row is not a failed action", rec.Code)
+	}
+	// Synchronous: the write had returned, with the deadline, before the
+	// request did. Nothing is left running behind the response.
+	errs := auditor.results()
+	if len(errs) != 1 || !errors.Is(errs[0], context.DeadlineExceeded) {
+		t.Fatalf("audit writes returned %v, want one DeadlineExceeded", errs)
+	}
+	if rows := auditor.all(); len(rows) != 0 {
+		t.Errorf("a stalled store recorded rows: %+v", rows)
+	}
+
+	lines := logged.records()
+	if len(lines) != 1 {
+		t.Fatalf("logged the failure %d times, want once", len(lines))
+	}
+	attrs := map[string]string{}
+	lines[0].Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if attrs["subjectKind"] != "API_KEY" || attrs["subjectName"] != "crm-sync" {
+		t.Errorf("the failure line does not say who acted: %v", attrs)
+	}
+	if !strings.Contains(attrs["error"], context.DeadlineExceeded.Error()) {
+		t.Errorf("the failure line does not say why: %v", attrs)
+	}
+}
+
+// revealCatalog hands out a phone's password and, while it does, lets the
+// test make the client go away.
+type revealCatalog struct {
+	stubCatalog
+	hangUp context.CancelFunc
+}
+
+func (c revealCatalog) ExtensionPassword(context.Context, uuid.UUID) (string, error) {
+	c.hangUp()
+	return "phone-secret", nil
+}
+
+// A disclosure is recorded from its handler, before the answer leaves; a
+// client that went away while the password was being read must not erase the
+// record that it was read.
+func TestARevealedPasswordIsRecordedAfterTheClientLeft(t *testing.T) {
+	t.Parallel()
+	for _, id := range auditIdentities() {
+		t.Run(id.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, hangUp := context.WithCancel(context.Background())
+			defer hangUp()
+			auditor := &storeAuditor{}
+			s := &Server{auditor: auditor, catalog: revealCatalog{hangUp: hangUp}}
+
+			extensionID := uuid.New()
+			r := chi.NewRouter()
+			r.Get("/api/v1/extensions/{extensionId}/password", func(w http.ResponseWriter, req *http.Request) {
+				s.RevealExtensionPassword(w, req.WithContext(contextWithAuth(req.Context(), id.ac)), extensionID)
+			})
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet,
+				"/api/v1/extensions/"+extensionID.String()+"/password", nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			rows := auditor.all()
+			if len(rows) != 1 {
+				t.Fatalf("recorded %d rows, want 1: a password left and nobody knows who read it (writes: %v)",
+					len(rows), auditor.results())
+			}
+			row := rows[0]
+			if !reflect.DeepEqual(row.subject, id.want) {
+				t.Errorf("subject = %+v, want %+v", row.subject, id.want)
+			}
+			if row.action != "GET /api/v1/extensions/{extensionId}/password" {
+				t.Errorf("action = %q", row.action)
+			}
+			if row.targetKind != "extension" || row.targetID != extensionID.String() {
+				t.Errorf("target = %s/%s", row.targetKind, row.targetID)
+			}
+		})
 	}
 }

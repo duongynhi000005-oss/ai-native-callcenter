@@ -103,6 +103,9 @@ type Server struct {
 	keys        KeyService
 	sipSessions SIPSessionService
 	spa         http.Handler
+
+	// auditTimeout bounds one audit write; zero means auditWriteTimeout.
+	auditTimeout time.Duration
 }
 
 // Deps are the services the API exposes.
