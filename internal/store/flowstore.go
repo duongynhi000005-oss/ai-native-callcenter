@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,11 +27,26 @@ type FlowStore struct {
 	// publishRules are what this deployment demands of a flow on top of it
 	// being loadable. See Store.FlowPublishRules.
 	publishRules []flow.Rule
+	// draftChecks are warned about when a draft is saved. See
+	// Store.FlowDraftChecks.
+	draftChecks []flow.Rule
 }
 
 // Flows returns the flow store.
 func (s *Store) Flows() *FlowStore {
-	return &FlowStore{q: s.Queries, publishRules: s.FlowPublishRules}
+	return &FlowStore{q: s.Queries, publishRules: s.FlowPublishRules, draftChecks: s.FlowDraftChecks}
+}
+
+// warnAboutDraft logs what the draft checks find in a saved draft. Only rule
+// problems are logged, which name tools, headers and variables and never a
+// value.
+func (f *FlowStore) warnAboutDraft(ctx context.Context, slug string, spec *flow.Spec) {
+	for _, check := range f.draftChecks {
+		if err := check(spec); err != nil {
+			slog.WarnContext(ctx, "flow draft saved with a problem that will block its publish",
+				"flow", slug, "specId", spec.ID, "problem", err.Error())
+		}
+	}
 }
 
 // ErrFlowNotPublished distinguishes a flow that exists but has never been
@@ -97,9 +113,11 @@ func (f *FlowStore) PublishedSpec(ctx context.Context, flowID uuid.UUID) (*flow.
 // Create stores a new flow with a draft. The draft must already be a valid
 // spec: there is no point storing what could never publish.
 func (f *FlowStore) Create(ctx context.Context, slug, name string, draft []byte) (uuid.UUID, error) {
-	if _, err := flow.Load(draft); err != nil {
+	spec, err := flow.Load(draft)
+	if err != nil {
 		return uuid.Nil, err
 	}
+	f.warnAboutDraft(ctx, slug, spec)
 	id, err := uuid.NewV7()
 	if err != nil {
 		return uuid.Nil, err
@@ -171,9 +189,11 @@ func (f *FlowStore) Publish(ctx context.Context, flowID uuid.UUID, note string) 
 // presses Publish. The name travels with it because both are what an author
 // edits; the slug does not, being the identity automation updates the flow by.
 func (f *FlowStore) UpdateDraft(ctx context.Context, flowID uuid.UUID, name string, draft []byte) error {
-	if _, err := flow.Load(draft); err != nil {
+	spec, err := flow.Load(draft)
+	if err != nil {
 		return err
 	}
+	f.warnAboutDraft(ctx, flowID.String(), spec)
 	if _, err := f.q.UpdateFlowDraft(ctx, queries.UpdateFlowDraftParams{
 		ID: flowID, Name: name, DraftSpec: draft,
 	}); err != nil {

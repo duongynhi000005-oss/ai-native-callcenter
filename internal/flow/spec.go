@@ -215,10 +215,31 @@ type SuccessTest struct {
 
 // HTTPCall is how a declarative tool reaches a backend.
 type HTTPCall struct {
+	// BaseURL overrides the deployment's AICC_BOT_BACKEND_BASE for this tool:
+	// an absolute http or https URL with no user, query or fragment. Absent
+	// keeps the deployment's base. Which hosts it may name is the deployment's
+	// outbound host policy (AICC_TOOL_ALLOWED_HOSTS), not the flow's.
+	BaseURL string `json:"baseUrl,omitempty"`
+	// Path is appended to the base URL's path. It starts with a literal "/" and
+	// may reference {args.x} (an argument the tool's schema requires) and
+	// {slots.y}; every substituted value is escaped into a single path segment.
 	Path string `json:"path"`
 	// Method defaults to POST, which is what the reference backends expect.
 	Method string `json:"method,omitempty"`
+	// Query maps a query parameter to a template value ({args.x}, {slots.y}),
+	// encoded as a form value. A parameter whose template references an
+	// argument the model did not pass is left out.
+	Query map[string]string `json:"query,omitempty"`
+	// Headers are sent with every call. A value is a literal, or carries
+	// {secrets.NAME} references resolved from AICC_TOOL_SECRET_<NAME> when
+	// the call is made; a credential header must use one (see secrets.go).
+	Headers map[string]string `json:"headers,omitempty"`
+	// TimeoutMs bounds the call, from MinToolTimeoutMs to MaxToolTimeoutMs.
+	// Absent means DefaultToolTimeoutMs. A pointer, because an explicit 0 is
+	// refused rather than read as absent.
+	TimeoutMs *int `json:"timeoutMs,omitempty"`
 	// Body is a template: string values may reference {args.x} and {slots.y}.
+	// Absent sends no body at all.
 	Body map[string]any `json:"body,omitempty"`
 	// SuccessWhen decides success; absent means any 2xx counts.
 	SuccessWhen *SuccessTest `json:"successWhen,omitempty"`
@@ -226,6 +247,22 @@ type HTTPCall struct {
 	ErrorFrom string `json:"errorFrom,omitempty"`
 	// Result maps slot names to dotted paths in the response.
 	Result map[string]string `json:"result,omitempty"`
+}
+
+// The bounds of HTTPCall.TimeoutMs. A backend call happens inside a phone call
+// with somebody waiting, so the ceiling is ten seconds.
+const (
+	DefaultToolTimeoutMs = 5000
+	MinToolTimeoutMs     = 500
+	MaxToolTimeoutMs     = 10000
+)
+
+// Timeout is how long the call may take.
+func (h *HTTPCall) Timeout() time.Duration {
+	if h.TimeoutMs == nil {
+		return DefaultToolTimeoutMs * time.Millisecond
+	}
+	return time.Duration(*h.TimeoutMs) * time.Millisecond
 }
 
 // ToolKind is what a flow-declared tool does when the model calls it.

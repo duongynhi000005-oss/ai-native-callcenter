@@ -22,7 +22,9 @@ type BackendSource func() (*flow.Backend, func())
 func MockBackends() BackendSource {
 	return func() (*flow.Backend, func()) {
 		server := httptest.NewServer(mockbackend.New(nil))
-		return flow.NewBackend(server.URL), server.Close
+		// Pinned: a tool with a baseUrl of its own still calls the mock, so a
+		// scenario never reaches a real service.
+		return flow.NewBackend(server.URL, flow.WithPinnedBase()), server.Close
 	}
 }
 

@@ -44,7 +44,7 @@ const userDataPrefix = "userData."
 
 // UserDataNames lists the business-data names the flow reads: every
 // userData.<name> its instructions, announces, transition conditions and HTTP
-// bodies refer to. A flow does not declare its inputs anywhere else, so this
+// bodies, paths and query parameters refer to. A flow does not declare its inputs anywhere else, so this
 // is the vocabulary a campaign contact's slots may use. The result is sorted
 // and free of duplicates.
 func UserDataNames(spec *Spec) []string {
@@ -111,6 +111,10 @@ func UserDataNames(spec *Spec) []string {
 	for _, tool := range spec.Tools {
 		if tool.HTTP != nil {
 			walkBody(tool.HTTP.Body)
+			walkBody(tool.HTTP.Path)
+			for _, value := range tool.HTTP.Query {
+				walkBody(value)
+			}
 		}
 	}
 	names := make([]string, 0, len(found))

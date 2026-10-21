@@ -133,6 +133,7 @@ func run() error {
 		return fmt.Errorf("AICC_PROVIDER: %w", err)
 	}
 	st.FlowPublishRules = flowPublishRules(cfg, profile)
+	st.FlowDraftChecks = flowDraftChecks(cfg)
 
 	switch cfg.Seed {
 	case "demo":
@@ -446,6 +447,10 @@ func run() error {
 			"transcribesCaller", profile.TranscribeModel)
 		reportMissingProviderKey(slog.Default(), profile, os.Getenv)
 
+		backend, err := toolBackend(cfg)
+		if err != nil {
+			return err
+		}
 		orchestrator, err := aicall.NewOrchestrator(botConfig(
 			botUAS(cfg, botSlots),
 			catalogSvc,
@@ -453,7 +458,7 @@ func run() error {
 			adapter,
 			st.Ledger(),
 			transcripts,
-			cfg.BotBackendBase,
+			backend,
 			profile,
 			announceCallback(ctx, hub),
 			announceBotSession(ctx, hub),

@@ -148,8 +148,10 @@ type OrchestratorConfig struct {
 	// because the model session is opened after that and can fail. Nil means
 	// nobody is watching.
 	AnnounceBotSession func(callID, flowID uuid.UUID)
-	// BackendBase is the base URL for flows' declarative HTTP tools.
-	BackendBase string
+	// Backend runs flows' declarative HTTP tools: the deployment's base URL,
+	// its outbound host policy and its connection pool, shared by every call.
+	// Nil leaves those tools without a backend, so each call of one fails.
+	Backend *flow.Backend
 	// IsGreetingGated and GreetingMediaWait hold each call's greeting until
 	// the caller's inbound media has started; see Config. False is the
 	// original behaviour, greeting the moment the model session is ready.
@@ -392,7 +394,11 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	if facts.isPlacedByAgent() && callerChannel != "" {
 		actions.stampBotShare(facts)
 	}
-	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(o.cfg.BackendBase),
+	backend := o.cfg.Backend
+	if backend == nil {
+		backend = flow.NewBackend("")
+	}
+	runtime := flow.NewRuntime(engine, actions, backend,
 		o.queueNames(ctx, did.FallbackQueueID), log)
 	if actions.isCampaign() {
 		runtime.Deny(campaignDeniedTools...)

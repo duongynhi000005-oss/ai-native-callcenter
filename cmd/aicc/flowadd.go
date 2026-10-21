@@ -65,6 +65,7 @@ func runFlowAdd(args []string) error {
 		return fmt.Errorf("AICC_PROVIDER: %w", err)
 	}
 	st.FlowPublishRules = flowPublishRules(cfg, profile)
+	st.FlowDraftChecks = flowDraftChecks(cfg)
 
 	flows := st.Flows()
 	resolvedSlug := orFirst(*slug, specID(data))

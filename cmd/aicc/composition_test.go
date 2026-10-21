@@ -22,6 +22,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
+	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/httpapi"
 	"github.com/rasonyang/ai-native-callcenter/internal/outbound"
 	"github.com/rasonyang/ai-native-callcenter/internal/postcall"
@@ -571,7 +572,7 @@ func TestEveryBotDependencyIsPlumbed(t *testing.T) {
 		&telephony.Adapter{},
 		&store.LedgerStore{},
 		&transcript.Registry{},
-		"http://127.0.0.1:8080",
+		flow.NewBackend("http://127.0.0.1:8080"),
 		provider.Profile{Name: "openai"},
 		func(store.Callback) {},
 		func(uuid.UUID, uuid.UUID) {},
@@ -644,7 +645,7 @@ func TestBotConfigCarriesTheGreetingMediaWait(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, "", provider.Profile{},
+			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, nil, provider.Profile{},
 				nil, nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
 			if got.IsGreetingGated != tc.wantGated || got.GreetingMediaWait != tc.wantWait {
 				t.Errorf("orchestrator gate = %v, %s, want %v, %s",
@@ -677,7 +678,7 @@ func TestBotConfigCarriesTheNoInputTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, "", provider.Profile{},
+			got := botConfig(botUAS(cfg, nil), nil, nil, nil, nil, nil, nil, provider.Profile{},
 				nil, nil, nil, nil, nil, cfg.IsBotGreetingGated, cfg.BotGreetingMediaWait, cfg.BotNoInputTimeout)
 			if got.NoInput != tc.want {
 				t.Errorf("orchestrator NoInput = %s, want %s", got.NoInput, tc.want)

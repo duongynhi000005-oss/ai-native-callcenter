@@ -154,6 +154,9 @@ func (s *Spec) validate() error {
 	for name, tool := range s.Tools {
 		if tool.HTTP != nil {
 			checkBody(declared, "tool "+name, tool.HTTP.Body, report)
+			if tool.Kind != ToolKindSlot {
+				validateHTTPCall(declared, name, tool, report)
+			}
 		}
 	}
 	s.validateCollects(declared, report)
