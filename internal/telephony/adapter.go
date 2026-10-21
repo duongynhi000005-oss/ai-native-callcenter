@@ -321,6 +321,10 @@ func (a *Adapter) BridgeToEndpoint(channelID string, newPartyID uuid.UUID, endpo
 
 // Originate creates a new outbound leg parked and waiting, so call control
 // stays with us rather than with the dialplan.
+//
+// An error wrapping esl.ErrTimeout means the switch read the command and did
+// not confirm it in time: the leg may still be created, under partyID, when a
+// stalled switch catches up.
 func (a *Adapter) Originate(partyID uuid.UUID, endpoint string, vars map[string]string) (string, error) {
 	all := map[string]string{
 		"origination_uuid":   partyID.String(),
