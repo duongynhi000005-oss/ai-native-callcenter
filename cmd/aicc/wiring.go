@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/auth"
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/config"
+	"github.com/rasonyang/ai-native-callcenter/internal/egress"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/httpapi"
@@ -457,11 +460,45 @@ func voiceProfile(cfg config.Config) (provider.Profile, error) {
 // With the AI leg off there is no demand to make: nothing here answers a call,
 // and refusing a flow over the shortcomings of a provider this process will
 // never open a session with would be a rule inventing its own reason.
+//
+// With it on, a flow whose HTTP tools reference a secret this process does not
+// have is refused: the tool would fail on every call (issue #286).
 func flowPublishRules(cfg config.Config, profile provider.Profile) []flow.Rule {
-	if !cfg.IsBotEnabled || !profile.RequiresTerminalAnnounce {
+	if !cfg.IsBotEnabled {
 		return nil
 	}
-	return []flow.Rule{flow.RequireTerminalAnnounce}
+	rules := flowDraftChecks(cfg)
+	if profile.RequiresTerminalAnnounce {
+		rules = append(rules, flow.RequireTerminalAnnounce)
+	}
+	return rules
+}
+
+// flowDraftChecks are the publish rules a saved draft is warned about rather
+// than refused for: a secret the operator may set after the draft is written.
+func flowDraftChecks(cfg config.Config) []flow.Rule {
+	if !cfg.IsBotEnabled {
+		return nil
+	}
+	return []flow.Rule{flow.RequireToolSecrets(os.LookupEnv)}
+}
+
+// toolBackend is the one Backend every bot call's HTTP tools go through: the
+// deployment's base URL, AICC_TOOL_ALLOWED_HOSTS as the outbound host policy,
+// and secrets from the environment.
+func toolBackend(cfg config.Config) (*flow.Backend, error) {
+	allowed, err := egress.ParseAllowList(cfg.ToolAllowedHosts)
+	if err != nil {
+		return nil, fmt.Errorf("AICC_TOOL_ALLOWED_HOSTS: %w", err)
+	}
+	listed := make([]string, 0, len(allowed))
+	for _, entry := range allowed {
+		listed = append(listed, entry.String())
+	}
+	slog.Info("http tool outbound host policy",
+		"allowedHosts", listed,
+		"note", "private and loopback addresses and the AICC_BOT_BACKEND_BASE host need no entry; link-local and unspecified addresses are always refused")
+	return flow.NewBackend(cfg.BotBackendBase, flow.WithAllowedHosts(allowed)), nil
 }
 
 // botUAS is the AI leg's SIP listener, which starts from the deployment's
@@ -551,7 +588,7 @@ func botConfig(
 	sw aicall.Switch,
 	ledger aicall.Ledger,
 	transcripts *transcript.Registry,
-	backendBase string,
+	backend *flow.Backend,
 	profile provider.Profile,
 	announce func(store.Callback),
 	announceBot func(callID, flowID uuid.UUID),
@@ -570,7 +607,7 @@ func botConfig(
 		Switch:             sw,
 		Ledger:             ledger,
 		Transcripts:        transcripts,
-		BackendBase:        backendBase,
+		Backend:            backend,
 		Profile:            profile,
 		AnnounceCallback:   announce,
 		AnnounceBotSession: announceBot,

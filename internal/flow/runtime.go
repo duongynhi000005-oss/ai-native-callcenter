@@ -372,7 +372,7 @@ func (r *Runtime) run(ctx context.Context, name string, args map[string]any) (Re
 	if r.backend == nil {
 		return Result{}, fmt.Errorf("no backend is configured for %s", name)
 	}
-	return r.backend.Call(ctx, tool, args, r.engine.Slots())
+	return r.backend.Call(ctx, r.log, tool, args, r.engine.Slots())
 }
 
 // recordLead runs record_lead. It is bookkeeping about the call, not a step of

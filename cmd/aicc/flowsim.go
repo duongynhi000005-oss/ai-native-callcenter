@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rasonyang/ai-native-callcenter/internal/egress"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/flowsim"
 )
@@ -87,7 +88,13 @@ func runFlowSim(args []string) error {
 
 	var backend flowsim.BackendSource
 	if *backendURL != "" {
-		backend = flowsim.SharedBackend(flow.NewBackend(*backendURL))
+		// A real backend is reached under the same outbound host policy as a
+		// call, and its tools' secrets come from the environment as on a call.
+		allowed, err := egress.ParseAllowList(os.Getenv("AICC_TOOL_ALLOWED_HOSTS"))
+		if err != nil {
+			return fmt.Errorf("AICC_TOOL_ALLOWED_HOSTS: %w", err)
+		}
+		backend = flowsim.SharedBackend(flow.NewBackend(*backendURL, flow.WithAllowedHosts(allowed)))
 		if (*tier == 2 && *runs > 1) || (*tier == 1 && len(scenarios) > 1) {
 			fmt.Fprintf(os.Stderr, "warning: %s is an external backend the simulator cannot reset; "+
 				"state one run writes (a booking, a record) is visible to the next\n", *backendURL)

@@ -287,6 +287,21 @@ func TestValidate(t *testing.T) {
 				BotAllowedPeers: "10.130.0.0/24, 192.168.31.300"},
 			wantErr: "AICC_BOT_ALLOWED_PEERS",
 		},
+		{
+			// A bare "*" would open the whole public internet to every flow
+			// author, which is the opposite of an allowlist.
+			name: "tool allowed hosts with a bare wildcard",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999",
+				ToolAllowedHosts: "kb.example.com, *"},
+			wantErr: "AICC_TOOL_ALLOWED_HOSTS",
+		},
+		{
+			name: "tool allowed hosts",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999",
+				ToolAllowedHosts: "kb.example.com, *.example.org:8443, 203.0.113.9"},
+		},
 		// The switch expands the seed password into an XML attribute. These
 		// would break its directory or be cut short on the way there.
 		{

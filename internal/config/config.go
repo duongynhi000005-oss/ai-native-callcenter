@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/dayrange"
+	"github.com/rasonyang/ai-native-callcenter/internal/egress"
 	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
@@ -123,6 +124,11 @@ type Config struct {
 	botNoInputErr     error // a malformed value, refused by validate
 	// BotBackendBase is the base URL flows' declarative HTTP tools call.
 	BotBackendBase string
+	// ToolAllowedHosts is AICC_TOOL_ALLOWED_HOSTS: the public hosts a flow's
+	// HTTP tools may reach, comma-separated "host", "host:port" or "*.domain"
+	// entries (egress.ParseAllowList). Private and loopback addresses need no
+	// entry; link-local and unspecified ones are refused even when listed.
+	ToolAllowedHosts string
 	// OutboundEndpoint renders a destination number into a dial string for
 	// the AI outbound leg, %s standing for the number: sofia/gateway/<gw>/%s.
 	//
@@ -414,6 +420,7 @@ func Load() (Config, error) {
 		BotNoInputTimeout:       noInput,
 		botNoInputErr:           noInputErr,
 		BotBackendBase:          env("AICC_BOT_BACKEND_BASE", ""),
+		ToolAllowedHosts:        env("AICC_TOOL_ALLOWED_HOSTS", ""),
 		IsBotEnabled:            envBool("AICC_BOT_ENABLED", true),
 
 		IsTranscriptionEnabled:  envBool("AICC_TRANSCRIPTION_ENABLED", false),
@@ -520,6 +527,9 @@ func (c Config) validate() error {
 		case u.Host == "":
 			errs = append(errs, fmt.Errorf("AICC_SIP_WSS_URL must name a host, got %q", c.SIPWSSURL))
 		}
+	}
+	if _, err := egress.ParseAllowList(c.ToolAllowedHosts); err != nil {
+		errs = append(errs, fmt.Errorf("AICC_TOOL_ALLOWED_HOSTS: %w", err))
 	}
 	if c.IsPostCallTranscribeEnabled {
 		if !strings.HasPrefix(c.PostCallTranscribeEndpoint, "https://") {

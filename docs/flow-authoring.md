@@ -57,7 +57,7 @@ The loader (`flow.Load`, `internal/flow/load.go`) rejects a flow that cannot run
 | `maxDurationSec` | The call's wall clock (5.4). Absent means 900, `0` is off, otherwise 60 to 3600. |
 | `alwaysAllowedTools` | Tools allowed in every phase, so a request for a person is never blocked by the phase. |
 | `transitions` | Rules that apply in every non-terminal phase, after the phase's own. |
-| `apiBaseEnv` | Parsed but has no effect. The backend address comes only from `AICC_BOT_BACKEND_BASE` (`docs/dev-stack.md`). |
+| `apiBaseEnv` | Parsed but has no effect. The backend address is `AICC_BOT_BACKEND_BASE` (`docs/dev-stack.md`), or a tool's own `http.baseUrl` (2.4.1). |
 
 ### 2.3 A phase
 
@@ -81,9 +81,13 @@ A declarative tool is by default an HTTP call to your backend (a second kind, th
 | --- | --- |
 | `description` | Required. The model reads this to decide when to call the tool. |
 | `parameters` | JSON Schema of the arguments. |
-| `http.path` | Required. Appended to `AICC_BOT_BACKEND_BASE`. |
+| `http.baseUrl` | Optional. This tool's backend, overriding `AICC_BOT_BACKEND_BASE`: an absolute `http://` or `https://` URL, which may have a path but no user, query or fragment. See 2.4.1. |
+| `http.path` | Required. Starts with a literal `/` and is appended to the base URL's path. May reference `{args.x}` (an argument the schema `required`s) and `{slots.y}`; each value is escaped into one path segment (2.4.1). A literal `?query` written in the path is sent as written (prefer `http.query`; a parameter in both is a load error, and a literal query that references a value is read as query templates); a `#fragment` is dropped. |
 | `http.method` | Defaults to `POST`. |
-| `http.body` | A template. String values may reference `{args.x}` (the model's arguments) and `{slots.y}` (the call's slots). A value that is exactly one reference keeps its type; a reference inside text becomes text. |
+| `http.query` | Optional. Map of query parameter to a template (`{args.x}`, `{slots.y}`, text). Each value is encoded as one form value. A parameter that references an argument the model did not pass is left out. |
+| `http.headers` | Optional. Map of header name to a literal, or to text with `{secrets.NAME}` references (`"Bearer {secrets.KB_KEY}"`). A credential header must use a secret. See 2.4.1. |
+| `http.timeoutMs` | Optional. 500 to 10000; absent means 5000. |
+| `http.body` | A template. String values may reference `{args.x}` (the model's arguments) and `{slots.y}` (the call's slots). A value that is exactly one reference keeps its type; a reference inside text becomes text. Absent sends `{}` as JSON for `POST`, `PUT` and `PATCH`, and no body for `GET`, `DELETE`, `HEAD` and other methods. |
 | `http.successWhen` | `{ "path": "retCode", "equals": "000000" }`. Absent means any 2xx counts. |
 | `http.errorFrom` | Dotted path to the backend's own error message when `successWhen` fails. |
 | `http.result` | Map of slot name to dotted path in the response. **Only these fields are exposed.** |
@@ -91,10 +95,61 @@ A declarative tool is by default an HTTP call to your backend (a second kind, th
 
 Runtime behaviour worth designing around (`internal/flow/httptool.go`):
 
-- A call is bounded at **5 seconds**. A timeout, a connection failure, a status of 400 or above, or a body that is not a JSON object is a tool failure: the model is told the operation could not be completed and, per the built-in hint, to offer a person if it fails again.
+- A call is bounded by `http.timeoutMs`, **5 seconds** unless the tool says otherwise and never more than 10. A timeout, a connection failure, a connection the host policy refuses (2.4.1), a redirect (3xx, never followed), a status of 400 or above, or a body that is not a JSON object is a tool failure: the model is told the operation could not be completed and, per the built-in hint, to offer a person if it fails again.
+- A path value that cannot be a path segment (empty, `.`, `..`) or any path or query value that is an object or a list is refused before a request is made, as `ok: "0"` naming the reference (`{args.id}`) and not the value, with no recovery hint: the model can call again with a proper value.
 - A `successWhen` that does not hold is a **refusal**, not a failure: the result is `ok: "0"` with the `errorFrom` message. No `result` field is mapped on a refusal.
 - Only the fields in `http.result` ever reach the model or the slots. A whole backend response is never handed over.
 - A tool is offered to the model only if some phase's allowlist, or `alwaysAllowedTools`, names it. A tool called outside its phase is answered with `ok: "0"` and the current phase's instruction, not an error.
+
+#### 2.4.1 Another backend, credentials, templates in the URL, and the host policy
+
+A tool that needs its own service, a key, or more time says so in its `http` block:
+
+```json
+"kb_search": {
+  "description": { "en": "Search the knowledge base.", "zh": "检索知识库。" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "collection": { "type": "string" },
+      "query": { "type": "string" },
+      "top": { "type": "integer" }
+    },
+    "required": ["collection", "query"]
+  },
+  "http": {
+    "baseUrl": "http://kb.internal:8000/v1",
+    "path": "/collections/{args.collection}/search",
+    "method": "GET",
+    "query": { "q": "{args.query}", "top": "{args.top}", "lang": "{slots.lang}" },
+    "headers": { "Authorization": "Bearer {secrets.KB_KEY}" },
+    "timeoutMs": 8000,
+    "result": { "answer": "answer", "found": "found" }
+  }
+}
+```
+
+**Templates in the URL.** Every value substituted into `path` goes through URL path escaping, so `/`, `?`, `#` and `%` stay inside its one segment: the model passing `a/b` sends `/collections/a%2Fb/search`, and `@evil.com/x` cannot change the host, because the URL is assembled from its parts with the host taken only from the base. A `query` value is encoded as a form value (`&`, `=`, `+`, spaces and Chinese characters arrive intact). A path reference must be an argument the schema lists in `required`, or a slot, because a path segment cannot be left out; an optional argument belongs in `query`, where its parameter is dropped when the model does not pass it (`top` above). The log records the path template and the query parameter names, the base and the timeout, never the rendered values: a phone number or an order id in a URL reaches the backend's access log and no other.
+
+**Secrets.** A flow never holds a credential: every `config:read` holder can read it, and its revisions are kept. A header value references one as `{secrets.NAME}`, alone or inside text, and it resolves from the environment variable `AICC_TOOL_SECRET_<NAME>` (`NAME` is capital letters, digits and underscores) when the call is made. Rules, checked at load:
+
+- `Authorization`, `Cookie`, and any header whose name contains `auth`, `token`, `key`, `secret` or `password` (case-insensitive) must reference a secret; a literal there does not load.
+- `{secrets.NAME}` may appear only in a header value: not in `baseUrl`, `path`, `query`, `body` or a `collect` value. A backend that wants its key elsewhere, or a signed request, is not supported.
+- A header may not reference `{args.x}` or `{slots.y}`, and `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and the other headers the HTTP client sets itself cannot be given.
+- A reference to a variable that is not set on this deployment is refused at **publish** (the problem names the tool, the header and the variable) and only logged as a warning when a **draft** is saved, since the operator may set it after the draft is written.
+
+The value never appears in the stored flow, an API response (`GET /flows/{flowId}` shows the reference), a log line, an error or what the model is told about the call; an error names the header and the variable. Secrets live only in the environment, so rotating one takes a restart. A variable unset at call time fails the tool.
+
+**Who can use a secret.** Keeping the value out of the flow does not limit who can use it. A secret is not tied to a host: anyone who can write flows (`config:write`) can give a tool any configured secret in a header, point it at any host the deployment's host policy lets tools reach (the whole LAN, by default), and map whatever that backend echoes back into what the bot says or the slots record. So `config:write` amounts to the use of every tool secret on the deployment. Grant it only to people you would trust with those secrets, and give each secret the least privilege at its backend: a read-only key scoped to the one service the tool calls, never an administrator credential.
+
+**The host policy.** Which hosts a tool may reach is the deployment's decision, not the flow author's. It is decided on the address the host resolves to, as the connection is made:
+
+- Private and loopback addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `::1`, `fc00::/7`) need no configuration.
+- A public address is reached only when the tool's host is listed in `AICC_TOOL_ALLOWED_HOSTS` (`host`, `host:port`, `*.domain` for subdomains, or an IP address). The host of `AICC_BOT_BACKEND_BASE` is always allowed.
+- Link-local addresses (`169.254.0.0/16`, `fe80::/10`, the cloud metadata address `169.254.169.254` among them), AWS's IPv6 metadata range `fd00:ec2::/32` (instance metadata and EKS Pod Identity, refused before the private check), unspecified ones (`0.0.0.0`, `::`) and multicast are refused even when listed. An IPv4-mapped or NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) IPv6 address is judged by its IPv4 part, and a host written as an IP in a non-standard form (`2130706433`, `0x7f.1`) is refused.
+- Redirects are never followed; a 3xx is a tool failure.
+
+A refusal is a tool failure, decided before any connection is opened, and the log line `http tool connection refused by the outbound host policy` names the host, the resolved address and the rule (`PUBLIC_NOT_LISTED`, `LINK_LOCAL`, `CLOUD_METADATA`, `UNSPECIFIED`, `MULTICAST`, `NON_CANONICAL_ADDRESS`). The simulator (8) always calls its mock backend, whatever a tool's `baseUrl` says, and sends a placeholder for every secret; with `-backend URL` it applies `AICC_TOOL_ALLOWED_HOSTS` and reads secrets from its environment, like a call.
 
 ### 2.5 Transitions and conditions
 
@@ -225,7 +280,7 @@ Other slots you can read back:
 - **`<tool>.args.<k>`** exists for every tool, built-in ones included. It is readable in a template or condition **only for arguments the tool declares** in its `parameters.properties` (a slot tool declares `value`). Referencing anything else is a load error.
 - **`userData.<k>`** is accepted for any `k`, because the keys come from whoever placed the call.
 
-**Declared-slot rule, checked at load.** `{slots.x}` in an `instruction`, an `announce` or an `http.body`, and the `slot` of a transition condition, must name something the flow can write, or the flow does not load (a typo would otherwise be heard on a call as an empty gap). The accepted names are: `caller`, `entry`, `did`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `noInput.count`; `userData.<k>`; a slot tool's `slot`; a `collect` list's `slot` and `<slot>.count`; `<node>.visits` for a phase of the flow; `<tool>.calls` and `<tool>.ok`; `<tool>.<field>` where `field` is a key of that HTTP tool's `http.result`; `<tool>.args.<k>` where `k` is a declared parameter; and `result.<field>` for a field some tool maps (`ok` included). `persona` and `rules` are not rendered, so they are not checked.
+**Declared-slot rule, checked at load.** `{slots.x}` in an `instruction`, an `announce`, an `http.body`, an `http.path` or an `http.query` value, and the `slot` of a transition condition, must name something the flow can write, or the flow does not load (a typo would otherwise be heard on a call as an empty gap). The accepted names are: `caller`, `entry`, `did`, `lang`, `node`, `turns`, `turnsWithoutTool`, `lastTool`, `noInput.count`; `userData.<k>`; a slot tool's `slot`; a `collect` list's `slot` and `<slot>.count`; `<node>.visits` for a phase of the flow; `<tool>.calls` and `<tool>.ok`; `<tool>.<field>` where `field` is a key of that HTTP tool's `http.result`; `<tool>.args.<k>` where `k` is a declared parameter; and `result.<field>` for a field some tool maps (`ok` included). `persona` and `rules` are not rendered, so they are not checked.
 
 **Providers.** A slot is engine state, so it is exact in templates and HTTP bodies on every engine. Every engine (OpenAI, Qwen, the gateway and Doubao) re-pins at once: a changed instruction applies from the next reply, measured live on each. Even so, the model's own memory of an earlier turn is not a record, so keep the "never ask a recorded question again" rule cheap to obey, and carry a fact that must not be lost in an HTTP body rather than only in the prompt.
 
@@ -263,7 +318,7 @@ Guidance:
 
 Policies, tariffs and FAQs do not belong in `persona`, `rules` or an `instruction`. A long standing prompt costs instruction-following and is resent whenever the instructions are re-pinned, which is every phase change.
 
-Give the flow a search tool backed by a retrieval service that lives **outside this repository** (the same boundary as the speech gateway: the extension point is a service behind the flow's backend URL, never code in this tree). Keep the persona and the instructions short, and let a phase's instruction say **when** to search:
+Give the flow a search tool backed by a retrieval service that lives **outside this repository** (the same boundary as the speech gateway: the extension point is a service behind the flow's backend URL, never code in this tree). A retrieval service of its own, with its own key and a longer search, is a tool with `baseUrl`, a secret `Authorization` header and `timeoutMs` (2.4.1). Keep the persona and the instructions short, and let a phase's instruction say **when** to search:
 
 ```json
 {
@@ -302,7 +357,7 @@ Guidance:
 
 ### 4.3 Long operations
 
-An HTTP tool has a fixed 5 second timeout and a caller is waiting on the line. Never write a tool that blocks on a slow job. Two shapes work with what exists:
+An HTTP tool is bounded by its `timeoutMs` (5 seconds by default, 10 at most) and a caller is waiting on the line. Never write a tool that blocks on a slow job. Two shapes work with what exists:
 
 1. **Submit and check.** One tool starts the work and returns at once with a ticket; a second tool reports its status. The phase instruction says to submit, read out the ticket, and check status when the caller asks. The instruction should say what to tell the caller when the state is still pending. Both calls are ordinary tools, so a pending state is just a field the model reads.
 
@@ -426,7 +481,7 @@ Say these to the business rather than working around them in the prompt.
 | **Knowledge retrieval as a platform feature.** | Not provided. A knowledge tool is an ordinary HTTP tool (4.2) against a service you run. A neutral contract and store templates are planned in issue [#92](https://github.com/rasonyang/ai-native-callcenter/issues/92). |
 | **Testing a flow with a model in the loop.** | `aicc flowsim` replays scripted scenarios deterministically (8). Tier 2 (a text model as the bot and another as the caller) is opt-in and spends money (8). |
 | **Expressions, derived slots, arithmetic.** | By design the DSL has none; use a decision field (4.1). |
-| **Asynchronous tools.** | A tool call is synchronous with a 5 second bound; there is no way to be notified when a background job finishes. Use submit and check, or a callback (4.3). |
+| **Asynchronous tools.** | A tool call is synchronous, bounded by its `timeoutMs` (10 seconds at most); there is no way to be notified when a background job finishes. Use submit and check, or a callback (4.3). |
 | **Transitions on what the caller said.** | The only events are `TOOL_RESULT` and `NO_INPUT`. To branch on the caller's intent, have the model call a tool whose result carries the branch. |
 
 ## 7. A worked example
@@ -603,7 +658,7 @@ A ticket's first `plan_status` is `PROCESSING` with an `eta`; every later one is
 - Does each phase allow only the tools it needs, and does each tool's `description` say when to call it?
 - Does the instruction ever ask the model to recall "all the X so far" from the conversation? Use a `collect` list (2.6.1) so the engine holds them.
 - Does every decision value the backend can return have a transition, and is there a fallback with a higher `priority` number?
-- Does an operation that can exceed 5 seconds, or that a bot should not complete alone, have a submit-and-check, callback or hand-over path?
+- Does an operation that can exceed its tool's `timeoutMs`, or that a bot should not complete alone, have a submit-and-check, callback or hand-over path?
 - Does every terminal phase have an `announce`, and does `closingTarget` name one of them?
 - Does the closing phase tell the model to hang up on a decline?
 - Is `maxTurnsWithoutTool` above the longest legitimate tool-less stretch?

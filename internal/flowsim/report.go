@@ -22,9 +22,20 @@ type BackendSource func() (*flow.Backend, func())
 func MockBackends() BackendSource {
 	return func() (*flow.Backend, func()) {
 		server := httptest.NewServer(mockbackend.New(nil))
-		return flow.NewBackend(server.URL), server.Close
+		// Pinned: a tool with a baseUrl of its own still calls the mock, so a
+		// scenario never reaches a real service, and with a placeholder for
+		// every secret, so a real credential is never read and an unset one
+		// does not fail the scenario.
+		return flow.NewBackend(server.URL, flow.WithPinnedBase(),
+			flow.WithSecrets(PlaceholderSecrets)), server.Close
 	}
 }
+
+// PlaceholderSecret is what every {secrets.NAME} resolves to against the mock.
+const PlaceholderSecret = "flowsim-placeholder-secret"
+
+// PlaceholderSecrets resolves every secret to PlaceholderSecret.
+func PlaceholderSecrets(string) (string, bool) { return PlaceholderSecret, true }
 
 // SharedBackend hands every run the same backend, for one the simulator cannot
 // reset (an external -backend URL). State it keeps carries from run to run.

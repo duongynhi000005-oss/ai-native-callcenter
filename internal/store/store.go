@@ -66,6 +66,11 @@ type Store struct {
 	// way to know that, so whoever wires it up hands them in. Every path that
 	// publishes goes through FlowStore, which is what makes one place enough.
 	FlowPublishRules []flow.Rule
+	// FlowDraftChecks are publish rules a saved draft is only warned about:
+	// the problem is real, but it may be fixed outside the flow before anyone
+	// publishes it (a tool secret the operator has yet to set). A failure is
+	// logged and the draft is stored.
+	FlowDraftChecks []flow.Rule
 }
 
 // Open creates the pool, verifies connectivity and takes the single-instance

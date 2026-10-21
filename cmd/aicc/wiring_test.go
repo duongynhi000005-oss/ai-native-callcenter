@@ -91,10 +91,11 @@ func TestAPlacedCallsLineIsReleasedOnFinishAndOnRetire(t *testing.T) {
 
 // What a deployment demands of a flow follows from what answers its calls.
 //
-// The three engines reached over the Realtime protocol can all be prompted into
-// a turn, so none of them demands anything. Doubao cannot be,
+// Every deployment that answers calls demands that a flow's tool secrets are
+// set (one rule). The three engines reached over the Realtime protocol can all
+// be prompted into a turn, so they demand nothing more. Doubao cannot be,
 // so every ending a call can stop at has to carry its own words — and a
-// deployment with the AI leg switched off demands nothing either, whatever
+// deployment with the AI leg switched off demands nothing at all, whatever
 // provider its configuration names: there is no session to have shortcomings.
 func TestWhatAPublishMustSatisfyFollowsFromWhatAnswersTheCalls(t *testing.T) {
 	t.Parallel()
@@ -106,8 +107,8 @@ func TestWhatAPublishMustSatisfyFollowsFromWhatAnswersTheCalls(t *testing.T) {
 		profile      provider.Profile
 		wantRules    int
 	}{
-		{"a provider that can be cued asks for nothing", true, provider.OpenAIProfile(), 0},
-		{"a provider that cannot needs every ending written", true, speaksOnDemand, 1},
+		{"a provider that can be cued asks only for the secrets", true, provider.OpenAIProfile(), 1},
+		{"a provider that cannot needs every ending written", true, speaksOnDemand, 2},
 		{"with no AI leg there is nothing to satisfy", false, speaksOnDemand, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

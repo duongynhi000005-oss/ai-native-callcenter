@@ -91,8 +91,17 @@ export interface FlowTool {
     required?: string[]
   }
   http?: {
+    /** Overrides AICC_BOT_BACKEND_BASE for this tool: an absolute http(s) URL. */
+    baseUrl?: string
+    /** Starts with "/"; may reference {args.x} (required) and {slots.y}. */
     path?: string
     method?: string
+    /** Parameter name to template value ({args.x}, {slots.y}). */
+    query?: Record<string, string>
+    /** Header name to a literal or a value with {secrets.NAME} references. */
+    headers?: Record<string, string>
+    /** 500 to 10000; absent means 5000. */
+    timeoutMs?: number
     body?: Record<string, unknown>
     successWhen?: { path?: string; equals?: string }
     errorFrom?: string
