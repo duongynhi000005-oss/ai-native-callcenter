@@ -96,7 +96,7 @@ export function identityFixture(overrides: Partial<Identity> = {}): Identity {
     username: 'alice',
     displayName: 'Alice Chen',
     role: 'AGENT',
-    locale: null,
+    locale: 'en',
     ...overrides,
   }
 }

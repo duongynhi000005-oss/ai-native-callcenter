@@ -2401,8 +2401,8 @@ type FlowSpec map[string]interface{}
 type Identity struct {
 	DisplayName string `json:"displayName"`
 
-	// Locale Preferred UI locale (lowercase BCP 47 subtag) or null when the user has not chosen one.
-	Locale *string `json:"locale"`
+	// Locale The user's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. The same value `User.locale` reads.
+	Locale string `json:"locale"`
 
 	// Role Ranked roles; a higher role passes every lower gate (ADMIN > SUPERVISOR > AGENT).
 	Role     Role               `json:"role"`

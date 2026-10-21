@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -220,6 +221,63 @@ func TestSavingEveryAccountAsReadKeepsItsLocale(t *testing.T) {
 		}
 		if want := readsAs(stored[username]); !sameLocale(me.User.Locale, &want) {
 			t.Errorf("/auth/me as %s: locale %s, want %q", username, showLocale(me.User.Locale), want)
+		}
+	}
+}
+
+// The person's own view reads the same default as the accounts list, before
+// any save has written one: /auth/login and /auth/me answer `en` for an
+// account with nothing stored, and the stored value otherwise.
+func TestSigningInReadsTheSameLocaleAsTheAccountsList(t *testing.T) {
+	f, _ := phoneFixture(t, "1000-1199")
+	admin := f.seedAdmin()
+	for _, tc := range []struct {
+		username, role string
+		stored         *string
+	}{
+		{"no.pref", "AGENT", nil},
+		{"ops-admin", "ADMIN", nil},
+		{"li.na", "AGENT", strp("zh")},
+		{"mixed.case", "SUPERVISOR", strp("zh-CN")},
+	} {
+		created := f.createUser(admin, tc.username, tc.role, tc.stored)
+		if stored := f.storedLocale(created.UserID); !sameLocale(stored, tc.stored) {
+			t.Fatalf("%s: stored %s before any save, want %s", tc.username, showLocale(stored), showLocale(tc.stored))
+		}
+		want := readsAs(tc.stored)
+
+		var signedIn struct {
+			User struct {
+				Locale *string `json:"locale"`
+			} `json:"user"`
+		}
+		body, _ := json.Marshal(map[string]string{"username": tc.username, "password": seedPassword})
+		res, err := http.Post(f.server.URL+"/api/v1/auth/login", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("login %s: %v", tc.username, err)
+		}
+		err = json.NewDecoder(res.Body).Decode(&signedIn)
+		res.Body.Close()
+		if err != nil || res.StatusCode != http.StatusOK {
+			t.Fatalf("login %s: status %d, %v", tc.username, res.StatusCode, err)
+		}
+		if !sameLocale(signedIn.User.Locale, &want) {
+			t.Errorf("/auth/login as %s: locale %s, want %q", tc.username, showLocale(signedIn.User.Locale), want)
+		}
+
+		signedIn.User.Locale = nil
+		got := f.do(call{method: http.MethodGet, path: "/auth/me", cookie: f.signIn(tc.username)})
+		if got.status != http.StatusOK {
+			t.Fatalf("me as %s: status %d", tc.username, got.status)
+		}
+		if err := json.Unmarshal(got.body, &signedIn); err != nil {
+			t.Fatalf("decode me: %v", err)
+		}
+		if !sameLocale(signedIn.User.Locale, &want) {
+			t.Errorf("/auth/me as %s: locale %s, want %q", tc.username, showLocale(signedIn.User.Locale), want)
+		}
+		if listed := f.listUsers(admin)[tc.username]; *listed.Locale != want {
+			t.Errorf("GET /users: %s locale %q, want %q", tc.username, *listed.Locale, want)
 		}
 	}
 }

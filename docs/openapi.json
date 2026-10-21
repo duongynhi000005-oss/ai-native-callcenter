@@ -7151,11 +7151,8 @@
             "$ref": "#/components/schemas/Role"
           },
           "locale": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Preferred UI locale (lowercase BCP 47 subtag) or null when the user has not chosen one."
+            "type": "string",
+            "description": "The user's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. The same value `User.locale` reads."
           }
         },
         "required": [

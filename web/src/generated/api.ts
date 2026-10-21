@@ -1837,8 +1837,8 @@ export interface components {
             username: string;
             displayName: string;
             role: components["schemas"]["Role"];
-            /** @description Preferred UI locale (lowercase BCP 47 subtag) or null when the user has not chosen one. */
-            locale: string | null;
+            /** @description The user's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. The same value `User.locale` reads. */
+            locale: string;
         };
         LoginRequest: {
             username: string;
