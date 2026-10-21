@@ -70,7 +70,19 @@ type trackedJob struct {
 	// isUnconfirmed: the originate timed out, so the Job-UUID is unknown and
 	// the placement is tracked by its leg alone (unconfirmed.go).
 	isUnconfirmed bool
-	timer         *time.Timer
+	timer         stopper
+}
+
+// stopper is a timer that can be stopped: a *time.Timer, or a test's own.
+type stopper interface{ Stop() bool }
+
+// afterFunc starts the backstop timers of placements. Tests replace it
+// (Service.afterFunc) to fire a window at a moment of their choosing.
+func (s *Service) afterFunc(d time.Duration, f func()) stopper {
+	if s.timers != nil {
+		return s.timers(d, f)
+	}
+	return time.AfterFunc(d, f)
 }
 
 type earlyResult struct {
@@ -125,7 +137,7 @@ func (s *Service) attachJob(job *trackedJob, jobID string) {
 		return
 	}
 	s.jobs[jobID] = job
-	job.timer = time.AfterFunc(s.cfg.AnswerWindow+s.margin(), func() { s.jobExpired(job) })
+	job.timer = s.afterFunc(s.cfg.AnswerWindow+s.margin(), func() { s.jobExpired(job) })
 	s.mu.Unlock()
 }
 

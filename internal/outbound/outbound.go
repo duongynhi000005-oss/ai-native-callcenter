@@ -184,6 +184,9 @@ type Service struct {
 	// (unconfirmed.go); both guarded by mu.
 	placing  map[uuid.UUID]struct{}
 	lateLegs map[string]lateLeg
+	// timers, when set, replaces time.AfterFunc for the placement windows;
+	// tests only.
+	timers func(d time.Duration, f func()) stopper
 
 	// holds are the answered AI legs that took, or are waiting for, a bot slot,
 	// by channel id; guarded by mu. A hangup cancels the wait and releases the
@@ -452,7 +455,7 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	if err := s.checkDNC(ctx, destination); err != nil {
 		return uuid.Nil, err
 	}
-	if err := s.claimCall(callID); err != nil {
+	if err := s.claimCall(ctx, callID); err != nil {
 		return callID, err
 	}
 	// Held until the placement is tracked (expectLeg), which then holds it.
@@ -804,7 +807,7 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 	if err := s.checkDNC(ctx, req.To); err != nil {
 		return Placement{}, err
 	}
-	if err := s.claimCall(callID); err != nil {
+	if err := s.claimCall(ctx, callID); err != nil {
 		return Placement{CallID: callID}, err
 	}
 	// Held until the placement is tracked (expectLeg), which then holds it.

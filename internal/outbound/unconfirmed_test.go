@@ -201,7 +201,11 @@ func TestAnUnconfirmedAICallIsAdoptedWhenItsChannelAppears(t *testing.T) {
 	if s.IsPlacing(callID) {
 		t.Error("the placement is still tracked after the switch confirmed it")
 	}
-	time.Sleep(20 * time.Millisecond)
+	// handleJob settles an OK result synchronously, and a failure path would
+	// have given the line back before returning: both are decided by now.
+	if n := s.LinesInUse("95099"); n != 1 {
+		t.Errorf("lines in use = %d: the placement was failed although its call exists", n)
+	}
 	if rows := st.ledger.get(callID); len(rows) != 0 {
 		t.Errorf("a placement-failure row was written for a call that exists: %+v", rows)
 	}
@@ -285,8 +289,9 @@ func TestAnUnconfirmedPlacementThatNeverAppearsIsRecordedAsFailed(t *testing.T) 
 		t.Errorf("hangup = %+v, want the late leg ended as %s", h, LateAnswerCause)
 	}
 	// Once only: a second sighting of the same leg is not a second decision.
+	// noteChannel decides synchronously whether to hang up, and only then
+	// starts the hangup.
 	s.HandleSwitchEvent(telephony.SwitchEvent{Kind: telephony.KindChannelCreate, ChannelID: leg})
-	time.Sleep(20 * time.Millisecond)
 	if n := len(st.sw.hangupList()); n != 1 {
 		t.Errorf("%d hangups, want 1", n)
 	}
@@ -535,4 +540,216 @@ type failingSwitch struct {
 
 func (f failingSwitch) Originate(uuid.UUID, string, map[string]string) (string, error) {
 	return "", f.err
+}
+
+// manualTimers replaces the placement windows' timers: a test fires one when it
+// chooses, on its own goroutine, instead of waiting out a real window.
+type manualTimers struct {
+	mu     sync.Mutex
+	timers []*manualTimer
+}
+
+type manualTimer struct {
+	mu        sync.Mutex
+	f         func()
+	isStopped bool
+}
+
+func (t *manualTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	was := !t.isStopped
+	t.isStopped = true
+	return was
+}
+
+func (m *manualTimers) after(_ time.Duration, f func()) stopper {
+	t := &manualTimer{f: f}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timers = append(m.timers, t)
+	return t
+}
+
+// fire runs the last timer started, as its expiry would, unless it was stopped.
+func (m *manualTimers) fire(t *testing.T) {
+	t.Helper()
+	m.mu.Lock()
+	if len(m.timers) == 0 {
+		m.mu.Unlock()
+		t.Fatal("no timer was started")
+	}
+	tm := m.timers[len(m.timers)-1]
+	m.mu.Unlock()
+	tm.mu.Lock()
+	isStopped := tm.isStopped
+	tm.isStopped = true
+	tm.mu.Unlock()
+	if !isStopped {
+		tm.f()
+	}
+}
+
+func manualService(t *testing.T) (stalled, *manualTimers) {
+	t.Helper()
+	st := stalledService(t, time.Minute, time.Minute, nil)
+	timers := &manualTimers{}
+	st.s.timers = timers.after
+	return st, timers
+}
+
+// The window passes after the channel was noted: the call is the record. The
+// claim is given back, and nothing of the failure path runs: the line stays
+// held, the answer stays armed and no row is written.
+func TestAnUnconfirmedWindowThatEndsAfterTheChannelLeavesTheCallAlone(t *testing.T) {
+	t.Parallel()
+	st, timers := manualService(t)
+	s := st.s
+	callID := uuid.Must(uuid.NewV7())
+	if _, err := s.PlaceAI(context.Background(), AIDialRequest{CallID: callID, To: "18688886660", DIDNumber: "95099"}); !errors.Is(err, ErrPlacementUnconfirmed) {
+		t.Fatalf("PlaceAI error = %v", err)
+	}
+	leg := st.sw.originateList()[0].partyID.String()
+	st.create(leg, callID)
+
+	timers.fire(t)
+	if s.IsPlacing(callID) {
+		t.Error("the claim outlived the window")
+	}
+	if n := s.LinesInUse("95099"); n != 1 {
+		t.Errorf("lines in use = %d, want the call's line still held", n)
+	}
+	if n := s.PendingCount(); n != 1 {
+		t.Errorf("pending = %d, want the answer still armed", n)
+	}
+	if rows := st.ledger.get(callID); len(rows) != 0 {
+		t.Errorf("rows = %+v, want none: the failure path ran", rows)
+	}
+	answer(s, leg)
+	waitBridges(t, st.sw.fakeSwitch, 1)
+}
+
+// The dispatch loop hands CHANNEL_CREATE to the registry before this service.
+// A window that ends in between finds the call live but the leg not yet
+// noted: it must adopt it, with a fresh answer window, and the CHANNEL_CREATE
+// that follows must not hang the leg up as late.
+func TestAnUnconfirmedWindowEndingBetweenTheRegistryAndNoteChannelAdoptsTheLeg(t *testing.T) {
+	t.Parallel()
+	st, timers := manualService(t)
+	s := st.s
+	callID := uuid.Must(uuid.NewV7())
+	if _, err := s.PlaceAI(context.Background(), AIDialRequest{CallID: callID, To: "18688886660", DIDNumber: "95099"}); !errors.Is(err, ErrPlacementUnconfirmed) {
+		t.Fatalf("PlaceAI error = %v", err)
+	}
+	leg := st.sw.originateList()[0].partyID.String()
+
+	st.clock.Advance(119 * time.Second)                                                           // the armed answer would lapse at 120 s
+	st.live.set(callID, true)                                                                     // the registry has the call ...
+	timers.fire(t)                                                                                // ... the window ends ...
+	s.HandleSwitchEvent(telephony.SwitchEvent{Kind: telephony.KindChannelCreate, ChannelID: leg}) // ... then noteChannel
+
+	if s.IsPlacing(callID) {
+		t.Error("the claim outlived the window")
+	}
+	st.clock.Advance(30 * time.Second)
+	answer(s, leg)
+	waitBridges(t, st.sw.fakeSwitch, 1)
+	if h := st.sw.hangupList(); len(h) != 0 {
+		t.Errorf("hangups = %v: a leg whose call was live was taken for a late one", h)
+	}
+	if rows := st.ledger.get(callID); len(rows) != 0 || s.LinesInUse("95099") != 1 {
+		t.Errorf("rows %+v, lines %d: the failure path ran for a live call", rows, s.LinesInUse("95099"))
+	}
+}
+
+// A leg the switch created after its placement was recorded as failed, while
+// the link was down, is found by the reconcile that follows the reconnect. It
+// is hung up as late, never armed again: the call is recorded as failed and a
+// campaign may already have scheduled the contact again.
+func TestRecoveryEndsALateLegItWouldOtherwiseRearm(t *testing.T) {
+	t.Parallel()
+	st, timers := manualService(t)
+	s := st.s
+	callID := uuid.Must(uuid.NewV7())
+	if _, err := s.PlaceAI(context.Background(), AIDialRequest{CallID: callID, To: "18688886660", DIDNumber: "95099"}); !errors.Is(err, ErrPlacementUnconfirmed) {
+		t.Fatalf("PlaceAI error = %v", err)
+	}
+	leg := st.sw.originateList()[0].partyID.String()
+	timers.fire(t) // no channel: the placement fails
+	eventually(t, "the placement-failure cdr", func() bool { return len(st.ledger.get(callID)) == 1 })
+
+	rep := s.Recover(context.Background(), []telephony.LiveChannel{{
+		ChannelID: leg, CallID: callID, PlacedBy: telephony.PlacedByDialAI,
+		PlacedTo: "18688886660", DID: "95099", Language: "en",
+		Age: 5 * time.Second, IsAgeKnown: true,
+	}}, nil, false)
+
+	if rep.Rearmed != 0 || rep.WindowSpent != 1 {
+		t.Errorf("report = %+v, want the leg counted as window spent and not re-armed", rep)
+	}
+	if n := s.PendingCount(); n != 0 {
+		t.Errorf("pending = %d: the late leg was armed again", n)
+	}
+	if h := st.sw.hangupList(); len(h) != 1 || h[0].channelID != leg || h[0].cause != LateAnswerCause {
+		t.Errorf("hangups = %+v, want the late leg ended as %s", h, LateAnswerCause)
+	}
+}
+
+// gatedDNC holds the first lookup until the test lets it go.
+type gatedDNC struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *gatedDNC) Contains(context.Context, string) (bool, error) {
+	d.mu.Lock()
+	d.calls++
+	first := d.calls == 1
+	d.mu.Unlock()
+	if first {
+		close(d.entered)
+		<-d.release
+	}
+	return false, nil
+}
+
+// Request B passes the idempotency check, then waits in the do-not-call
+// lookup. Meanwhile request A, same callId, places the call, the switch fails
+// it before any channel, its CDR is written and the claim is given back. B's
+// claim must then find the CDR and answer already placed, not dial again.
+func TestARetryThatRacesASettledPlacementDoesNotDialAgain(t *testing.T) {
+	t.Parallel()
+	s, sw, ledger := jobService(t)
+	s.hasCDR = func(_ context.Context, id uuid.UUID) (bool, error) { return len(ledger.get(id)) > 0, nil }
+	dnc := &gatedDNC{entered: make(chan struct{}), release: make(chan struct{})}
+	s.WithDNC(dnc)
+	sw.onSend = func(jobID string) { s.HandleSwitchEvent(jobEvent(jobID, "-ERR GATEWAY_DOWN\n")) }
+
+	callID := uuid.Must(uuid.NewV7())
+	req := AIDialRequest{CallID: callID, To: "+8618688886666", DIDNumber: "95012"}
+	errB := make(chan error, 1)
+	go func() {
+		_, err := s.PlaceAI(context.Background(), req)
+		errB <- err
+	}()
+	<-dnc.entered
+
+	if _, err := s.PlaceAI(context.Background(), req); err != nil {
+		t.Fatalf("A: %v", err)
+	}
+	eventually(t, "A's failure cdr", func() bool { return len(ledger.get(callID)) == 1 })
+	eventually(t, "A's claim to be given back", func() bool { return !s.IsPlacing(callID) })
+
+	close(dnc.release)
+	if err := <-errB; !errors.Is(err, ErrAlreadyPlaced) {
+		t.Errorf("B = %v, want ErrAlreadyPlaced", err)
+	}
+	sw.fakeSwitch.mu.Lock()
+	n := len(sw.fakeSwitch.originates)
+	sw.fakeSwitch.mu.Unlock()
+	if n != 1 {
+		t.Errorf("%d originates for one callId, want 1", n)
+	}
 }

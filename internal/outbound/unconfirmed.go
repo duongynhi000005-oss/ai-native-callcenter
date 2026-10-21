@@ -102,7 +102,7 @@ func (s *Service) checkPlaced(ctx context.Context, requested uuid.UUID) (uuid.UU
 // taken after the pre-send refusals (do-not-call), so those answer every
 // request alike, and before anything is held under the callId (the line, the
 // business data).
-func (s *Service) claimCall(callID uuid.UUID) error {
+func (s *Service) claimCall(ctx context.Context, callID uuid.UUID) error {
 	s.mu.Lock()
 	if _, busy := s.placing[callID]; busy {
 		s.mu.Unlock()
@@ -113,11 +113,21 @@ func (s *Service) claimCall(callID uuid.UUID) error {
 	}
 	s.placing[callID] = struct{}{}
 	s.mu.Unlock()
-	// Asked again with the claim held (and not under the lock: it asks the
-	// registry): a placement settled since checkPlaced is by now a live call,
-	// or one whose placement-failure CDR is written, since it stayed claimed
-	// until it was.
+	// Both questions asked again with the claim held (and not under the lock:
+	// they ask the registry and the ledger). Another request with this callId
+	// may have placed it and seen it settled since checkPlaced: the call is
+	// then live, or its placement-failure CDR is written, since it stayed
+	// claimed until it was.
 	if s.isLiveCall(callID) {
+		s.unclaim(callID)
+		return ErrAlreadyPlaced
+	}
+	done, err := s.hasCDR(ctx, callID)
+	if err != nil {
+		s.unclaim(callID)
+		return err
+	}
+	if done {
 		s.unclaim(callID)
 		return ErrAlreadyPlaced
 	}
@@ -158,11 +168,20 @@ func (s *Service) holdUnconfirmed(job *trackedJob, onAnswer func()) {
 	window := s.cfg.AnswerWindow + s.margin()
 	s.pending[job.legID] = &pendingLeg{onAnswer: onAnswer, expiresAt: s.now().Add(window)}
 	job.isUnconfirmed = true
-	job.timer = time.AfterFunc(window, func() { s.unconfirmedExpired(job) })
+	job.timer = s.afterFunc(window, func() { s.unconfirmedExpired(job) })
 }
 
 // unconfirmedExpired ends the wait for an unconfirmed placement. If its channel
 // appeared the call's own record covers it; otherwise it never was a call.
+//
+// The registry hears of a channel before this service does (the dispatch loop
+// hands each event to the coordinator first), so a call can be live while
+// noteChannel has yet to run for its leg. Live is therefore asked first,
+// outside the lock, and the decision is taken under it: a leg whose call is
+// live, or whose channel was noted meanwhile, is adopted, its answer window
+// counted from now if noteChannel has not counted it; only a leg with neither
+// is given up and remembered as late. A CHANNEL_CREATE dispatched after that
+// decision finds the leg given up.
 func (s *Service) unconfirmedExpired(job *trackedJob) {
 	s.mu.Lock()
 	if s.legJobs[job.legID] != job {
@@ -170,15 +189,28 @@ func (s *Service) unconfirmedExpired(job *trackedJob) {
 		return
 	}
 	hadChannel := job.hadChannel
+	s.mu.Unlock()
+	isLive := !hadChannel && s.isLiveCall(job.callID)
+
+	s.mu.Lock()
+	if s.legJobs[job.legID] != job {
+		s.mu.Unlock()
+		return // settled meanwhile: a job result
+	}
+	hadChannel = job.hadChannel
 	s.forgetJobLocked(job)
-	if !hadChannel {
-		// Before the lock is let go, so a CHANNEL_CREATE dispatched from now
-		// on finds the leg either tracked or given up, never neither.
+	isAdopted := hadChannel || isLive
+	if isAdopted && !hadChannel {
+		if leg := s.pending[job.legID]; leg != nil {
+			leg.expiresAt = s.now().Add(s.cfg.AnswerWindow)
+		}
+	}
+	if !isAdopted {
 		s.rememberLateLegLocked(job.legID, job.callID)
 	}
 	s.mu.Unlock()
 
-	if hadChannel || s.isLiveCall(job.callID) {
+	if isAdopted {
 		s.unclaim(job.callID)
 		s.log.Info("unconfirmed placement made its channel; the cdr is the record",
 			"callId", job.callID, "channelId", job.legID)
