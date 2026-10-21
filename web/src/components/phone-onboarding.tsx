@@ -54,7 +54,9 @@ export function PhoneOnboarding() {
   // the second has a card of its own (below), which blocks all the same.
   const isRequired = presence === 'ABSENT' || (isPresent && !isMicrophoneGranted)
   const open = isRequired || presence === 'LOST' || isOnboardingForced
-  // Only the open card has a step 1 to tick; a closed one need not probe.
+  // Probed once as the bridge comes up, so a card that opens on the first
+  // verdict opens with step 1 already right; after that only the open card
+  // has a step 1 to keep current.
   const isInstalled = useExtensionInstalled(open)
 
   if (!open) return null
