@@ -341,6 +341,7 @@ What a synchronous error from `DialAI` means for the attempt:
 | number on DNC (§12) | finishes `DNC_SKIPPED` |
 | bad number | finishes `INVALID_NUMBER` |
 | DID line limit reached (§6.6; possible only when a hand-dialled call took the last line) | **voided**: the row is deleted, nothing is counted, the contact is due again at once |
+| placement unconfirmed (§5.6: the `bgapi originate` reply timed out) | **pending**: the attempt stays `DIALING` and in flight; its CDR or the backstop finishes it |
 | anything else (limiter cancelled, `bgapi` send failed) | finishes `ORIGINATE_FAILED` |
 
 Because the attempt row exists before the originate is sent, every originate has a row. Because
@@ -386,6 +387,58 @@ carries the real cause instead of being inferred from a timeout.
 - **Backstop.** No job result and no CDR by `ring_timeout_sec` + 30 s means events were lost (an ESL
   disconnect, say); the attempt goes to reconciliation (§8.2).
 - The single-call `DialAI` gets the same: its pre-channel failures gain a cause too.
+
+### 5.6 An originate the switch did not confirm (#221)
+
+The ESL client gives a command 10 s for its reply. A stalled switch (seen live on 2026-10-15 and
+2026-10-19, under heavy host load) reads the `bgapi originate` and answers it a minute or two later,
+then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, distinct from
+`esl.ErrDown`, and an originate that ends with it is an **unconfirmed placement**
+(`outbound.ErrPlacementUnconfirmed`, `internal/outbound/unconfirmed.go`). Decided 2026-10-21:
+
+- **Nothing is undone.** The line, the business data and the continuation armed for the answer (the
+  bridge to the bot, or click-to-dial's transfer to the destination) stay held, and the placement
+  stays tracked under the leg id it minted, for the answer window plus the job margin
+  (`AnswerWindow + jobMargin`, 60 s + 30 s by default) counted from the timeout.
+- **The API answers `202 Accepted`** with the same body as `201`: the customer may still be called.
+  The contract says so on `createCall`. A retry with the same `callId` answers `200 isDuplicate`; a
+  new `callId` is a second call.
+- **Idempotency covers it, and concurrency.** A `callId` is claimed for one placement from just after
+  the do-not-call check until the placement's ending is settled: the job's result, the window, or
+  the placement-failure CDR having been written. Every placement in progress, confirmed or not, is
+  therefore answered as already placed, and two concurrent requests with one `callId` dial once.
+- **Reconciled from what the switch does:**
+  - its channel appears within the window: that is the call. Its answer window restarts at the
+    channel's creation, because the switch rings it from then (`originate_timeout`) and the window
+    armed at the timeout may be mostly spent; answered, it is bridged like any call, and its CDR
+    comes from its events;
+  - its job result arrives: the bgapi reply that named the Job-UUID never came, so the result is
+    matched by the `origination_uuid` in the job's `Job-Command-Arg` (`SwitchEvent.JobChannelID`).
+    A failure before any channel is a placement failure with the switch's cause (§5.5);
+  - nothing within the window: the placement-failure CDR (`tech.isPlacementFailure`), with
+    `hangupCause` `PLACEMENT_UNCONFIRMED`, a platform word. The line and the business data are
+    given back.
+- **A channel after the window** is hung up the moment it is created (`ALLOTTED_TIMEOUT`, the same
+  word as a late answer), not adopted. By then the call is recorded as failed, a campaign may have
+  scheduled the contact again, and a leg nobody will bridge must not sit in `park()` on a person.
+  The leg id is remembered for 10 minutes (at most 4,096 of them); a switch later than that is left
+  to the reconcile that follows a reconnect. The channel's own CDR then replaces the placement
+  failure, as any fuller row does. This is the one case the owner's decision did not settle; it was
+  the smallest safe choice.
+- **Campaigns.** `ClassifyDialError` maps the unconfirmed error to *pending*, not `ORIGINATE_FAILED`.
+  The flight stays, and the backstop (`flight.nextCheck`) settles it. The dialer's `IsLive` also
+  answers true for a call the outbound layer is still placing (`outbound.Service.IsPlacing`), so the
+  backstop at ring timeout + 30 s waits for the window rather than settling `UNKNOWN` an attempt
+  whose customer may be ringing; once the window has passed, the attempt is finished from the CDR
+  (`ORIGINATE_FAILED` from the placement-failure row, or the real outcome), or `UNKNOWN` if no row
+  could be written.
+
+Not covered, and follow-ups: the same treatment for the other commands whose timeout is still a
+plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an `esl.ErrDown` that
+arrives after the command was written (the link closed while waiting: also ambiguous, still
+answered `503 SWITCH_DOWN`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
+does not have: a client polls `GET /calls` or the event stream while the call is live and
+`GET /cdrs/{callId}` once it has ended.
 
 ---
 
