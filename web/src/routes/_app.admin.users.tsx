@@ -53,7 +53,16 @@ function UsersAdmin() {
       update.mutate(
         {
           userId: editing.userId,
-          body: { username, displayName, role, status: editing.status ?? 'ACTIVE' },
+          // An update replaces the whole account. The dialog has no locale
+          // field, so it sends back the one it read rather than clearing it
+          // (#289).
+          body: {
+            username,
+            displayName,
+            role,
+            status: editing.status ?? 'ACTIVE',
+            locale: editing.locale,
+          },
         },
         { onSuccess: () => setEditing(null) },
       )

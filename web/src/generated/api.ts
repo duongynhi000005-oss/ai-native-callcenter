@@ -2021,6 +2021,8 @@ export interface components {
             callcenterName?: string;
             /** @description The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created, or when a call-taking account without one was saved. Absent for an account with no phone. */
             extensionNumber?: string;
+            /** @description The account's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. Send it back in `UserUpdate`, which replaces the whole account. */
+            locale: string;
         };
         UserList: {
             items: components["schemas"]["User"][];
@@ -2047,6 +2049,7 @@ export interface components {
             displayName?: string;
             role: components["schemas"]["Role"];
             status: components["schemas"]["UserStatus"];
+            /** @description Preferred UI locale (lowercase BCP 47 subtag). Part of the whole replacement like every other field, so send back the value `User.locale` read to keep it. Absent stores no preference, which then reads as `en`. */
             locale?: string;
         };
         /** @description A password an administrator sets on somebody else's account. Every session opened with the old one is revoked, so a reset ends access rather than merely changing what would work next time. */

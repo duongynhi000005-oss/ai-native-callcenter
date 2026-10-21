@@ -34,6 +34,9 @@ export function needsPhone(user: User): boolean {
  * account without a phone is how it is given one: the server allocates it
  * from the extension pool on the same update, so assigning a phone is not an
  * operation of its own.
+ *
+ * The locale goes back too: an update replaces the whole account, so leaving
+ * it out would clear the person's stored preference (#289).
  */
 export function unchangedUpdate(user: User): UserUpdate {
   return {
@@ -41,6 +44,7 @@ export function unchangedUpdate(user: User): UserUpdate {
     displayName: user.displayName,
     role: user.role,
     status: user.status,
+    locale: user.locale,
   }
 }
 
