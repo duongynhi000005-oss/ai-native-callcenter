@@ -364,6 +364,8 @@ export interface paths {
          *
          *     Idempotent by client-minted callId either way: a retry with the same id answers isDuplicate instead of redialing.
          *
+         *     A placement the switch has not confirmed answers 202 instead of 201, with the same body. The originate reached the switch and its reply did not arrive in time, which a stalled switch does: it may still run the originate later, so the customer may still be called. The placement stays tracked under its callId for the answer window plus a margin. A channel the switch creates within it is the call, handled and recorded like any other. If the switch reports that the placement failed before any channel, a FAILED CDR with the switch's own cause is written as soon as it does; if it reports nothing and no channel appears, a FAILED CDR with hangupCause PLACEMENT_UNCONFIRMED is written when the window ends. A channel the switch creates after that is hung up, and its own record supersedes the failed one. Retrying with the same callId is safe and answers 200 with isDuplicate true. Placing it again under a new callId is a second call.
+         *
          *     Authorization differs by kind. calls:create reaches the operation; AI_OUTBOUND additionally requires calls:create:ai, which an agent does not hold. A caller missing it is refused INSUFFICIENT_SCOPE naming calls:create:ai. The machine-readable form is x-body-scopes: scopes a credential of either kind must hold, beyond the security block, when the named request-body property has the listed value. A security block cannot say this, because its alternatives choose between credentials, not between request bodies.
          *
          *     A destination on the do-not-call list is refused with 422 NUMBER_ON_DNC, for both kinds: no call is placed and no CDR is written (the CDR is the ledger of calls placed). The destination is compared as canonical E.164, completed with AICC_DEFAULT_COUNTRY_CODE when it is national; with that unset, a national number cannot be matched and is not checked, while a number written with + or 00 always is.
@@ -4364,7 +4366,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The callId was already placed; the response points at the existing call with isDuplicate true. */
+            /** @description The callId was already placed, or is still being placed (including one answered 202); the response points at the existing call with isDuplicate true. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4375,6 +4377,15 @@ export interface operations {
             };
             /** @description The call is being placed. */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateCallResponse"];
+                };
+            };
+            /** @description The switch has not confirmed the placement: the customer may still be called. Do not place the call again under a new callId. Retrying with the same callId is safe and answers 200 with isDuplicate true. If the switch creates the call it shows in listCalls and on the event stream, and its record is at GET /cdrs/{callId} once it ends; if it does not, the record is a FAILED CDR: with the switch's own cause as soon as it reports one, else with hangupCause PLACEMENT_UNCONFIRMED once the answer window plus a margin has passed. A late channel's own record supersedes it. */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

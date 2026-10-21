@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/api"
+	"github.com/rasonyang/ai-native-callcenter/internal/esl"
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/outbound"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
@@ -121,7 +123,11 @@ func (s *Server) createAICall(w http.ResponseWriter, r *http.Request, req api.Cr
 			writeDuplicate(w, callID)
 			return
 		}
-		writeOutboundError(w, err)
+		if errors.Is(err, outbound.ErrPlacementUnconfirmed) {
+			writeUnconfirmed(w, callID)
+			return
+		}
+		writeOutboundError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, api.CreateCallResponse{CallID: callID})
@@ -236,7 +242,16 @@ func (s *Server) createAgentCall(w http.ResponseWriter, r *http.Request, req api
 			writeDuplicate(w, callID)
 			return
 		}
-		writeOutboundError(w, err)
+		if errors.Is(err, outbound.ErrPlacementUnconfirmed) {
+			// The agent's phone may still ring: the call is kept, and so is
+			// the callback's note of it.
+			if kept != nil {
+				s.publishCallback(r, events.TypeCallbackUpdated, *kept)
+			}
+			writeUnconfirmed(w, callID)
+			return
+		}
+		writeOutboundError(w, r, err)
 		return
 	}
 	if kept != nil {
@@ -272,6 +287,16 @@ func (s *Server) isPhoneReachable(w http.ResponseWriter, extension string) bool 
 func writeDuplicate(w http.ResponseWriter, callID uuid.UUID) {
 	isDuplicate := true
 	writeJSON(w, http.StatusOK, api.CreateCallResponse{CallID: callID, IsDuplicate: &isDuplicate})
+}
+
+// writeUnconfirmed answers a placement the switch has not confirmed (#221):
+// the originate reached it and its reply did not come back in time, so the
+// customer may still be called. Not an error, because it may not be one, and
+// never SWITCH_DOWN, which tells a client the call failed and invites a retry
+// under a new callId: a second call to the same person. 202 with the callId
+// says what is true: accepted, not confirmed, and the id to retry or look for.
+func writeUnconfirmed(w http.ResponseWriter, callID uuid.UUID) {
+	writeJSON(w, http.StatusAccepted, api.CreateCallResponse{CallID: callID})
 }
 
 // The bounds are the call's, not this layer's: telephony.MergeUserData holds
@@ -313,7 +338,7 @@ func checkUserData(data map[string]string) error {
 	return nil
 }
 
-func writeOutboundError(w http.ResponseWriter, err error) {
+func writeOutboundError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, outbound.ErrNumberOnDNC):
 		writeError(w, http.StatusUnprocessableEntity, CodeNumberOnDNC,
@@ -344,7 +369,14 @@ func writeOutboundError(w http.ResponseWriter, err error) {
 			"the DID does not allow outbound calls; set allowOutbound on it first", nil)
 	case errors.Is(err, outbound.ErrFlowless):
 		writeError(w, http.StatusConflict, CodeConflict, "the DID has no published flow", nil)
+	case errors.Is(err, esl.ErrDown):
+		// The link to the switch is not up: the same answer every call
+		// operation gives for it.
+		writeError(w, http.StatusServiceUnavailable, CodeSwitchDown, "the switch is unreachable", nil)
 	default:
+		// Logged, because the answer cannot say which of the many ways it
+		// went wrong, and nothing else records a placement that sent nothing.
+		slog.ErrorContext(r.Context(), "call placement failed", "error", err)
 		writeError(w, http.StatusBadGateway, CodeSwitchDown, "the switch did not take the call", nil)
 	}
 }

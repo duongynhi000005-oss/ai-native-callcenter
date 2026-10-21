@@ -20,6 +20,11 @@ type fakeSwitch struct {
 	password string
 
 	conns chan *fakeConn
+
+	// stall, when set, is waited on before a bgapi command is answered: the
+	// switch reads the command and then sits on it, as a loaded FreeSWITCH
+	// does. Nothing after it on the connection is read until it is closed.
+	stall chan struct{}
 }
 
 type fakeConn struct {
@@ -84,6 +89,9 @@ func (f *fakeSwitch) serve(conn net.Conn) {
 			fmt.Fprintf(conn, "Content-Type: api/response\nContent-Length: %d\n\n%s", len(body), body)
 		case strings.HasPrefix(cmd, "bgapi "):
 			fc.cmds <- cmd
+			if f.stall != nil {
+				<-f.stall
+			}
 			fmt.Fprint(conn, "Content-Type: command/reply\nReply-Text: +OK Job-UUID: job-123\n\n")
 		}
 	}
@@ -186,6 +194,53 @@ func TestCommandsMatchRepliesInOrder(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("timed out waiting for replies")
 		}
+	}
+}
+
+// A stalled switch reads a bgapi command and answers it late. The caller is
+// told the outcome is unknown (ErrTimeout), never that the link is down, and
+// the late reply is matched to the command that gave up on it: the next
+// command still gets its own reply (#221).
+func TestATimedOutCommandIsAmbiguousAndKeepsRepliesAligned(t *testing.T) {
+	t.Parallel()
+	f := newFakeSwitch(t, "ClueCon")
+	f.stall = make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, f.addr(), "ClueCon")
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+	fc := f.waitConn(t)
+	client.timeout = 100 * time.Millisecond
+
+	_, err = client.BgAPI("originate {origination_uuid=leg-1}sofia/gateway/x/1000 &park()")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("BgAPI() error = %v, want ErrTimeout", err)
+	}
+	if errors.Is(err, ErrDown) {
+		t.Fatal("a timeout must not read as a link that is down")
+	}
+	select {
+	case cmd := <-fc.cmds:
+		if !strings.HasPrefix(cmd, "bgapi originate") {
+			t.Fatalf("the switch read %q", cmd)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the command never reached the switch")
+	}
+
+	// The switch recovers: it answers the originate, then the next command.
+	close(f.stall)
+	client.timeout = 2 * time.Second
+	body, err := client.API("uuid_exists leg-2")
+	if err != nil {
+		t.Fatalf("API() after the stall error = %v", err)
+	}
+	if body != "+OK uuid_exists leg-2" {
+		t.Errorf("API() = %q: the late bgapi reply was handed to the next command", body)
 	}
 }
 

@@ -58,6 +58,9 @@ type DialErrorKinds struct {
 	// LineLimit: the DID's outbound line limit is reached (design 10 section
 	// 6.6); the placer cannot return it before that slice exists.
 	LineLimit error
+	// Unconfirmed: the originate reached the switch and its reply did not come
+	// back in time, so the call may still be placed (#221).
+	Unconfirmed error
 }
 
 // DialVerdict is what a synchronous DialAI error does to the attempt.
@@ -65,7 +68,11 @@ type DialVerdict struct {
 	// IsVoid: the attempt is deleted, nothing is counted, the contact is due
 	// again at once.
 	IsVoid bool
-	// Outcome is how the attempt finishes; empty when IsVoid.
+	// IsPending: the outcome is not known yet. The attempt stays in flight and
+	// is finished by its CDR, or by the ring-timeout backstop, from what the
+	// switch actually did.
+	IsPending bool
+	// Outcome is how the attempt finishes; empty when IsVoid or IsPending.
 	Outcome Outcome
 }
 
@@ -75,10 +82,17 @@ type DialVerdict struct {
 //	number on DNC      -> DNC_SKIPPED
 //	bad number         -> INVALID_NUMBER
 //	DID line limit     -> void
+//	unconfirmed        -> pending
 //	anything else      -> ORIGINATE_FAILED
+//
+// An unconfirmed placement is not a failure: the switch may run the originate
+// late, and counting it ORIGINATE_FAILED while the customer's phone rings would
+// both lie and schedule a second call to them.
 func ClassifyDialError(err error, k DialErrorKinds) DialVerdict {
 	is := func(target error) bool { return target != nil && errors.Is(err, target) }
 	switch {
+	case is(k.Unconfirmed):
+		return DialVerdict{IsPending: true}
 	case is(k.NumberOnDNC):
 		return DialVerdict{Outcome: OutcomeDNCSkipped}
 	case is(k.BadNumber):

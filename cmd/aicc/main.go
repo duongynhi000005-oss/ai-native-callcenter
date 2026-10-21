@@ -369,9 +369,14 @@ func run() error {
 			Placer: outboundSvc,
 			Slots:  botSlots,
 			Lines:  outboundSvc,
+			// A placement the switch has not confirmed counts as live: the
+			// customer may be ringing, and the backstop waits for what the
+			// switch does rather than settling the attempt as UNKNOWN (#221).
 			IsLive: func(callID uuid.UUID) bool {
-				_, err := registry.Snapshot(callID)
-				return err == nil
+				if _, err := registry.Snapshot(callID); err == nil {
+					return true
+				}
+				return outboundSvc.IsPlacing(callID)
 			},
 			Reconciled: outboundSvc.Reconciled(),
 			Log:        slog.Default(),

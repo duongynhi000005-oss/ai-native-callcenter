@@ -22,6 +22,12 @@ var (
 	ErrDown = errors.New("esl link down")
 	// ErrAuthFailed reports a rejected password.
 	ErrAuthFailed = errors.New("esl authentication failed")
+	// ErrTimeout reports a command that was written to the switch whose reply
+	// did not arrive within the command timeout. Unlike ErrDown it does not
+	// mean the switch did not take the command: the bytes are on the
+	// connection, and a stalled switch executes them when it recovers. For a
+	// bgapi command the outcome is unknown, and the caller must treat it so.
+	ErrTimeout = errors.New("esl command timed out")
 )
 
 // commandTimeout bounds a single api/bgapi round trip. FreeSWITCH answers
@@ -49,6 +55,9 @@ type Client struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 	closeErr  error
+
+	// timeout overrides commandTimeout; tests shorten it.
+	timeout time.Duration
 }
 
 type reply struct {
@@ -171,11 +180,19 @@ func (c *Client) command(cmd string) (string, error) {
 		return "", fmt.Errorf("write command: %w", err)
 	}
 
+	timeout := c.timeout
+	if timeout <= 0 {
+		timeout = commandTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case r := <-ch:
 		return r.body, r.err
-	case <-time.After(commandTimeout):
-		return "", fmt.Errorf("esl command timed out: %s", cmd)
+	case <-timer.C:
+		// The waiter stays queued: the late reply, if it comes, is matched to
+		// it and dropped, so the replies of later commands stay aligned.
+		return "", fmt.Errorf("%w: %s", ErrTimeout, cmd)
 	case <-c.closed:
 		return "", ErrDown
 	}

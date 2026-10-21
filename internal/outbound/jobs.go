@@ -67,7 +67,22 @@ type trackedJob struct {
 
 	// hadChannel is set when the switch created the leg.
 	hadChannel bool
-	timer      *time.Timer
+	// isUnconfirmed: the originate timed out, so the Job-UUID is unknown and
+	// the placement is tracked by its leg alone (unconfirmed.go).
+	isUnconfirmed bool
+	timer         stopper
+}
+
+// stopper is a timer that can be stopped: a *time.Timer, or a test's own.
+type stopper interface{ Stop() bool }
+
+// afterFunc starts the backstop timers of placements. Tests replace it
+// (Service.afterFunc) to fire a window at a moment of their choosing.
+func (s *Service) afterFunc(d time.Duration, f func()) stopper {
+	if s.timers != nil {
+		return s.timers(d, f)
+	}
+	return time.AfterFunc(d, f)
 }
 
 type earlyResult struct {
@@ -90,13 +105,13 @@ func (s *Service) expectLeg(job *trackedJob) {
 	s.legJobs[job.legID] = job
 }
 
-// abandonLeg undoes expectLeg when the originate was never sent.
+// abandonLeg undoes expectLeg when the originate was never sent, and gives the
+// callId back.
 func (s *Service) abandonLeg(job *trackedJob) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.legJobs[job.legID] == job {
-		delete(s.legJobs, job.legID)
-	}
+	s.forgetJobLocked(job)
+	delete(s.placing, job.callID)
 }
 
 // attachJob gives an expected leg the Job-UUID bgapi returned. A failure that
@@ -105,9 +120,8 @@ func (s *Service) attachJob(job *trackedJob, jobID string) {
 	s.mu.Lock()
 	if jobID == "" {
 		// Nothing to correlate with; the CDR alone will tell.
-		if s.legJobs[job.legID] == job {
-			delete(s.legJobs, job.legID)
-		}
+		s.forgetJobLocked(job)
+		delete(s.placing, job.callID)
 		s.mu.Unlock()
 		return
 	}
@@ -115,9 +129,7 @@ func (s *Service) attachJob(job *trackedJob, jobID string) {
 	if early, ok := s.early[jobID]; ok {
 		delete(s.early, jobID)
 		hadChannel := job.hadChannel
-		if s.legJobs[job.legID] == job {
-			delete(s.legJobs, job.legID)
-		}
+		s.forgetJobLocked(job)
 		s.mu.Unlock()
 		s.log.Info("originate job failed before it was tracked",
 			"callId", job.callID, "jobId", jobID, "cause", early.cause)
@@ -125,11 +137,7 @@ func (s *Service) attachJob(job *trackedJob, jobID string) {
 		return
 	}
 	s.jobs[jobID] = job
-	margin := s.jobMargin
-	if margin <= 0 {
-		margin = jobMargin
-	}
-	job.timer = time.AfterFunc(s.cfg.AnswerWindow+margin, func() { s.jobExpired(job) })
+	job.timer = s.afterFunc(s.cfg.AnswerWindow+s.margin(), func() { s.jobExpired(job) })
 	s.mu.Unlock()
 }
 
@@ -141,8 +149,15 @@ func (s *Service) JobCount() int {
 }
 
 // forgetJobLocked removes a job from both indexes.
+//
+// The claim on its callId (claimCall) is not given back here but where the
+// placement's ending is settled: at once when the call exists or nothing was
+// sent, and only after the placement-failure CDR is written when it never
+// existed, so a retry in between still finds it placed.
 func (s *Service) forgetJobLocked(job *trackedJob) {
-	delete(s.jobs, job.jobID)
+	if job.jobID != "" && s.jobs[job.jobID] == job {
+		delete(s.jobs, job.jobID)
+	}
 	if s.legJobs[job.legID] == job {
 		delete(s.legJobs, job.legID)
 	}
@@ -152,11 +167,29 @@ func (s *Service) forgetJobLocked(job *trackedJob) {
 }
 
 // noteChannel records that the switch created a leg of ours.
+//
+// The leg of an unconfirmed placement is the call arriving after all: its
+// answer window starts now, because the switch rings it from now and the
+// window armed when the originate timed out may be mostly spent. The leg of a
+// placement already given up on is ended at once (unconfirmed.go).
 func (s *Service) noteChannel(channelID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if job := s.legJobs[channelID]; job != nil {
+		if job.isUnconfirmed && !job.hadChannel {
+			if leg := s.pending[channelID]; leg != nil {
+				leg.expiresAt = s.now().Add(s.cfg.AnswerWindow)
+			}
+			s.log.Info("unconfirmed placement made its channel; adopting it",
+				"callId", job.callID, "channelId", channelID)
+		}
 		job.hadChannel = true
+	}
+	late, isLate := s.takeLateLegLocked(channelID)
+	s.mu.Unlock()
+	if isLate {
+		s.log.Warn("the switch created a leg after its placement was recorded as failed; hanging it up",
+			"callId", late.callID, "channelId", channelID, "cause", LateAnswerCause)
+		go s.reap(channelID, LateAnswerCause)
 	}
 }
 
@@ -164,6 +197,14 @@ func (s *Service) noteChannel(channelID string) {
 func (s *Service) handleJob(ev telephony.SwitchEvent) {
 	s.mu.Lock()
 	job := s.jobs[ev.JobID]
+	if job == nil && ev.JobChannelID != "" {
+		// An unconfirmed placement never learnt its Job-UUID; its result is
+		// recognised by the leg the command asked for.
+		if j := s.legJobs[ev.JobChannelID]; j != nil && j.isUnconfirmed && j.jobID == "" {
+			j.jobID = ev.JobID
+			job = j
+		}
+	}
 	if job == nil {
 		// Not ours, or not ours yet. Only a failure is worth keeping.
 		if !ev.IsJobOK && ev.JobCause != "" {
@@ -185,6 +226,7 @@ func (s *Service) handleJob(ev telephony.SwitchEvent) {
 	s.mu.Unlock()
 
 	if ev.IsJobOK {
+		s.unclaim(job.callID)
 		s.log.Debug("originate job ok", "callId", job.callID, "jobId", ev.JobID)
 		return
 	}
@@ -196,6 +238,7 @@ func (s *Service) handleJob(ev telephony.SwitchEvent) {
 func (s *Service) finishJob(job *trackedJob, hadChannel bool, cause string) {
 	if hadChannel || (s.isLive != nil && s.isLive(job.callID)) {
 		// The CDR is the single source for how a call that existed ended.
+		s.unclaim(job.callID)
 		s.log.Info("originate job failed after the channel existed; the cdr is the record",
 			"callId", job.callID, "jobId", job.jobID, "cause", cause)
 		return
@@ -229,6 +272,7 @@ func (s *Service) jobExpired(job *trackedJob) {
 		return
 	}
 	s.forgetJobLocked(job)
+	delete(s.placing, job.callID)
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -247,7 +291,8 @@ func (s *Service) jobExpired(job *trackedJob) {
 // failPlacement finishes a call whose originate never made a channel: its
 // armed continuation and business data go, and a failed CDR carries the
 // cause. The caller has already removed the job from the map, which is what
-// makes this run once.
+// makes this run once. The callId is given back once the CDR is written, so
+// a retry never finds the call neither placing nor recorded.
 func (s *Service) failPlacement(job *trackedJob, cause string) {
 	// No channel was ever made, so no call will end to give the line back.
 	s.lines.Release(job.callID)
@@ -261,6 +306,7 @@ func (s *Service) failPlacement(job *trackedJob, cause string) {
 		s.callData.Drop(job.callID)
 	}
 	if s.failures == nil {
+		s.unclaim(job.callID)
 		return
 	}
 
@@ -268,6 +314,7 @@ func (s *Service) failPlacement(job *trackedJob, cause string) {
 
 	// Off the dispatch loop: it must not wait on a database.
 	go func() {
+		defer s.unclaim(job.callID)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// A ledger row that already exists saw more of the call than this

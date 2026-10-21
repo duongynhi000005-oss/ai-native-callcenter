@@ -275,6 +275,19 @@ func (s *Service) recoverParked(ch telephony.LiveChannel, rep *RecoveryReport) {
 }
 
 func (s *Service) recoverRinging(ctx context.Context, ch telephony.LiveChannel, rep *RecoveryReport) {
+	// The leg of an unconfirmed placement already recorded as failed, created
+	// while the link was down: ended as noteChannel would have ended it, never
+	// armed again (unconfirmed.go).
+	s.mu.Lock()
+	late, isLate := s.takeLateLegLocked(ch.ChannelID)
+	s.mu.Unlock()
+	if isLate {
+		s.log.Warn("recovery: the switch created a leg after its placement was recorded as failed; hanging it up",
+			"callId", late.callID, "channelId", ch.ChannelID, "cause", LateAnswerCause)
+		s.reap(ch.ChannelID, LateAnswerCause)
+		rep.WindowSpent++
+		return
+	}
 	if ch.IsInbound || ch.PlacedBy == "" {
 		rep.Left++ // not an originate of ours, or one an older build did not stamp
 		return
