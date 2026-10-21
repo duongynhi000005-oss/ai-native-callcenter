@@ -54,11 +54,12 @@ func TestTheLoaderRefusesAnUnsafeOrUnusableHTTPBlock(t *testing.T) {
 		{"undeclared slot in the path", `{"path": "/x/{slots.nothing}"}`, "references {slots.nothing}, which nothing in this flow writes"},
 		{"path starting with a reference", `{"path": "{args.id}/x"}`, "path must start with a literal \"/\""},
 		{"relative path", `{"path": "api/x"}`, "path must start with a literal \"/\""},
-		{"query in the path", `{"path": "/x?debug=1"}`, "put query parameters in http.query"},
-		{"fragment in the path", `{"path": "/x#top"}`, "put query parameters in http.query"},
-		{"space in the path", `{"path": "/my items"}`, "characters a URL path cannot carry"},
-		{"stray brace in the path", `{"path": "/x/{id}"}`, "characters a URL path cannot carry"},
-		{"bad escape in the path", `{"path": "/x/%zz"}`, "characters a URL path cannot carry"},
+		{"bad escape in the path", `{"path": "/x/%zz"}`, "is not a valid URL path"},
+		{"literal query parameter also in http.query", `{"path": "/x?format=json", "query": {"format": "xml"}}`, "query parameter \"format\" is given both in the path and in http.query"},
+		{"templated literal query parameter also in http.query", `{"path": "/x?q={args.id}", "query": {"q": "a"}}`, "is given both in the path and in http.query"},
+		{"templated literal query repeating a key", `{"path": "/x?q={args.id}&q=2"}`, "query parameter \"q\" is repeated in the path"},
+		{"templated literal query with an undeclared argument", `{"path": "/x?o={args.order}"}`, "query parameter \"o\" references {args.order}"},
+		{"templated literal query that is not parameters", `{"path": "/x?q={args.id}&bad=%zz"}`, "cannot be read as parameters"},
 
 		// Queries.
 		{"undeclared argument in the query", `{"path": "/x", "query": {"o": "{args.order}"}}`, "query parameter \"o\" references {args.order}"},
@@ -148,5 +149,24 @@ func TestAnUnsetSecretBlocksPublishNotLoad(t *testing.T) {
 	}))
 	if err := all(spec); err != nil {
 		t.Errorf("every secret set: %v", err)
+	}
+}
+
+// A slot tool's http block is never sent, so its headers cannot make a
+// publish wait for a secret. (Such a tool does not load, but the rule must not
+// depend on that.)
+func TestASlotToolsHTTPBlockNeedsNoSecret(t *testing.T) {
+	t.Parallel()
+	spec := &Spec{ID: "probe", Tools: map[string]Tool{
+		"budget": {Kind: ToolKindSlot, Slot: "budget", HTTP: &HTTPCall{
+			Path: "/x", Headers: map[string]string{"Authorization": "Bearer {secrets.KB_KEY}"},
+		}},
+		"lookup": {HTTP: &HTTPCall{
+			Path: "/x", Headers: map[string]string{"X-Api-Key": "{secrets.OTHER}"},
+		}},
+	}}
+	problems := MissingSecrets(spec, secretsFrom(nil))
+	if len(problems) != 1 || !strings.Contains(problems[0], "AICC_TOOL_SECRET_OTHER") {
+		t.Errorf("problems = %v, want only the http tool's secret", problems)
 	}
 }

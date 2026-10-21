@@ -223,6 +223,8 @@ type HTTPCall struct {
 	// Path is appended to the base URL's path. It starts with a literal "/" and
 	// may reference {args.x} (an argument the tool's schema requires) and
 	// {slots.y}; every substituted value is escaped into a single path segment.
+	// A literal "?query" in it is sent as written and a "#fragment" dropped,
+	// as before templates existed (HTTPCall.urlParts).
 	Path string `json:"path"`
 	// Method defaults to POST, which is what the reference backends expect.
 	Method string `json:"method,omitempty"`
@@ -239,7 +241,8 @@ type HTTPCall struct {
 	// refused rather than read as absent.
 	TimeoutMs *int `json:"timeoutMs,omitempty"`
 	// Body is a template: string values may reference {args.x} and {slots.y}.
-	// Absent sends no body at all.
+	// Absent sends "{}" for POST, PUT and PATCH, as it always has, and no body
+	// for any other method.
 	Body map[string]any `json:"body,omitempty"`
 	// SuccessWhen decides success; absent means any 2xx counts.
 	SuccessWhen *SuccessTest `json:"successWhen,omitempty"`

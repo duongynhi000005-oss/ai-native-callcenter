@@ -5,6 +5,7 @@ package flow
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"regexp"
 	"slices"
@@ -21,10 +22,91 @@ import (
 // from the base URL. A value such as "@evil.com/x" can then neither change the
 // host nor add a segment.
 
-// pathLiteral is what the literal part of a path may contain: the characters
-// RFC 3986 allows in a path, and percent escapes. No "?" or "#": a query goes
-// in http.query, and nothing in a backend call has a fragment.
-var pathLiteral = regexp.MustCompile(`^(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/]|%[0-9A-Fa-f]{2})*$`)
+// A path written before path templates existed keeps the wire form it had,
+// when the base and the path were joined as text and parsed as one URL: a
+// literal "?query" is sent as it was written, a "#fragment" is dropped, as an
+// HTTP client drops it, and a space or a non-ASCII character in a literal
+// segment is escaped. Flows are re-loaded on every call, so a path that used
+// to work and stopped loading would fail every call on its number.
+
+// urlParts is an HTTP tool's path and query, split as they are sent.
+type urlParts struct {
+	// path is the path template with any literal query and fragment removed.
+	path string
+	// rawQuery is a literal query written in the path with no reference in
+	// it. It is sent exactly as written, as it always was.
+	rawQuery string
+	// isQueryForced keeps a path that ends in a bare "?" sending it.
+	isQueryForced bool
+	// query is every templated query parameter: http.query, plus the
+	// parameters of a literal query in the path that references a value.
+	query map[string]string
+}
+
+// urlParts splits the path and merges the query. problems are what makes the
+// two irreconcilable: a parameter given both in the path and in http.query,
+// or a templated literal query that cannot be read as parameters.
+func (h *HTTPCall) urlParts() (urlParts, []string) {
+	parts := urlParts{path: h.Path, query: h.Query}
+	var problems []string
+	parts.path, _, _ = strings.Cut(parts.path, "#")
+	path, literalQuery, hasQuery := strings.Cut(parts.path, "?")
+	parts.path = path
+	if !hasQuery || literalQuery == "" {
+		parts.isQueryForced = hasQuery
+		return parts, nil
+	}
+
+	merged := make(map[string]string, len(h.Query))
+	maps.Copy(merged, h.Query)
+	conflict := func(key string) {
+		if _, ok := h.Query[key]; ok {
+			problems = append(problems, fmt.Sprintf(
+				"query parameter %q is given both in the path and in http.query", key))
+		}
+	}
+	if !templateReference.MatchString(literalQuery) {
+		parts.rawQuery = literalQuery
+		for pair := range strings.FieldsFuncSeq(literalQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+			key, _, _ := strings.Cut(pair, "=")
+			if unescaped, err := url.QueryUnescape(key); err == nil {
+				key = unescaped
+			}
+			conflict(key)
+		}
+		return parts, problems
+	}
+
+	values, err := url.ParseQuery(literalQuery)
+	if err != nil {
+		return parts, []string{"the query written in the path references a value but cannot be read as parameters; move it to http.query"}
+	}
+	for _, key := range sortedKeys(values) {
+		if len(values[key]) > 1 {
+			problems = append(problems, fmt.Sprintf(
+				"query parameter %q is repeated in the path; move it to http.query", key))
+		}
+		conflict(key)
+		merged[key] = values[key][0]
+	}
+	parts.query = merged
+	return parts, problems
+}
+
+// escapeLiteralPath is the wire form of a literal stretch of a path, as the
+// URL parser has always produced it: a valid escape is kept, a space or a
+// non-ASCII character is escaped. It fails only on what the parser refuses,
+// such as a malformed % escape, which never reached a backend.
+func escapeLiteralPath(literal string) (string, error) {
+	if literal == "" {
+		return "", nil
+	}
+	u, err := url.Parse("http://h/" + literal)
+	if err != nil {
+		return "", err
+	}
+	return u.EscapedPath()[1:], nil
+}
 
 // headerName is an HTTP field name (RFC 9110 token).
 var headerName = regexp.MustCompile("^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$")
@@ -50,6 +132,10 @@ func validateHTTPCall(d declaredSlots, name string, tool Tool, report func(strin
 	}
 
 	// The path.
+	parts, problems := call.urlParts()
+	for _, problem := range problems {
+		report("tool %q %s", name, problem)
+	}
 	if call.Path != "" {
 		if !strings.HasPrefix(call.Path, "/") {
 			report("tool %q path must start with a literal \"/\"", name)
@@ -57,13 +143,13 @@ func validateHTTPCall(d declaredSlots, name string, tool Tool, report func(strin
 		if mentionsSecret(call.Path) {
 			report("tool %q path references a secret; {secrets.NAME} may appear only in a header value", name)
 		}
-		literal := templateReference.ReplaceAllString(call.Path, "")
-		if strings.ContainsAny(literal, "?#") {
-			report("tool %q path contains \"?\" or \"#\"; put query parameters in http.query", name)
-		} else if !mentionsSecret(literal) && !pathLiteral.MatchString(literal) {
-			report("tool %q path has characters a URL path cannot carry as written (a space, a brace, a bad %% escape); escape them, or reference a value with {args.x} or {slots.y}", name)
+		for _, literal := range templateReference.Split(parts.path, -1) {
+			if _, err := escapeLiteralPath(literal); err != nil {
+				report("tool %q path is not a valid URL path (a malformed %% escape?)", name)
+				break
+			}
 		}
-		for _, m := range templateReference.FindAllStringSubmatch(call.Path, -1) {
+		for _, m := range templateReference.FindAllStringSubmatch(parts.path, -1) {
 			switch {
 			case m[1] == "args" && !slices.Contains(declared, m[2]):
 				report("tool %q path references {args.%s}, which is not a declared parameter of the tool", name, m[2])
@@ -75,9 +161,9 @@ func validateHTTPCall(d declaredSlots, name string, tool Tool, report func(strin
 		}
 	}
 
-	// The query.
-	for _, param := range sortedKeys(call.Query) {
-		value := call.Query[param]
+	// The query: http.query and any templated query written in the path.
+	for _, param := range sortedKeys(parts.query) {
+		value := parts.query[param]
 		if strings.TrimSpace(param) == "" {
 			report("tool %q has a query parameter with no name", name)
 		}
@@ -196,20 +282,28 @@ func sortedKeys[V any](m map[string]V) []string {
 // refused before anything is sent; the refusal names the reference, never the
 // value.
 func renderPath(template string, args, slots map[string]any) (string, error) {
-	var refusal error
-	out := templateReference.ReplaceAllStringFunc(template, func(ref string) string {
-		m := templateReference.FindStringSubmatch(ref)
-		value := resolveReference(m[1], m[2], args, slots)
-		text, problem := pathValue(value)
-		if problem != "" && refusal == nil {
-			refusal = fmt.Errorf("the value for {%s.%s} in the path %s", m[1], m[2], problem)
+	var out strings.Builder
+	last := 0
+	for _, m := range templateReference.FindAllStringSubmatchIndex(template, -1) {
+		literal, err := escapeLiteralPath(template[last:m[0]])
+		if err != nil {
+			return "", fmt.Errorf("the path is not a valid URL path")
 		}
-		return url.PathEscape(text)
-	})
-	if refusal != nil {
-		return "", refusal
+		out.WriteString(literal)
+		source, name := template[m[2]:m[3]], template[m[4]:m[5]]
+		text, problem := pathValue(resolveReference(source, name, args, slots))
+		if problem != "" {
+			return "", fmt.Errorf("the value for {%s.%s} in the path %s", source, name, problem)
+		}
+		out.WriteString(url.PathEscape(text))
+		last = m[1]
 	}
-	return out, nil
+	literal, err := escapeLiteralPath(template[last:])
+	if err != nil {
+		return "", fmt.Errorf("the path is not a valid URL path")
+	}
+	out.WriteString(literal)
+	return out.String(), nil
 }
 
 func pathValue(value any) (string, string) {
@@ -257,7 +351,7 @@ func renderQuery(query map[string]string, args, slots map[string]any) (url.Value
 // fields. The base's scheme, user and host are taken as they are (only the
 // deployment's own base may carry a user); the path is appended to the base's
 // own path.
-func buildURL(base *url.URL, escapedPath string, query url.Values) (*url.URL, error) {
+func buildURL(base *url.URL, escapedPath string, parts urlParts, query url.Values) (*url.URL, error) {
 	u := *base
 	u.Fragment, u.RawFragment = "", ""
 	raw := strings.TrimSuffix(base.EscapedPath(), "/") + escapedPath
@@ -266,7 +360,13 @@ func buildURL(base *url.URL, escapedPath string, query url.Values) (*url.URL, er
 		return nil, fmt.Errorf("the path is not a valid escaped URL path")
 	}
 	u.Path, u.RawPath = decoded, raw
-	u.RawQuery = query.Encode()
-	u.ForceQuery = false
+	u.RawQuery = parts.rawQuery
+	if encoded := query.Encode(); encoded != "" {
+		if u.RawQuery != "" {
+			u.RawQuery += "&"
+		}
+		u.RawQuery += encoded
+	}
+	u.ForceQuery = parts.isQueryForced
 	return &u, nil
 }

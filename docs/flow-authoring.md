@@ -82,12 +82,12 @@ A declarative tool is by default an HTTP call to your backend (a second kind, th
 | `description` | Required. The model reads this to decide when to call the tool. |
 | `parameters` | JSON Schema of the arguments. |
 | `http.baseUrl` | Optional. This tool's backend, overriding `AICC_BOT_BACKEND_BASE`: an absolute `http://` or `https://` URL, which may have a path but no user, query or fragment. See 2.4.1. |
-| `http.path` | Required. Starts with a literal `/` and is appended to the base URL's path. May reference `{args.x}` (an argument the schema `required`s) and `{slots.y}`; each value is escaped into one path segment (2.4.1). No `?` or `#`: use `http.query`. |
+| `http.path` | Required. Starts with a literal `/` and is appended to the base URL's path. May reference `{args.x}` (an argument the schema `required`s) and `{slots.y}`; each value is escaped into one path segment (2.4.1). A literal `?query` written in the path is sent as written (prefer `http.query`; a parameter in both is a load error, and a literal query that references a value is read as query templates); a `#fragment` is dropped. |
 | `http.method` | Defaults to `POST`. |
 | `http.query` | Optional. Map of query parameter to a template (`{args.x}`, `{slots.y}`, text). Each value is encoded as one form value. A parameter that references an argument the model did not pass is left out. |
 | `http.headers` | Optional. Map of header name to a literal, or to text with `{secrets.NAME}` references (`"Bearer {secrets.KB_KEY}"`). A credential header must use a secret. See 2.4.1. |
 | `http.timeoutMs` | Optional. 500 to 10000; absent means 5000. |
-| `http.body` | A template. String values may reference `{args.x}` (the model's arguments) and `{slots.y}` (the call's slots). A value that is exactly one reference keeps its type; a reference inside text becomes text. Absent sends no body at all (no `{}`, no `Content-Type`). |
+| `http.body` | A template. String values may reference `{args.x}` (the model's arguments) and `{slots.y}` (the call's slots). A value that is exactly one reference keeps its type; a reference inside text becomes text. Absent sends `{}` as JSON for `POST`, `PUT` and `PATCH`, and no body for `GET`, `DELETE`, `HEAD` and other methods. |
 | `http.successWhen` | `{ "path": "retCode", "equals": "000000" }`. Absent means any 2xx counts. |
 | `http.errorFrom` | Dotted path to the backend's own error message when `successWhen` fails. |
 | `http.result` | Map of slot name to dotted path in the response. **Only these fields are exposed.** |
@@ -144,10 +144,10 @@ The value never appears in the stored flow, an API response (`GET /flows/{flowId
 
 - Private and loopback addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `::1`, `fc00::/7`) need no configuration.
 - A public address is reached only when the tool's host is listed in `AICC_TOOL_ALLOWED_HOSTS` (`host`, `host:port`, `*.domain` for subdomains, or an IP address). The host of `AICC_BOT_BACKEND_BASE` is always allowed.
-- Link-local addresses (`169.254.0.0/16`, `fe80::/10`, the cloud metadata address `169.254.169.254` among them), unspecified ones (`0.0.0.0`, `::`) and multicast are refused even when listed. An IPv4-mapped IPv6 address is judged by its IPv4 part, and a host written as an IP in a non-standard form (`2130706433`, `0x7f.1`) is refused.
+- Link-local addresses (`169.254.0.0/16`, `fe80::/10`, the cloud metadata address `169.254.169.254` among them), AWS's IPv6 metadata range `fd00:ec2::/32` (instance metadata and EKS Pod Identity, refused before the private check), unspecified ones (`0.0.0.0`, `::`) and multicast are refused even when listed. An IPv4-mapped or NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) IPv6 address is judged by its IPv4 part, and a host written as an IP in a non-standard form (`2130706433`, `0x7f.1`) is refused.
 - Redirects are never followed; a 3xx is a tool failure.
 
-A refusal is a tool failure, decided before any connection is opened, and the log line `http tool connection refused by the outbound host policy` names the host, the resolved address and the rule (`PUBLIC_NOT_LISTED`, `LINK_LOCAL`, `UNSPECIFIED`, `MULTICAST`, `NON_CANONICAL_ADDRESS`). The simulator (8) always calls its mock backend, whatever a tool's `baseUrl` says.
+A refusal is a tool failure, decided before any connection is opened, and the log line `http tool connection refused by the outbound host policy` names the host, the resolved address and the rule (`PUBLIC_NOT_LISTED`, `LINK_LOCAL`, `CLOUD_METADATA`, `UNSPECIFIED`, `MULTICAST`, `NON_CANONICAL_ADDRESS`). The simulator (8) always calls its mock backend, whatever a tool's `baseUrl` says, and sends a placeholder for every secret; with `-backend URL` it applies `AICC_TOOL_ALLOWED_HOSTS` and reads secrets from its environment, like a call.
 
 ### 2.5 Transitions and conditions
 

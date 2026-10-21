@@ -100,7 +100,8 @@ func resolveSecrets(header, value string, lookup func(string) (string, bool)) (s
 func MissingSecrets(spec *Spec, lookup func(string) (string, bool)) []string {
 	var problems []string
 	for toolName, tool := range spec.Tools {
-		if tool.HTTP == nil {
+		// A slot tool's http block is never sent, so it needs no secret.
+		if tool.HTTP == nil || tool.Kind == ToolKindSlot {
 			continue
 		}
 		for header, value := range tool.HTTP.Headers {

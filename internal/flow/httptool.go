@@ -164,30 +164,40 @@ func (b *Backend) Call(ctx context.Context, log *slog.Logger, tool Tool, args, s
 		return Result{}, fmt.Errorf("no backend address is configured")
 	}
 
-	path, err := renderPath(spec.Path, args, slots)
+	parts, problems := spec.urlParts()
+	if len(problems) > 0 {
+		// Load refuses these; a Tool built some other way gets the same answer.
+		return Result{}, fmt.Errorf("the tool's path and query cannot be combined: %s", problems[0])
+	}
+	path, err := renderPath(parts.path, args, slots)
 	if err != nil {
 		return Failed(err.Error(), ""), nil
 	}
-	query, err := renderQuery(spec.Query, args, slots)
+	query, err := renderQuery(parts.query, args, slots)
 	if err != nil {
 		return Failed(err.Error(), ""), nil
 	}
-	target, err := buildURL(base, path, query)
+	target, err := buildURL(base, path, parts, query)
 	if err != nil {
 		return Failed(err.Error(), ""), nil
 	}
 
+	method := spec.Method
+	if method == "" {
+		method = http.MethodPost
+	}
 	var body io.Reader
-	if spec.Body != nil {
+	switch {
+	case spec.Body != nil:
 		encoded, err := json.Marshal(renderTemplate(spec.Body, args, slots))
 		if err != nil {
 			return Result{}, fmt.Errorf("encode request: %w", err)
 		}
 		body = bytes.NewReader(encoded)
-	}
-	method := spec.Method
-	if method == "" {
-		method = http.MethodPost
+	case sendsEmptyObject(method):
+		// What every tool without a body template has always sent, and what
+		// a backend reading a JSON body may depend on.
+		body = strings.NewReader("{}")
 	}
 
 	timeout := spec.Timeout()
@@ -196,7 +206,7 @@ func (b *Backend) Call(ctx context.Context, log *slog.Logger, tool Tool, args, s
 
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), body)
 	if err != nil {
-		return Result{}, fmt.Errorf("build request for %s: %w", spec.Path, stripURL(err))
+		return Result{}, fmt.Errorf("build request for %s: %w", parts.path, stripURL(err))
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
@@ -214,7 +224,7 @@ func (b *Backend) Call(ctx context.Context, log *slog.Logger, tool Tool, args, s
 	// number, an order id) reach the backend's own access log and no other.
 	fields := []any{"tool", tool.Name(), "method", method,
 		"baseUrl", (&url.URL{Scheme: base.Scheme, Host: base.Host, Path: base.Path}).String(),
-		"path", spec.Path, "queryParams", slices.Sorted(maps.Keys(query)),
+		"path", parts.path, "queryParams", slices.Sorted(maps.Keys(query)),
 		"timeoutMs", timeout.Milliseconds()}
 
 	started := time.Now()
@@ -224,38 +234,49 @@ func (b *Backend) Call(ctx context.Context, log *slog.Logger, tool Tool, args, s
 		if refusal, ok := egress.IsRefusal(err); ok {
 			log.Warn("http tool connection refused by the outbound host policy", append(fields,
 				"host", refusal.Host, "address", refusal.Address, "rule", refusal.Rule)...)
-			return Result{}, fmt.Errorf("call %s: %w", spec.Path, refusal)
+			return Result{}, fmt.Errorf("call %s: %w", parts.path, refusal)
 		}
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
 			log.Warn("http tool timed out", append(fields, "elapsedMs", time.Since(started).Milliseconds())...)
-			return Result{}, fmt.Errorf("%s did not answer within %d ms", spec.Path, timeout.Milliseconds())
+			return Result{}, fmt.Errorf("%s did not answer within %d ms", parts.path, timeout.Milliseconds())
 		}
 		log.Warn("http tool call failed", append(fields, "error", err)...)
-		return Result{}, fmt.Errorf("call %s: %w", spec.Path, err)
+		return Result{}, fmt.Errorf("call %s: %w", parts.path, err)
 	}
 	defer response.Body.Close()
 	log.Info("http tool called", append(fields,
 		"status", response.StatusCode, "elapsedMs", time.Since(started).Milliseconds())...)
 
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		return Result{}, fmt.Errorf("%s answered with a redirect (%d), which is not followed", spec.Path, response.StatusCode)
+		return Result{}, fmt.Errorf("%s answered with a redirect (%d), which is not followed", parts.path, response.StatusCode)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return Result{}, fmt.Errorf("%s did not answer within %d ms", spec.Path, timeout.Milliseconds())
+			return Result{}, fmt.Errorf("%s did not answer within %d ms", parts.path, timeout.Milliseconds())
 		}
-		return Result{}, fmt.Errorf("read response from %s: %w", spec.Path, stripURL(err))
+		return Result{}, fmt.Errorf("read response from %s: %w", parts.path, stripURL(err))
 	}
 	if response.StatusCode >= 400 {
-		return Result{}, fmt.Errorf("%s returned %d", spec.Path, response.StatusCode)
+		return Result{}, fmt.Errorf("%s returned %d", parts.path, response.StatusCode)
 	}
 
 	var decoded map[string]any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return Result{}, fmt.Errorf("%s did not return an object: %w", spec.Path, err)
+		return Result{}, fmt.Errorf("%s did not return an object: %w", parts.path, err)
 	}
 	return resultFrom(spec, decoded), nil
+}
+
+// sendsEmptyObject reports a method whose request without a body template
+// still carries "{}": POST, PUT and PATCH, as before path templates. GET,
+// DELETE, HEAD and the rest send no body.
+func sendsEmptyObject(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+		return true
+	}
+	return false
 }
 
 // stripURL drops the URL a *url.Error carries. That URL is the rendered one,

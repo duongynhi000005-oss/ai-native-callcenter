@@ -452,22 +452,33 @@ func TestQueryValuesRoundTripAndAbsentOnesAreLeftOut(t *testing.T) {
 	}
 }
 
-// A tool with no body template sends no body, whatever its method; one with a
-// body template sends it as JSON.
-func TestNoBodyTemplateSendsNoBody(t *testing.T) {
+// A tool with no body template sends what it always has: "{}" as JSON for
+// POST, PUT and PATCH (a backend may read a JSON body), and nothing for GET,
+// DELETE and HEAD. One with a body template sends it as JSON.
+func TestNoBodyTemplateKeepsTheOldBody(t *testing.T) {
 	t.Parallel()
 	server := newTestBackend(t, nil)
 	backend := NewBackend(server.URL)
-	for _, method := range []string{"GET", "POST", "DELETE"} {
-		spec := toolFlow(t, idParams, `{"path": "/x", "method": "`+method+`"}`)
-		if _, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "1"}, nil); err != nil {
-			t.Fatalf("%s: %v", method, err)
+	for _, tc := range []struct {
+		method, body string
+	}{
+		{"", "{}"}, {"POST", "{}"}, {"put", "{}"}, {"PATCH", "{}"},
+		{"GET", ""}, {"DELETE", ""}, {"HEAD", ""},
+	} {
+		spec := toolFlow(t, idParams, `{"path": "/x", "method": "`+tc.method+`"}`)
+		_, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "1"}, nil)
+		if err != nil && tc.method != "HEAD" { // a HEAD answer has no object to read
+			t.Fatalf("%s: %v", tc.method, err)
 		}
 		got := server.received()
 		last := got[len(got)-1]
-		if len(last.body) != 0 || last.contentLength > 0 || last.header.Get("Content-Type") != "" {
-			t.Errorf("%s with no body template sent body %q, length %d, type %q",
-				method, last.body, last.contentLength, last.header.Get("Content-Type"))
+		wantType := ""
+		if tc.body != "" {
+			wantType = "application/json"
+		}
+		if string(last.body) != tc.body || last.header.Get("Content-Type") != wantType {
+			t.Errorf("%q with no body template sent body %q as %q, want %q as %q",
+				tc.method, last.body, last.header.Get("Content-Type"), tc.body, wantType)
 		}
 	}
 	spec := toolFlow(t, idParams, `{"path": "/x", "body": {"id": "{args.id}"}}`)
@@ -477,6 +488,68 @@ func TestNoBodyTemplateSendsNoBody(t *testing.T) {
 	got := server.received()
 	if last := got[len(got)-1]; string(last.body) != `{"id":"7"}` || last.header.Get("Content-Type") != "application/json" {
 		t.Errorf("body template sent %q as %q", last.body, last.header.Get("Content-Type"))
+	}
+}
+
+// A path written before templates existed loads and goes on the wire exactly
+// as the old code sent it: base and path joined as text, parsed as one URL,
+// and its request URI sent. A literal query is kept, a fragment dropped, and
+// spaces and non-ASCII characters escaped.
+func TestALegacyPathKeepsItsWireForm(t *testing.T) {
+	t.Parallel()
+	server := newTestBackend(t, nil)
+	for _, base := range []string{server.URL, server.URL + "/v1"} {
+		backend := NewBackend(base)
+		for _, path := range []string{
+			"/api/lookup?format=json",
+			"/api/lookup?format=json&lang=zh-CN;x=1",
+			"/api/lookup?q=a%20b&r=%E4%B8%AD&s=+",
+			"/api/lookup#section",
+			"/api/lookup?format=json#frag",
+			"/api/查询/我的 items",
+			"/api/a b/c%2Fd",
+			"/api/{id}/x",
+			"/api/x?",
+		} {
+			raw, _ := json.Marshal(path)
+			spec := toolFlow(t, "", `{"path": `+string(raw)+`, "method": "GET"}`)
+			if _, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], nil, nil); err != nil {
+				t.Errorf("%s%s: %v", base, path, err)
+				continue
+			}
+			old, err := url.Parse(strings.TrimSuffix(base, "/") + path)
+			if err != nil {
+				t.Fatalf("the old code could not have sent %s: %v", path, err)
+			}
+			got := server.received()
+			if want := old.RequestURI(); got[len(got)-1].requestURI != want {
+				t.Errorf("%s%s: sent %q, the old code sent %q", base, path, got[len(got)-1].requestURI, want)
+			}
+		}
+	}
+}
+
+// A literal query that references a value is a set of query templates: its
+// values are encoded like http.query's, merged with them, and an absent
+// optional argument leaves its parameter out.
+func TestATemplatedQueryInThePathIsEncoded(t *testing.T) {
+	t.Parallel()
+	server := newTestBackend(t, nil)
+	spec := toolFlow(t,
+		`{"type":"object","properties":{"q":{},"page":{},"top":{}},"required":["q"]}`,
+		`{"path": "/search?q={args.q}&fmt=json&top={args.top}", "method": "GET", "query": {"page": "{args.page}"}}`)
+	backend := NewBackend(server.URL)
+	if _, err := backend.Call(t.Context(), nil, spec.Tools["lookup"],
+		map[string]any{"q": "a&b=c 中", "page": float64(2)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := server.received()
+	last := got[len(got)-1]
+	if last.query.Get("q") != "a&b=c 中" || last.query.Get("fmt") != "json" || last.query.Get("page") != "2" {
+		t.Errorf("backend read %v from %q", last.query, last.rawQuery)
+	}
+	if _, ok := last.query["top"]; ok || !strings.HasPrefix(last.requestURI, "/search?") {
+		t.Errorf("request %q: the absent top was sent or the path is wrong", last.requestURI)
 	}
 }
 
