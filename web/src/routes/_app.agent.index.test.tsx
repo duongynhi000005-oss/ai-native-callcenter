@@ -1,5 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 
@@ -21,6 +20,15 @@ import {
   AGENT_ID,
   type Backend,
 } from '@/test/harness'
+import {
+  notAllowed,
+  pendingWrite,
+  recordTexts,
+  removeClipboard,
+  selectedText,
+  stubClipboard,
+  stubExecCommand,
+} from '@/test/clipboard'
 
 /**
  * The agent cockpit page. The control grid must keep six cells: the three the
@@ -39,6 +47,10 @@ async function renderCockpit(backend: Partial<Backend> = {}) {
   const view = renderPage(Cockpit)
   return { api, ...view }
 }
+
+// UUIDv7, the shape the switch's calls get.
+const NEXT_CALL_ID = '019a0b7c-3e21-7d4f-8a9b-2c3d4e5f6a7b'
+const THIRD_CALL_ID = '019a0b7d-0f10-7a2b-9c3d-4e5f6a7b8c9d'
 
 const onCall = { calls: [callFixture('TALKING')], presence: presenceFixture({ availability: 'ON_CALL' }) }
 
@@ -673,11 +685,13 @@ describe('my queue', () => {
 describe('the call id on the caller card', () => {
   // Shown short and copied whole. An agent pasting an id into a ticket that
   // silently lost sixteen characters would be quoting a call nobody can find.
-  it('shows it shortened, copies the whole uuid, and says it copied', async () => {
-    // userEvent installs its own clipboard; asking it what landed there tests
-    // the same thing a person would check after pressing the button.
-    const user = userEvent.setup()
-    await renderCockpit(onCall)
+  // The clipboard is set explicitly in every case: `userEvent` installs one of
+  // its own, which made this suite run as if the page were always in a secure
+  // context. Over plain HTTP, the default deployment, there is none (#290).
+  it('shows it shortened, copies the whole uuid, and says so once the write settles', async () => {
+    const { user } = await renderCockpit(onCall)
+    const pending = pendingWrite()
+    const writeText = stubClipboard(pending.write)
     const button = await screen.findByRole('button', { name: /copy the call id/i })
 
     expect(button).toHaveTextContent('00000000-0000…00c1')
@@ -686,8 +700,106 @@ describe('the call id on the caller card', () => {
     expect(button).toHaveAttribute('title', CALL_ID)
 
     await user.click(button)
-    expect(await navigator.clipboard.readText()).toBe(CALL_ID)
+    expect(writeText).toHaveBeenCalledWith(CALL_ID)
+    expect(button).not.toHaveTextContent(/copied/i)
+
+    pending.settle()
     await waitFor(() => expect(button).toHaveTextContent(/call id copied/i))
+  })
+
+  it('copies the whole uuid over plain HTTP', async () => {
+    const { user } = await renderCockpit(onCall)
+    removeClipboard()
+    const commands = stubExecCommand(true)
+    const button = await screen.findByRole('button', { name: /copy the call id/i })
+
+    await user.click(button)
+
+    expect(commands).toEqual([expect.objectContaining({ command: 'copy', selected: CALL_ID })])
+    await waitFor(() => expect(button).toHaveTextContent(/call id copied/i))
+  })
+
+  it.each([
+    ['the copy command is refused', () => (removeClipboard(), stubExecCommand(false))],
+    ['the copy command throws', () => (removeClipboard(), stubExecCommand('throw'))],
+    ['the browser refuses the write', () => stubClipboard(() => Promise.reject(notAllowed()))],
+  ])('says it did not copy when %s, and selects the whole uuid', async (_, clipboard) => {
+    const { user } = await renderCockpit(onCall)
+    clipboard()
+    const button = await screen.findByRole('button', { name: /copy the call id/i })
+    const texts = recordTexts(button)
+
+    await user.click(button)
+
+    await waitFor(() =>
+      expect(button).toHaveTextContent('Call ID not copied: press Ctrl+C (⌘C)'),
+    )
+    // The whole id, not the shortened rendering, is what Ctrl/Cmd+C takes.
+    expect(screen.getByText(CALL_ID)).toBeInTheDocument()
+    expect(selectedText()).toBe(CALL_ID)
+    texts.stop()
+    expect(texts.seen.some((text) => /call id copied/i.test(text))).toBe(false)
+  })
+
+  it('takes "copied" back after two seconds, and a new call clears either outcome', async () => {
+    const { api, user, refetch } = await renderCockpit(onCall)
+    stubClipboard(async () => {})
+    const button = await screen.findByRole('button', { name: /copy the call id/i })
+
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await user.click(button)
+      await waitFor(() => expect(button).toHaveTextContent(/call id copied/i))
+      act(() => vi.advanceTimersByTime(1_900))
+      expect(button).toHaveTextContent(/call id copied/i)
+      act(() => vi.advanceTimersByTime(200))
+      expect(button).not.toHaveTextContent(/copied/i)
+
+      // A refusal stays while the agent reaches for the keys: it carries the
+      // selected id, and taking it away would take the selection with it.
+      removeClipboard()
+      stubExecCommand(false)
+      await user.click(button)
+      await waitFor(() => expect(button).toHaveTextContent(/not copied/i))
+      act(() => vi.advanceTimersByTime(5_000))
+      expect(button).toHaveTextContent(/not copied/i)
+      expect(screen.getByText(CALL_ID)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // The next call is a new id: nothing said about the last one carries over.
+    api.calls = [{ ...callFixture('TALKING'), callId: NEXT_CALL_ID }]
+    await refetch()
+    const next = await screen.findByRole('button', { name: /copy the call id/i })
+    await waitFor(() => expect(next).toHaveAttribute('title', NEXT_CALL_ID))
+    expect(next).not.toHaveTextContent(/copied/i)
+    expect(screen.queryByText(CALL_ID)).toBeNull()
+
+    stubClipboard(async () => {})
+    await user.click(next)
+    await waitFor(() => expect(next).toHaveTextContent(/call id copied/i))
+    api.calls = [{ ...callFixture('TALKING'), callId: THIRD_CALL_ID }]
+    await refetch()
+    await waitFor(() => expect(next).toHaveAttribute('title', THIRD_CALL_ID))
+    expect(next).not.toHaveTextContent(/copied/i)
+  })
+
+  it('says nothing about a new call when the last call\'s copy settles late', async () => {
+    const { api, user, refetch } = await renderCockpit(onCall)
+    const pending = pendingWrite()
+    stubClipboard(pending.write)
+    const button = await screen.findByRole('button', { name: /copy the call id/i })
+
+    await user.click(button)
+    api.calls = [{ ...callFixture('TALKING'), callId: NEXT_CALL_ID }]
+    await refetch()
+    await waitFor(() => expect(button).toHaveAttribute('title', NEXT_CALL_ID))
+    await act(async () => {
+      pending.settle()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(button).not.toHaveTextContent(/copied/i)
   })
 
   // Wrap-up is when the id gets quoted into a ticket, and by then the caller

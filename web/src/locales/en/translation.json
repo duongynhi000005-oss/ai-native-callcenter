@@ -230,6 +230,7 @@
     "ofOpened": "{{confirmed}}/{{opened}}",
     "callId": "Call ID",
     "callIdCopied": "Call ID copied",
+    "callIdCopyFailed": "Call ID not copied: press Ctrl+C (⌘C)",
     "copyCallId": "Copy the call ID"
   },
   "supervisor": {
@@ -404,6 +405,7 @@
     "revealHint": "Reading this is recorded in the audit trail. It is what the handset registers with.",
     "copy": "Copy",
     "copied": "Copied",
+    "copyFailed": "Not copied: press Ctrl+C (⌘C)",
     "passwordNewHint": "Generated, shown once, and gone when you leave this form. Copy it now.",
     "passwordMintedHint": "Shown once only; leave the form and it is gone. Copy it now — it takes effect on save, and the old one stops working.",
     "passwordExistingHint": "Not shown here. Copy reads it back and records that it was read; Reset replaces it and the old one stops working at once.",

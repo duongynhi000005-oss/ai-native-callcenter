@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Ban, ChevronDown, ChevronRight, Pencil } from 'lucide-react'
 import { Popover } from 'radix-ui'
 
+import { CopyButton } from '@/components/copy-button'
 import { PageHeader } from '@/components/page-header'
 import { Field, Input, RecordDialog, useRecordForm } from '@/components/record-dialog'
 import { DataTable, TBody, THead, TableMessage, Td, Th, Tr } from '@/components/table'
@@ -469,7 +470,7 @@ function IssuedSecret({
   onClose: () => void
 }) {
   const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
+  const shown = useRef<HTMLElement>(null)
 
   return (
     <RecordDialog
@@ -483,20 +484,13 @@ function IssuedSecret({
     >
       <Field label={t('keys.secret')} hint={t('keys.secretHint')}>
         <span className="flex items-center gap-2">
-          <code className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm">
+          <code
+            ref={shown}
+            className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm"
+          >
             {secret}
           </code>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              void navigator.clipboard.writeText(secret)
-              setCopied(true)
-            }}
-          >
-            {copied ? t('admin.copied') : t('admin.copy')}
-          </Button>
+          <CopyButton value={secret} target={shown} />
         </span>
       </Field>
       <Field label={t('keys.howToSend')}>
