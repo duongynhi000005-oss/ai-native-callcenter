@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { PhoneOnboarding } from '@/components/phone-onboarding'
 import {
-  HELLO_ATTEMPTS, HELLO_RECHECK_MS, HELLO_TIMEOUT_MS, PhoneBridgeProvider, usePhoneBridgeValue, type PhoneBridge,
+  FIRST_HELLO_TIMEOUT_MS, HELLO_ATTEMPTS, HELLO_RECHECK_MS, HELLO_TIMEOUT_MS, PhoneBridgeProvider,
+  usePhoneBridgeValue, type PhoneBridge,
 } from '@/lib/phone-bridge'
 import {
   installBackend, installFakeExtension, renderWithProviders, type FakeExtension,
@@ -357,6 +358,8 @@ describe('the card for each reading of the extension', () => {
   // does not know, so it says nothing, however long the answer takes inside
   // the run.
   it('renders nothing while the first hellos are still being asked', async () => {
+    // A marked page: an unmarked one is given a short first run instead.
+    document.documentElement.dataset.webSipPhone = '1'
     fakeTheIntervals()
     renderCard({ isExtensionInstalled: true })
     expect(bridge.presence).toBe('UNKNOWN')
@@ -408,6 +411,8 @@ describe('the card for each reading of the extension', () => {
   // Opened by the agent while the page does not know yet, the site step is
   // not a task and not a failure either.
   it('shows the site step as checking when the agent opens the card while nothing is settled', async () => {
+    // Marked, so nothing settles before the whole run does.
+    document.documentElement.dataset.webSipPhone = '1'
     fakeTheIntervals()
     renderCard({ isExtensionInstalled: true })
     await act(async () => {
@@ -454,5 +459,177 @@ describe('the card for each reading of the extension', () => {
     })
     await waitFor(() => expect(screen.queryByText(/set up your phone/i)).toBeNull())
     expect(bridge.presence).toBe('PRESENT')
+  })
+})
+
+function elapse(ms: number) {
+  act(() => {
+    vi.advanceTimersByTime(ms)
+  })
+}
+
+const isCardUp = () => screen.queryByText(/set up your phone/i) !== null
+const isLostUp = () => screen.queryByText(/lost contact with this page/i) !== null
+
+/** One message from the extension, as the content script posts it. */
+function fromExtension(data: Record<string, unknown>) {
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { source: 'web-sip-phone', protocolVersion: 1, ...data },
+        origin: window.location.origin,
+        source: window,
+      }),
+    )
+  })
+}
+
+function lastHelloNonce(postMessage: ReturnType<typeof vi.spyOn>): string {
+  const hellos = postMessage.mock.calls.filter((call) => (call[0] as { type?: string }).type === 'hello')
+  return (hellos[hellos.length - 1][0] as { nonce: string }).nonce
+}
+
+const grantedState = {
+  registration: 'REGISTERED',
+  account: '1001',
+  sipDomain: null,
+  credentialSource: 'PROVISIONED',
+  microphone: 'GRANTED',
+  error: null,
+}
+
+/**
+ * How soon the card comes up for an agent without the extension (issue #292).
+ *
+ * A page no content script has marked by the time it has loaded is told so
+ * after one short hello, and the card opens then, with step 1 already
+ * showing what the install probe found. A marked page keeps the whole run,
+ * so the card never flashes at an agent whose phone is only slow to answer.
+ * Every clock is faked here, so each assertion reads the card as it is.
+ */
+describe('how soon the card comes up', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'visibilityState')
+  })
+
+  it.each([
+    ['installed but not allowed', true],
+    ['not installed', false],
+  ])('opens a short deadline after load, with step 1 already right, when %s', async (_case, isInstalled) => {
+    vi.useFakeTimers()
+    renderCard({ isExtensionInstalled: isInstalled })
+    // The install probe settles while the card is still closed.
+    await act(async () => {})
+    elapse(0)
+    elapse(FIRST_HELLO_TIMEOUT_MS - 1)
+    expect(isCardUp()).toBe(false)
+    elapse(1)
+    expect(isCardUp()).toBe(true)
+    expect(bridge.presence).toBe('ABSENT')
+    // Read on the card's first frame, before anything else has happened.
+    expect(steps()[0].isDone).toBe(isInstalled)
+    expect(FIRST_HELLO_TIMEOUT_MS).toBeLessThan(2000)
+  })
+
+  it('opens on time with focus and tab switches fired five times while it waits', () => {
+    vi.useFakeTimers()
+    renderCard()
+    elapse(0)
+    for (let i = 0; i < 5; i += 1) {
+      elapse(90)
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+    }
+    elapse(FIRST_HELLO_TIMEOUT_MS - 5 * 90 - 1)
+    expect(isCardUp()).toBe(false)
+    elapse(1)
+    expect(isCardUp()).toBe(true)
+  })
+
+  // The extension installed, updated or allowed after the page loaded: the
+  // marker landing turns the silence back into a question, the card leaves,
+  // and the extension's first word settles it.
+  describe.each([
+    ['inside the first deadline', 300],
+    ['after the card came up', 3000],
+  ])('a marker that lands %s', (_case, landsAt) => {
+    async function markLate() {
+      const postMessage = vi.spyOn(window, 'postMessage')
+      vi.useFakeTimers()
+      renderCard({ isExtensionInstalled: true })
+      await act(async () => {})
+      elapse(0)
+      elapse(landsAt)
+      expect(isCardUp()).toBe(landsAt > FIRST_HELLO_TIMEOUT_MS)
+      await act(async () => {
+        document.documentElement.dataset.webSipPhone = '1'
+      })
+      expect(bridge.presence).toBe('UNKNOWN')
+      expect(isCardUp()).toBe(false)
+      return postMessage
+    }
+
+    it('closes the card and stays closed on a hello reply', async () => {
+      const postMessage = await markLate()
+      fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' })
+      fromExtension({ type: 'state', ...grantedState })
+      expect(bridge.presence).toBe('PRESENT')
+      elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS + HELLO_RECHECK_MS)
+      expect(isCardUp()).toBe(false)
+      expect(isLostUp()).toBe(false)
+    })
+
+    it('closes the card and stays closed on a state alone, with no hello reply', async () => {
+      await markLate()
+      fromExtension({ type: 'state', ...grantedState })
+      expect(bridge.presence).toBe('PRESENT')
+      elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS + HELLO_RECHECK_MS)
+      expect(isCardUp()).toBe(false)
+      expect(isLostUp()).toBe(false)
+    })
+  })
+
+  // Issue #187: a marked page whose content script answers late inside its
+  // first attempt never sees the card, not even for a frame.
+  it('never opens for a marked page whose extension answers 1.9 s into the first hello', async () => {
+    const postMessage = vi.spyOn(window, 'postMessage')
+    document.documentElement.dataset.webSipPhone = '1'
+    vi.useFakeTimers()
+    renderCard({ isExtensionInstalled: true })
+    await act(async () => {})
+    for (let at = 0; at < 1900; at += 100) {
+      elapse(100)
+      expect(isCardUp() || isLostUp()).toBe(false)
+    }
+    fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' })
+    fromExtension({ type: 'state', ...grantedState })
+    for (let at = 0; at < HELLO_TIMEOUT_MS * HELLO_ATTEMPTS * 2; at += 100) {
+      elapse(100)
+      expect(isCardUp() || isLostUp()).toBe(false)
+    }
+  })
+
+  // A tab opened in the background has had its verdict before anyone looks,
+  // so the card is there the moment it is first shown, or very soon after.
+  it.each([200, 3000])('is up within the deadline of a background tab being shown %i ms after load', (shownAt) => {
+    let visibilityState: DocumentVisibilityState = 'hidden'
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibilityState })
+    vi.useFakeTimers()
+    renderCard()
+    elapse(0)
+    elapse(shownAt)
+    act(() => {
+      visibilityState = 'visible'
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    let waited = 0
+    while (!isCardUp() && waited < FIRST_HELLO_TIMEOUT_MS) {
+      elapse(1)
+      waited += 1
+    }
+    expect(isCardUp()).toBe(true)
+    if (shownAt >= FIRST_HELLO_TIMEOUT_MS) expect(waited).toBe(0)
   })
 })

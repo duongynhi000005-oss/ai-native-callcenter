@@ -7,7 +7,7 @@ import { PhoneOnboarding } from '@/components/phone-onboarding'
 import { SoftphoneBar } from '@/components/softphone-bar'
 import { usePresence } from '@/lib/agent'
 import { ApiError, api } from '@/lib/api'
-import { clearSession, useSession } from '@/lib/session'
+import { clearSession, rememberSession, useSession } from '@/lib/session'
 import { PhoneBridgeProvider, usePhoneBridgeValue } from '@/lib/phone-bridge'
 import { EventStreamProvider, useEventStream } from '@/lib/use-event-stream'
 
@@ -19,6 +19,9 @@ export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
     try {
       const { user } = await api.me()
+      // The layout's `useSession` would otherwise ask again before it can
+      // render, and the phone's first hello waits behind it (issue #292).
+      rememberSession(context.queryClient, user)
       return { user }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {

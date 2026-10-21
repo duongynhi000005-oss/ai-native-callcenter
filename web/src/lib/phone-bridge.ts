@@ -87,28 +87,36 @@ export async function probeExtensionInstalled(signal?: AbortSignal): Promise<boo
 }
 
 /**
- * The probe, kept current. It runs on mount and whenever the agent comes back
- * to the tab, because installing happens in another one and the card promises
- * not to ask for a refresh. A newer probe supersedes an older one still in
- * flight; leaving unmounts cancel it. Nothing polls.
+ * The probe, kept current. It runs once on mount, watched or not, so a card
+ * that opens a moment later opens with its answer already in hand rather than
+ * changing under the agent's eyes. While `isWatching`, it runs again when
+ * watching starts and whenever the agent comes back to the tab, because
+ * installing happens in another one and the card promises not to ask for a
+ * refresh. A newer probe supersedes an older one still in flight; leaving
+ * unmounts cancel it. Nothing polls.
  */
-export function useExtensionInstalled(enabled = true): boolean {
+export function useExtensionInstalled(isWatching = true): boolean {
   const [isInstalled, setInstalled] = useState(false)
+  /** A probe has answered since mount; until one has, the first is still owed. */
+  const hasAnswered = useRef(false)
   useEffect(() => {
-    if (!enabled) return
+    if (!isWatching && hasAnswered.current) return
     let controller: AbortController | null = null
     const run = () => {
       controller?.abort()
       const mine = new AbortController()
       controller = mine
       void probeExtensionInstalled(mine.signal).then((found) => {
-        if (!mine.signal.aborted) setInstalled(found)
+        if (mine.signal.aborted) return
+        hasAnswered.current = true
+        setInstalled(found)
       })
     }
+    run()
+    if (!isWatching) return () => controller?.abort()
     const onVisible = () => {
       if (document.visibilityState === 'visible') run()
     }
-    run()
     window.addEventListener('focus', run)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
@@ -116,7 +124,7 @@ export function useExtensionInstalled(enabled = true): boolean {
       window.removeEventListener('focus', run)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [enabled])
+  }, [isWatching])
   return isInstalled
 }
 
@@ -191,6 +199,23 @@ export const HELLO_TIMEOUT_MS = 2000
 export const HELLO_ATTEMPTS = 3
 
 /**
+ * How long the first hello of a page no content script has marked may go
+ * unanswered before it is taken for absent, counted from the moment the
+ * document has loaded and one more task has run.
+ *
+ * The extension's content script is injected at `document_idle`, which Chrome
+ * reaches no later than just after `load`, and it writes its marker
+ * synchronously as it is injected. So a page still unmarked by then has no
+ * content script on it, and waiting out a whole run of hellos to confirm that
+ * kept an agent without the extension looking at a working-looking cockpit for
+ * six seconds (issue #292). The run's own reasons — a busy tab, a tab woken
+ * from sleep — are reasons about a content script that is there, and a marked
+ * page still gets the whole run. A guess that is wrong corrects itself: the
+ * marker landing later turns the silence back into a question.
+ */
+export const FIRST_HELLO_TIMEOUT_MS = 500
+
+/**
  * How often an extension that is not answering is asked again. Nothing else
  * would: a content script that comes back by itself (an allowed site, a
  * worker that woke, a reinjection that wrote no marker this page could see)
@@ -258,14 +283,15 @@ export interface ExtensionState {
  * state the extension reported. It stays until a whole run of hellos has gone
  * unanswered — a marker removed, or a tab coming back, only starts a new run.
  *
- * `LOST` and `ABSENT` are both a run exhausted, told apart by the marker. With
- * the marker on the document a content script is there and not answering: it
- * is still installed, still holding the registration in its own worker, and
- * out of reach of this page (its context was invalidated or its worker is
- * asleep). Telling the agent to install it would be a lie; the honest
- * instruction is to reload. Without the marker there is nothing to reload
- * into, however it got that way: the answer is to install or to allow the
- * site.
+ * `LOST` and `ABSENT` are both a run exhausted, told apart by the marker (a
+ * page nothing has marked by the time it has loaded is given a short first
+ * run instead: `FIRST_HELLO_TIMEOUT_MS`). With the marker on the document a
+ * content script is there and not answering: it is still installed, still
+ * holding the registration in its own worker, and out of reach of this page
+ * (its context was invalidated or its worker is asleep). Telling the agent to
+ * install it would be a lie; the honest instruction is to reload. Without the
+ * marker there is nothing to reload into, however it got that way: the answer
+ * is to install or to allow the site.
  */
 export type ExtensionPresence = 'UNKNOWN' | 'PRESENT' | 'LOST' | 'ABSENT'
 
@@ -385,8 +411,10 @@ export function usePhoneBridgeValue(
 ): PhoneBridge {
   /**
    * What the hellos have established. `SILENT` is a run gone unanswered to its
-   * last attempt; whether that reads as lost or absent is the marker's to
-   * say, at any moment, not a verdict frozen when the run ended.
+   * last attempt, or an unmarked page's first hello gone unanswered past its
+   * short deadline (`FIRST_HELLO_TIMEOUT_MS`); whether that reads as lost or
+   * absent is the marker's to say, at any moment, not a verdict frozen when
+   * the run ended.
    */
   const [answer, setAnswer] = useState<'UNKNOWN' | 'PRESENT' | 'SILENT'>('UNKNOWN')
   /** The marker is on the document; read at mount, then kept by the observer. */
@@ -409,10 +437,18 @@ export function usePhoneBridgeValue(
   const wasEnabled = useRef(false)
   const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  /** Cancels the pending first verdict, if one is; see `FIRST_HELLO_TIMEOUT_MS`. */
+  const cancelFirstVerdict = useRef<(() => void) | null>(null)
+
   const clearHelloTimer = useCallback(() => {
     if (helloTimer.current === null) return
     clearInterval(helloTimer.current)
     helloTimer.current = null
+  }, [])
+
+  const clearFirstVerdict = useCallback(() => {
+    cancelFirstVerdict.current?.()
+    cancelFirstVerdict.current = null
   }, [])
 
   /**
@@ -421,8 +457,9 @@ export function usePhoneBridgeValue(
    */
   const noteAnswered = useCallback(() => {
     clearHelloTimer()
+    clearFirstVerdict()
     setAnswer('PRESENT')
-  }, [clearHelloTimer])
+  }, [clearHelloTimer, clearFirstVerdict])
 
   const post = useCallback((message: Record<string, unknown>) => {
     window.postMessage(
@@ -460,6 +497,59 @@ export function usePhoneBridgeValue(
     ask()
   }, [post, clearHelloTimer])
 
+  /**
+   * The first run's early verdict, for a page no content script has marked.
+   *
+   * It runs beside the ordinary run rather than instead of it, and can only
+   * end that run sooner: once the document has loaded and one more task has
+   * passed, a page still unmarked asks once more, and silence for
+   * `FIRST_HELLO_TIMEOUT_MS` after that is the answer. The deadline is fixed
+   * when it is set. A focus or a tab coming back in the meantime restarts the
+   * ordinary run, as it always does, and moves nothing here — clicking into
+   * the window during load used to push the card back by a whole run.
+   *
+   * Anything that settles the question first cancels it: an answer, the
+   * marker landing (the run that starts then is the ordinary one), signing
+   * out or unmounting.
+   */
+  const awaitFirstVerdict = useCallback(() => {
+    clearFirstVerdict()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const conclude = () => {
+      cancelFirstVerdict.current = null
+      // A marker written earlier in this task has not reached the observer.
+      if (hasPresenceMarker()) return
+      clearHelloTimer()
+      setAnswer('SILENT')
+    }
+    const probe = () => {
+      timer = null
+      // A content script that is here has marked the page by now, and the
+      // observer has already asked it.
+      if (hasPresenceMarker()) {
+        cancelFirstVerdict.current = null
+        return
+      }
+      sendHello()
+      timer = setTimeout(conclude, FIRST_HELLO_TIMEOUT_MS)
+    }
+    // One task after `load`: Chrome injects `document_idle` scripts no later
+    // than just after it, so the task is what lets one that is due land.
+    const onLoad = () => {
+      window.removeEventListener('load', onLoad)
+      timer = setTimeout(probe, 0)
+    }
+    if (document.readyState === 'complete') {
+      timer = setTimeout(probe, 0)
+    } else {
+      window.addEventListener('load', onLoad)
+    }
+    cancelFirstVerdict.current = () => {
+      window.removeEventListener('load', onLoad)
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [sendHello, clearHelloTimer, clearFirstVerdict])
+
   const provision = useCallback(
     (credentials: SipSession) => {
       if (isDeprovisioned.current) return
@@ -472,8 +562,9 @@ export function usePhoneBridgeValue(
   const deprovision = useCallback(() => {
     isDeprovisioned.current = true
     clearHelloTimer()
+    clearFirstVerdict()
     post({ type: 'deprovision' })
-  }, [post, clearHelloTimer])
+  }, [post, clearHelloTimer, clearFirstVerdict])
 
   /**
    * The bridge no longer has a phone. Once per stop: an explicit
@@ -569,8 +660,13 @@ export function usePhoneBridgeValue(
     }
     // Read afresh: the marker may have landed between the first render and
     // this effect, before the observer below existed to hear it.
-    setMarked(hasPresenceMarker())
+    const isMarkedNow = hasPresenceMarker()
+    setMarked(isMarkedNow)
     sendHello()
+    // The first run after signing in is the only one that may conclude early,
+    // and only on a page nothing has marked: a marked page is a content
+    // script that may be busy or just woken, and gets the whole run.
+    if (!isMarkedNow) awaitFirstVerdict()
 
     // The content script may be injected after this page mounted — a fresh
     // install, a site allowed while the tab was open, or an update that
@@ -582,6 +678,9 @@ export function usePhoneBridgeValue(
     // fact and asks again; what the page believed stands until that run is
     // answered or exhausted.
     const observer = new MutationObserver(() => {
+      // A content script came or went, so "nothing has marked this page" no
+      // longer holds: what follows is the ordinary run.
+      clearFirstVerdict()
       if (hasPresenceMarker()) {
         setMarked(true)
         // Silence heard before the marker landed was silence from nothing.
@@ -600,7 +699,9 @@ export function usePhoneBridgeValue(
     // changed underneath us: installed, disabled, or updated in place.
     // A window can regain focus without the tab having been hidden (another
     // window in front, a devtools panel), and the extension's allow-list is
-    // edited in exactly such a window.
+    // edited in exactly such a window. Neither moves a first verdict still
+    // pending, and a page loaded in a background tab has had its verdict
+    // there, so the card is up when the tab is first shown.
     const onVisible = () => {
       if (document.visibilityState === 'visible') sendHello()
     }
@@ -609,10 +710,11 @@ export function usePhoneBridgeValue(
 
     return () => {
       observer.disconnect()
+      clearFirstVerdict()
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', sendHello)
     }
-  }, [enabled, sendHello, clearHelloTimer])
+  }, [enabled, sendHello, clearHelloTimer, awaitFirstVerdict, clearFirstVerdict])
 
   // The slow recheck. An extension that is not answering is asked again now
   // and then, so a card that came up on silence leaves by itself when the

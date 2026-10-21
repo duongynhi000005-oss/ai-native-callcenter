@@ -4,9 +4,9 @@ import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  HELLO_ATTEMPTS, HELLO_RECHECK_MS, HELLO_TIMEOUT_MS, WEB_SIP_PHONE_EXTENSION_ID, probeExtensionInstalled,
-  usePhoneBridgeValue,
-  type PhoneBridge,
+  FIRST_HELLO_TIMEOUT_MS, HELLO_ATTEMPTS, HELLO_RECHECK_MS, HELLO_TIMEOUT_MS, WEB_SIP_PHONE_EXTENSION_ID,
+  probeExtensionInstalled, usePhoneBridgeValue,
+  type ExtensionPresence, type PhoneBridge,
 } from '@/lib/phone-bridge'
 import { extensionStateFixture, installBackend, installFakeExtension, sipSessionFixture } from '@/test/harness'
 
@@ -21,6 +21,8 @@ import { extensionStateFixture, installBackend, installFakeExtension, sipSession
  */
 
 let bridge: PhoneBridge
+/** Every reading the bridge rendered with, in order, for tests about a path. */
+let readings: ExtensionPresence[] = []
 
 const MY_EXTENSION = '1001'
 
@@ -34,6 +36,7 @@ function Host({
   mySipDomain?: string
 }) {
   bridge = usePhoneBridgeValue(enabled, myExtension, mySipDomain)
+  readings.push(bridge.presence)
   return null
 }
 
@@ -99,6 +102,7 @@ let postMessage: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
   postMessage = vi.spyOn(window, 'postMessage')
+  readings = []
 })
 
 afterEach(() => {
@@ -838,6 +842,8 @@ describe('what the page knows about the extension', () => {
 
   it('does not know until something answers or a whole run is silent', async () => {
     installBackend()
+    // A marked page: an unmarked one is given a short first run instead.
+    marker.set()
     vi.useFakeTimers()
     renderBridge()
     expect(bridge.presence).toBe('UNKNOWN')
@@ -1027,6 +1033,241 @@ describe('what the page knows about the extension', () => {
       })
       expect(postMessage).not.toHaveBeenCalled()
     })
+  })
+})
+
+/** A document still loading, until the test says it has loaded. */
+function loadingDocument() {
+  let readyState: DocumentReadyState = 'loading'
+  Object.defineProperty(document, 'readyState', { configurable: true, get: () => readyState })
+  return {
+    finish: () =>
+      act(() => {
+        readyState = 'complete'
+        window.dispatchEvent(new Event('load'))
+      }),
+  }
+}
+
+/** A tab the agent cannot see yet, until the test shows it. */
+function hiddenTab() {
+  let visibilityState: DocumentVisibilityState = 'hidden'
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibilityState })
+  return {
+    show: () =>
+      act(() => {
+        visibilityState = 'visible'
+        document.dispatchEvent(new Event('visibilitychange'))
+      }),
+  }
+}
+
+function elapse(ms: number) {
+  act(() => {
+    vi.advanceTimersByTime(ms)
+  })
+}
+
+/** How long, from now, until the bridge reads `reading`; -1 if not by `cap`. */
+function msUntil(reading: ExtensionPresence, { step = 1, cap = 20_000 } = {}): number {
+  for (let elapsed = 0; elapsed <= cap; elapsed += step) {
+    if (bridge.presence === reading) return elapsed
+    elapse(step)
+  }
+  return -1
+}
+
+function answerLastHello() {
+  act(() => fromExtension({ type: 'hello', nonce: lastHelloNonce(postMessage), extensionVersion: '1.4.0' }))
+}
+
+function hellosPosted(): number {
+  return postMessage.mock.calls.filter((call) => (call[0] as { type?: string }).type === 'hello').length
+}
+
+/** The order of distinct readings, repeats folded. */
+function path(from: ExtensionPresence[]): ExtensionPresence[] {
+  return from.filter((reading, i) => i === 0 || from[i - 1] !== reading)
+}
+
+/**
+ * The first verdict on a page nothing has marked (issue #292).
+ *
+ * A content script writes its marker as it is injected, and Chrome injects it
+ * no later than just after `load`. A page still unmarked one task after that
+ * has no content script, so it is told so after one short hello rather than a
+ * whole run: an agent without the extension used to look at a cockpit that
+ * seemed to work for six seconds before the setup card came up. A marked page
+ * keeps the whole run, which is what a busy or just-woken tab needs.
+ */
+describe('the first verdict on a page nothing has marked', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'readyState')
+    Reflect.deleteProperty(document, 'visibilityState')
+  })
+
+  it('reads absent a short deadline after load, not after a whole run', () => {
+    installBackend()
+    const page = loadingDocument()
+    vi.useFakeTimers()
+    renderBridge()
+    // Loading is not silence: nothing is concluded before `load`.
+    elapse(1000)
+    expect(bridge.presence).toBe('UNKNOWN')
+    const before = hellosPosted()
+    page.finish()
+    // One task later, the page asks once more and waits the short deadline.
+    elapse(0)
+    expect(hellosPosted()).toBe(before + 1)
+    expect(msUntil('ABSENT')).toBe(FIRST_HELLO_TIMEOUT_MS)
+    expect(FIRST_HELLO_TIMEOUT_MS).toBeLessThan(HELLO_TIMEOUT_MS)
+    expect(bridge.isLost).toBe(false)
+  })
+
+  it('does not move its deadline for focus and tab switches in the meantime', () => {
+    installBackend()
+    vi.useFakeTimers()
+    renderBridge()
+    elapse(0)
+    const before = hellosPosted()
+    for (let i = 0; i < 5; i += 1) {
+      elapse(90)
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+    }
+    // Each was asked, as always; none of them reset the clock.
+    expect(hellosPosted()).toBe(before + 10)
+    expect(bridge.presence).toBe('UNKNOWN')
+    expect(msUntil('ABSENT')).toBe(FIRST_HELLO_TIMEOUT_MS - 5 * 90)
+  })
+
+  it('reaches the same verdict under StrictMode, whose effects run twice', () => {
+    installBackend()
+    vi.useFakeTimers()
+    const queryClient = new QueryClient()
+    render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <Host myExtension={MY_EXTENSION} />
+        </QueryClientProvider>
+      </StrictMode>,
+    )
+    elapse(0)
+    expect(msUntil('ABSENT')).toBe(FIRST_HELLO_TIMEOUT_MS)
+  })
+
+  it('concludes nothing for a page that signs out while it waits', () => {
+    installBackend()
+    vi.useFakeTimers()
+    renderBridge()
+    elapse(0)
+    act(() => bridge.deprovision())
+    elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+    expect(bridge.presence).toBe('UNKNOWN')
+  })
+
+  // An install, an update or a site allowed while the page is open marks it
+  // late. Whatever was concluded before, the marker turns it back into a
+  // question, and the ordinary run asks it.
+  describe.each([
+    ['inside the first deadline', 300],
+    ['after the page had read absent', 3000],
+  ])('a marker that lands %s', (_case, landsAt) => {
+    function markLate() {
+      installBackend()
+      vi.useFakeTimers()
+      renderBridge()
+      elapse(0)
+      elapse(landsAt)
+      expect(bridge.presence).toBe(landsAt > FIRST_HELLO_TIMEOUT_MS ? 'ABSENT' : 'UNKNOWN')
+      readings = []
+      return act(async () => {
+        document.documentElement.dataset.webSipPhone = '1'
+      })
+    }
+
+    it('is unknown, then present on a hello reply', async () => {
+      await markLate()
+      expect(bridge.presence).toBe('UNKNOWN')
+      answerLastHello()
+      expect(path(readings)).toEqual(['UNKNOWN', 'PRESENT'])
+      // The short deadline went with the question it was for.
+      elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+      expect(bridge.presence).toBe('PRESENT')
+    })
+
+    it('is unknown, then present on a state alone', async () => {
+      await markLate()
+      expect(bridge.presence).toBe('UNKNOWN')
+      act(() => fromExtension({ type: 'state', ...extensionStateFixture() }))
+      expect(path(readings)).toEqual(['UNKNOWN', 'PRESENT'])
+      elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+      expect(bridge.presence).toBe('PRESENT')
+    })
+
+    it('is lost only after the whole run if nothing answers, and never absent', async () => {
+      await markLate()
+      expect(msUntil('LOST', { step: 10 })).toBe(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+      expect(path(readings)).toEqual(['UNKNOWN', 'LOST'])
+    })
+  })
+
+  // A tab woken from sleep runs its timers late. Its content script is there
+  // (the marker says so) and may answer at any moment, so it is given the
+  // whole run, however long the run's ticks take.
+  it('gives a marked page the whole run when its timers run late', () => {
+    installBackend()
+    document.documentElement.dataset.webSipPhone = '1'
+    vi.useFakeTimers()
+    const LATE_MS = 1500
+    const onTime = { setInterval: globalThis.setInterval, setTimeout: globalThis.setTimeout }
+    const late = [
+      vi.spyOn(globalThis, 'setInterval').mockImplementation(((handler: () => void, ms?: number) =>
+        onTime.setInterval(handler, (ms ?? 0) + LATE_MS)) as typeof setInterval),
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: () => void, ms?: number) =>
+        onTime.setTimeout(handler, (ms ?? 0) + LATE_MS)) as typeof setTimeout),
+    ]
+    try {
+      renderBridge()
+      expect(msUntil('LOST', { step: 10, cap: 30_000 })).toBe(
+        (HELLO_TIMEOUT_MS + LATE_MS) * HELLO_ATTEMPTS,
+      )
+      expect(path(readings)).toEqual(['UNKNOWN', 'LOST'])
+    } finally {
+      for (const spy of late) spy.mockRestore()
+    }
+  })
+
+  // Issue #187: a content script that answers late inside its first attempt
+  // is present, and nothing else is ever read in between.
+  it('is present, and nothing else, for a marked page that answers 1.9 s in', () => {
+    installBackend()
+    document.documentElement.dataset.webSipPhone = '1'
+    vi.useFakeTimers()
+    renderBridge()
+    elapse(1900)
+    expect(hellosPosted()).toBe(1)
+    answerLastHello()
+    elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS * 2)
+    expect(path(readings)).toEqual(['UNKNOWN', 'PRESENT'])
+  })
+
+  // A background tab runs its timers (Chrome only spaces them out), so it
+  // has its verdict before anyone looks. Showing it asks again, as always,
+  // without taking the verdict back.
+  it.each([200, 3000])('is absent by the time a tab loaded in the background is shown %i ms later', (shownAt) => {
+    installBackend()
+    const tab = hiddenTab()
+    vi.useFakeTimers()
+    renderBridge()
+    elapse(0)
+    elapse(shownAt)
+    tab.show()
+    expect(msUntil('ABSENT')).toBeLessThanOrEqual(FIRST_HELLO_TIMEOUT_MS)
+    elapse(HELLO_TIMEOUT_MS * HELLO_ATTEMPTS)
+    expect(bridge.presence).toBe('ABSENT')
   })
 })
 

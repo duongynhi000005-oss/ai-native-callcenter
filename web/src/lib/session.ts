@@ -27,6 +27,14 @@ export function useSession() {
 }
 
 /**
+ * The user a request just proved signed in, kept as the session, so the
+ * layout that mounts next reads it instead of asking `/me` a second time.
+ */
+export function rememberSession(queryClient: QueryClient, user: Identity) {
+  queryClient.setQueryData(SESSION_KEY, user)
+}
+
+/**
  * The session is over: forget the user, and with them every cache that was
  * theirs, so whoever signs in next in this tab starts from nothing.
  */
