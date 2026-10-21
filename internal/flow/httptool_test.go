@@ -314,34 +314,69 @@ func TestAnUnusableSecretFailsTheToolByName(t *testing.T) {
 	}
 }
 
-// A backend that answers in 600 ms fails a tool bounded at 500 ms and passes
-// one bounded at 1000 ms.
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A tool's timeoutMs is the deadline of its request, and absent means 5 s.
+// Checked on the request itself, so no clock race decides the outcome.
 func TestATimeoutIsPerTool(t *testing.T) {
 	t.Parallel()
+	var deadline time.Time
+	backend := NewBackend("http://kb.internal")
+	backend.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		deadline, _ = r.Context().Deadline()
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{},
+			Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
+	})
+	for _, tc := range []struct {
+		http string
+		want time.Duration
+	}{
+		{`{"path": "/x", "timeoutMs": 500}`, 500 * time.Millisecond},
+		{`{"path": "/x", "timeoutMs": 1000}`, time.Second},
+		{`{"path": "/x", "timeoutMs": 10000}`, 10 * time.Second},
+		{`{"path": "/x"}`, 5 * time.Second},
+	} {
+		spec := toolFlow(t, idParams, tc.http)
+		before := time.Now()
+		if _, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "x"}, nil); err != nil {
+			t.Fatalf("%s: %v", tc.http, err)
+		}
+		after := time.Now()
+		if deadline.Before(before.Add(tc.want)) || deadline.After(after.Add(tc.want)) {
+			t.Errorf("%s: deadline %s after the call began, want %s",
+				tc.http, deadline.Sub(before), tc.want)
+		}
+	}
+}
+
+// A backend slower than the bound fails the tool, saying the bound; one that
+// answers within it passes. The slow backend never answers on its own, so the
+// failure cannot depend on which of two timers fires first, and the passing
+// case leaves seconds of slack for a loaded machine.
+func TestASlowBackendFailsOnlyPastItsBound(t *testing.T) {
+	t.Parallel()
 	server := newTestBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-time.After(600 * time.Millisecond):
-		case <-r.Context().Done():
+		if r.URL.Path == "/never" {
+			<-r.Context().Done()
 			return
 		}
+		time.Sleep(600 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 	backend := NewBackend(server.URL)
-	for _, tc := range []struct {
-		timeoutMs int
-		isOK      bool
-	}{{500, false}, {1000, true}} {
-		spec := toolFlow(t, idParams, fmt.Sprintf(`{"path": "/slow", "timeoutMs": %d}`, tc.timeoutMs))
-		_, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "x"}, nil)
-		if (err == nil) != tc.isOK {
-			t.Errorf("timeoutMs %d: err = %v, want ok=%v", tc.timeoutMs, err, tc.isOK)
-		}
-		if err != nil && !strings.Contains(err.Error(), fmt.Sprintf("did not answer within %d ms", tc.timeoutMs)) {
-			t.Errorf("timeoutMs %d: err = %v, want it to say the bound", tc.timeoutMs, err)
-		}
+
+	spec := toolFlow(t, idParams, `{"path": "/never", "timeoutMs": 500}`)
+	_, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "x"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not answer within 500 ms") {
+		t.Errorf("a backend past the bound: err = %v, want it to say the bound", err)
 	}
-	if spec := toolFlow(t, idParams, `{"path": "/x"}`); spec.Tools["lookup"].HTTP.Timeout() != 5*time.Second {
-		t.Errorf("default timeout = %s, want 5s", spec.Tools["lookup"].HTTP.Timeout())
+
+	spec = toolFlow(t, idParams, `{"path": "/slow", "timeoutMs": 5000}`)
+	if _, err := backend.Call(t.Context(), nil, spec.Tools["lookup"], map[string]any{"id": "x"}, nil); err != nil {
+		t.Errorf("a 600 ms backend under a 5000 ms bound: %v", err)
 	}
 }
 
