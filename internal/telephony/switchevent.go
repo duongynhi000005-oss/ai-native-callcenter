@@ -293,6 +293,11 @@ type SwitchEvent struct {
 	JobID    string
 	IsJobOK  bool
 	JobCause string
+	// JobChannelID is the channel an originate job was asked to create (its
+	// origination_uuid), read off the job's own command line. It lets a
+	// placement whose bgapi reply never arrived, so whose Job-UUID is unknown,
+	// still be matched to its result. Empty for any other job.
+	JobChannelID string
 
 	// Recording.
 	RecordingPath string

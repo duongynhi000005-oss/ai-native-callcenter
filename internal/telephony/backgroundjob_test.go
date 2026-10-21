@@ -3,8 +3,13 @@
 package telephony
 
 import (
+	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/esl"
 )
@@ -36,6 +41,55 @@ func TestParseJobResult(t *testing.T) {
 		if gotOK != c.wantOK || gotCause != c.cause {
 			t.Errorf("ParseJobResult(%q) = %v, %q; want %v, %q", c.body, gotOK, gotCause, c.wantOK, c.cause)
 		}
+	}
+}
+
+// An originate's result names the channel it was asked to create, so a
+// placement whose bgapi reply timed out can still be matched to it (#221).
+func TestAnOriginateJobNamesTheChannelItWasAskedFor(t *testing.T) {
+	t.Parallel()
+	leg := uuid.New()
+	a, cmd := newTestAdapter()
+	if _, err := a.Originate(leg, "sofia/gateway/pstn/18688886660", map[string]string{
+		"aicc_call_id": uuid.NewString(), "origination_caller_id_name": "Dial 1, 2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	arg := strings.TrimPrefix(cmd.last(), "originate ")
+	cases := []struct {
+		name, command, arg, want string
+	}{
+		{"as the adapter writes it", "originate", arg, leg.String()},
+		{"not an originate", "uuid_transfer", arg, ""},
+		{"no block", "originate", "sofia/gateway/pstn/1 &park()", ""},
+		{"no uuid in the block", "originate", "{ignore_early_media=true}sofia/x &park()", ""},
+		{"a malformed uuid", "originate", "{origination_uuid=not-a-uuid}sofia/x &park()", ""},
+		{"an unterminated block", "originate", "{origination_uuid=" + leg.String(), ""},
+	}
+	for _, c := range cases {
+		ev := esl.NewEvent(map[string]string{
+			"Event-Name": "BACKGROUND_JOB", "Job-UUID": "job-1",
+			"Job-Command": c.command, "Job-Command-Arg": c.arg,
+		}, "-ERR GATEWAY_DOWN\n")
+		got, ok := Normalize(ev)
+		if !ok {
+			t.Fatalf("%s: not normalised", c.name)
+		}
+		if got.JobChannelID != c.want {
+			t.Errorf("%s: JobChannelID = %q, want %q", c.name, got.JobChannelID, c.want)
+		}
+	}
+}
+
+// A command the switch read but did not answer in time reaches the caller as
+// esl.ErrTimeout, which is how the outbound path tells an unconfirmed
+// placement from a refused one (#221).
+func TestAnOriginateThatTimesOutSaysSo(t *testing.T) {
+	t.Parallel()
+	a, cmd := newTestAdapter()
+	cmd.err = fmt.Errorf("%w: bgapi originate …", esl.ErrTimeout)
+	if _, err := a.Originate(uuid.New(), "sofia/gateway/pstn/1", nil); !errors.Is(err, esl.ErrTimeout) {
+		t.Fatalf("Originate error = %v, want esl.ErrTimeout", err)
 	}
 }
 

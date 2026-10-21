@@ -5,6 +5,8 @@ package telephony
 import (
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/rasonyang/ai-native-callcenter/internal/esl"
 )
 
@@ -21,7 +23,36 @@ func normalizeBackgroundJob(ev *esl.Event, out SwitchEvent) (SwitchEvent, bool) 
 	out.ChannelName = ""
 	out.JobID = id
 	out.IsJobOK, out.JobCause = ParseJobResult(ev.Body)
+	if strings.TrimSpace(ev.Get("Job-Command")) == "originate" {
+		out.JobChannelID = originationUUID(ev.Get("Job-Command-Arg"))
+	}
 	return out, true
+}
+
+// originationUUID reads origination_uuid out of the leading {…} block of an
+// originate's argument, as Adapter.Originate writes it. Anything that is not a
+// well-formed uuid there is no answer.
+func originationUUID(arg string) string {
+	block, ok := strings.CutPrefix(strings.TrimSpace(arg), "{")
+	if !ok {
+		return ""
+	}
+	block, _, ok = strings.Cut(block, "}")
+	if !ok {
+		return ""
+	}
+	for _, kv := range strings.Split(block, ",") {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || strings.TrimSpace(name) != "origination_uuid" {
+			continue
+		}
+		id, err := uuid.Parse(strings.Trim(strings.TrimSpace(value), "'"))
+		if err != nil {
+			return ""
+		}
+		return id.String()
+	}
+	return ""
 }
 
 // maxJobCauseLen bounds a cause that is not a bare name, so a verbose error
