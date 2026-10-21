@@ -16,7 +16,7 @@ import (
 // The policy as a table of messy inputs: the edges of every range, the forms an
 // address can hide in, and allowlist entries against near misses.
 func TestPolicyDecidesOnTheResolvedAddress(t *testing.T) {
-	allowed, err := ParseAllowList(" kb.example.net, *.example.com ,93.184.216.34, pay.example.org:8443,, [2001:db8::7]:443 ")
+	allowed, err := ParseAllowList(" kb.example.net, *.example.com ,93.184.216.34, pay.example.org:8443,, [2001:db8::7]:443, fd00:ec2::254, 169.254.169.254 ")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -40,7 +40,18 @@ func TestPolicyDecidesOnTheResolvedAddress(t *testing.T) {
 		{"IPv4-mapped private", "::ffff:10.0.0.1", "80", "::ffff:10.0.0.1", RulePrivate, true},
 		{"IPv4-mapped metadata", "::ffff:169.254.169.254", "80", "::ffff:169.254.169.254", RuleLinkLocal, false},
 		{"NAT64 metadata", "64:ff9b::a9fe:a9fe", "80", "64:ff9b::a9fe:a9fe", RuleLinkLocal, false},
-		{"metadata unlisted", "169.254.169.254", "80", "169.254.169.254", RuleLinkLocal, false},
+		// The local-use NAT64 prefix carries the IPv4 address around a
+		// reserved octet: 169.254.169.254, 10.0.0.1 and 8.8.8.8.
+		{"local NAT64 metadata", "64:ff9b:1:a9fe:a9:fe00::", "80", "64:ff9b:1:a9fe:a9:fe00::", RuleLinkLocal, false},
+		{"local NAT64 private", "64:ff9b:1:a00:0:100::", "80", "64:ff9b:1:a00:0:100::", RulePrivate, true},
+		{"local NAT64 public", "64:ff9b:1:808:8:800::", "80", "64:ff9b:1:808:8:800::", RulePublicNotListed, false},
+		// AWS metadata over IPv6 sits inside fc00::/7 and is refused first.
+		{"AWS IMDS over IPv6", "fd00:ec2::254", "80", "fd00:ec2::254", RuleCloudMetadata, false},
+		{"EKS Pod Identity", "fd00:ec2::23", "80", "fd00:ec2::23", RuleCloudMetadata, false},
+		{"listed name resolving to IMDS", "kb.example.net", "443", "fd00:ec2::254", RuleCloudMetadata, false},
+		{"listed IMDS literal", "fd00:ec2::254", "443", "fd00:ec2::254", RuleCloudMetadata, false},
+		{"just outside fd00:ec2::/32", "fd00:ec3::1", "80", "fd00:ec3::1", RulePrivate, true},
+		{"metadata, even listed", "169.254.169.254", "80", "169.254.169.254", RuleLinkLocal, false},
 		{"IPv6 link-local", "fe80::1", "80", "fe80::1", RuleLinkLocal, false},
 		{"unspecified IPv4", "0.0.0.0", "80", "0.0.0.0", RuleUnspecified, false},
 		{"this-network IPv4", "0.1.2.3", "80", "0.1.2.3", RuleUnspecified, false},
@@ -188,7 +199,7 @@ func (f *fakeNet) dialer(policy *Policy) *Dialer {
 // A name that resolves to a private address and then, on the next lookup, to
 // the metadata address is let through once and refused the second time,
 // before any connection is opened.
-func TestARebindingNameIsRefusedAtConnect(t *testing.T) {
+func TestARebindingNameIsRefusedOnItsNextLookup(t *testing.T) {
 	f := newFakeNet(t)
 	f.answer("kb.internal", "10.0.0.5")
 	f.answer("kb.internal", "169.254.169.254")
@@ -301,6 +312,30 @@ func TestTheControlHookJudgesTheSocketAddress(t *testing.T) {
 
 	if err := d.control(context.Background(), "tcp4", "not-an-address", nil); err == nil {
 		t.Error("an unreadable address passed the hook")
+	}
+}
+
+// The production connection path alone, with the pre-check out of the way:
+// the socket for kb.internal is let through to a loopback listener, and when
+// the same name is next dialled at the metadata address the Control hook
+// refuses it before the socket connects.
+func TestTheControlHookRefusesARebindAtConnect(t *testing.T) {
+	f := newFakeNet(t)
+	d := &Dialer{Policy: NewPolicy(nil)}
+	ctx := context.WithValue(context.Background(), targetKey{}, target{host: "kb.internal", port: "80"})
+
+	conn, err := d.connect(ctx, "tcp", f.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("the loopback address was refused: %v", err)
+	}
+	conn.Close()
+
+	for _, address := range []string{"169.254.169.254:80", "[::ffff:169.254.169.254]:80", "0.0.0.0:80"} {
+		_, err = d.connect(ctx, "tcp", address)
+		refusal, ok := IsRefusal(err)
+		if !ok || refusal.Host != "kb.internal" {
+			t.Errorf("%s: err = %v, want a refusal from the Control hook naming kb.internal", address, err)
+		}
 	}
 }
 

@@ -38,6 +38,11 @@ const (
 	// RuleLinkLocal refuses 169.254.0.0/16 and fe80::/10, the cloud metadata
 	// address among them, whether listed or not.
 	RuleLinkLocal Rule = "LINK_LOCAL"
+	// RuleCloudMetadata refuses fd00:ec2::/32, where AWS serves its instance
+	// metadata (fd00:ec2::254) and EKS Pod Identity (fd00:ec2::23) over IPv6.
+	// It sits inside the private fc00::/7, so it is checked first, and it is
+	// refused whether listed or not.
+	RuleCloudMetadata Rule = "CLOUD_METADATA"
 	// RuleUnspecified refuses 0.0.0.0/8 and ::, which reach the local host on
 	// some systems while looking like nothing at all.
 	RuleUnspecified Rule = "UNSPECIFIED"
@@ -63,6 +68,7 @@ const (
 	ClassLinkLocal
 	ClassUnspecified
 	ClassMulticast
+	ClassCloudMetadata
 )
 
 var (
@@ -89,22 +95,28 @@ var (
 		netip.MustParsePrefix("255.255.255.255/32"),
 		netip.MustParsePrefix("ff00::/8"),
 	}
+	cloudMetadataPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("fd00:ec2::/32"),
+	}
 	// nat64Prefix is the well-known NAT64 prefix (RFC 6052). Behind a NAT64
 	// gateway 64:ff9b::a9fe:a9fe is 169.254.169.254, so it is judged by the
 	// IPv4 address it carries.
 	nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+	// nat64LocalPrefix is the local-use NAT64 prefix (RFC 8215). It is a /48,
+	// so RFC 6052 places the IPv4 address in bits 48-63 and 72-103, around the
+	// reserved octet at bits 64-71.
+	nat64LocalPrefix = netip.MustParsePrefix("64:ff9b:1::/48")
 )
 
 // Classify says what kind of destination addr is. An IPv4-mapped IPv6 address
-// (::ffff:a.b.c.d) and a NAT64 one are judged by the IPv4 address inside, so
-// ::ffff:169.254.169.254 is link-local and ::ffff:10.0.0.1 private.
+// (::ffff:a.b.c.d) and a NAT64 one (64:ff9b::/96, 64:ff9b:1::/48) are judged
+// by the IPv4 address inside, so ::ffff:169.254.169.254 is link-local and
+// ::ffff:10.0.0.1 private.
 func Classify(addr netip.Addr) Class {
-	addr = addr.WithZone("").Unmap()
-	if addr.Is6() && nat64Prefix.Contains(addr) {
-		raw := addr.As16()
-		addr = netip.AddrFrom4([4]byte{raw[12], raw[13], raw[14], raw[15]})
-	}
+	addr = embeddedIPv4(addr.WithZone("").Unmap())
 	switch {
+	case containedIn(cloudMetadataPrefixes, addr):
+		return ClassCloudMetadata
 	case containedIn(unspecifiedPrefixes, addr):
 		return ClassUnspecified
 	case containedIn(linkLocalPrefixes, addr):
@@ -118,6 +130,21 @@ func Classify(addr netip.Addr) Class {
 	default:
 		return ClassPublic
 	}
+}
+
+// embeddedIPv4 returns the IPv4 address a NAT64 address carries, or addr.
+func embeddedIPv4(addr netip.Addr) netip.Addr {
+	if !addr.Is6() {
+		return addr
+	}
+	raw := addr.As16()
+	switch {
+	case nat64Prefix.Contains(addr):
+		return netip.AddrFrom4([4]byte{raw[12], raw[13], raw[14], raw[15]})
+	case nat64LocalPrefix.Contains(addr):
+		return netip.AddrFrom4([4]byte{raw[6], raw[7], raw[9], raw[10]})
+	}
+	return addr
 }
 
 func containedIn(prefixes []netip.Prefix, addr netip.Addr) bool {
@@ -296,6 +323,8 @@ func (r *Refusal) Error() string {
 	switch r.Rule {
 	case RuleLinkLocal:
 		why = "a link-local address, which is never reached"
+	case RuleCloudMetadata:
+		why = "a cloud metadata address, which is never reached"
 	case RuleUnspecified:
 		why = "an unspecified address, which is never reached"
 	case RuleMulticast:
@@ -333,6 +362,8 @@ func (p *Policy) Check(host, port string, addr netip.Addr) (Rule, error) {
 	switch Classify(addr) {
 	case ClassUnspecified:
 		return refuse(RuleUnspecified)
+	case ClassCloudMetadata:
+		return refuse(RuleCloudMetadata)
 	case ClassLinkLocal:
 		return refuse(RuleLinkLocal)
 	case ClassMulticast:
