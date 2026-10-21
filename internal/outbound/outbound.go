@@ -10,6 +10,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -178,6 +179,11 @@ type Service struct {
 	early     map[string]earlyResult
 	jobMargin time.Duration
 	failures  FailureLedger
+	// placing is the callIds with a placement in progress (claimCall), and
+	// lateLegs the legs of unconfirmed placements given up on
+	// (unconfirmed.go); both guarded by mu.
+	placing  map[uuid.UUID]struct{}
+	lateLegs map[string]lateLeg
 
 	// holds are the answered AI legs that took, or are waiting for, a bot slot,
 	// by channel id; guarded by mu. A hangup cancels the wait and releases the
@@ -430,28 +436,32 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		return uuid.Nil, err
 	}
 
-	callID := req.CallID
-	if callID == uuid.Nil {
-		callID = uuid.Must(uuid.NewV7())
-	} else {
-		// The same idempotency record DialAI uses, and for a sharper reason
-		// here: the caller is a system that retries on a timeout, and a
-		// retried click-to-dial raises the agent's phone a second time while
-		// they are still talking on the first one.
-		if done, err := s.hasCDR(ctx, callID); err != nil {
-			return uuid.Nil, err
-		} else if done {
-			return callID, ErrAlreadyPlaced
-		}
-		if s.isLive != nil && s.isLive(callID) {
-			return callID, ErrAlreadyPlaced
-		}
+	// The same idempotency record DialAI uses, and for a sharper reason here:
+	// the caller is a system that retries on a timeout, and a retried
+	// click-to-dial raises the agent's phone a second time while they are
+	// still talking on the first one.
+	callID, err := s.checkPlaced(ctx, req.CallID)
+	if errors.Is(err, ErrAlreadyPlaced) {
+		return callID, err
+	}
+	if err != nil {
+		return uuid.Nil, err
 	}
 	// After the idempotency check: a call already placed is reported as
 	// placed, even if its number joined the list since.
 	if err := s.checkDNC(ctx, destination); err != nil {
 		return uuid.Nil, err
 	}
+	if err := s.claimCall(callID); err != nil {
+		return callID, err
+	}
+	// Held until the placement is tracked (expectLeg), which then holds it.
+	isClaimHeld := true
+	defer func() {
+		if isClaimHeld {
+			s.unclaim(callID)
+		}
+	}()
 
 	if err := s.limiter.Take(ctx); err != nil {
 		return uuid.Nil, err
@@ -612,7 +622,17 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		legKind: "AGENT", legLabel: agentExtension,
 	}
 	s.expectLeg(job)
+	isClaimHeld = false
 	jobID, err := s.sw.Originate(agentLeg, s.sw.Endpoint(agentExtension), vars)
+	if isUnconfirmed(err) {
+		// The agent's phone may still ring and answer by itself: arm what its
+		// answer does, keep everything held, and let the switch decide.
+		s.holdUnconfirmed(job, s.transferOnAnswer(callID, agentLeg.String(), destination))
+		s.log.Warn("click-to-dial unconfirmed: the switch did not answer the originate in time; tracking it",
+			"callId", callID, "channelId", agentLeg, "agentExtension", agentExtension,
+			"destination", destination, "error", err)
+		return callID, unconfirmedError(err)
+	}
 	if err != nil {
 		s.abandonLeg(job)
 		s.lines.Release(callID)
@@ -740,7 +760,7 @@ func (s *Service) DialAI(ctx context.Context, req AIDialRequest) (uuid.UUID, err
 }
 
 // PlaceAI is DialAI that also says which originate job it started. On an error
-// the CallID is set only for ErrAlreadyPlaced.
+// the CallID is set only for ErrAlreadyPlaced and ErrPlacementUnconfirmed.
 func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, error) {
 	if s.cfg.EndpointFormat == "" {
 		return Placement{}, ErrNoOutboundEndpoint
@@ -772,26 +792,28 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		language = did.Language
 	}
 
-	callID := req.CallID
-	if callID == uuid.Nil {
-		callID = uuid.Must(uuid.NewV7())
-	} else {
-		// The ledger is the idempotency record: a finished call stays
-		// finished, a running call keeps running, and neither redials.
-		if done, err := s.hasCDR(ctx, callID); err != nil {
-			return Placement{}, err
-		} else if done {
-			return Placement{CallID: callID}, ErrAlreadyPlaced
-		}
-		if s.isLive != nil && s.isLive(callID) {
-			return Placement{CallID: callID}, ErrAlreadyPlaced
-		}
+	callID, err := s.checkPlaced(ctx, req.CallID)
+	if errors.Is(err, ErrAlreadyPlaced) {
+		return Placement{CallID: callID}, err
+	}
+	if err != nil {
+		return Placement{}, err
 	}
 	// After the idempotency check: a call already placed is reported as
 	// placed, even if its number joined the list since.
 	if err := s.checkDNC(ctx, req.To); err != nil {
 		return Placement{}, err
 	}
+	if err := s.claimCall(callID); err != nil {
+		return Placement{CallID: callID}, err
+	}
+	// Held until the placement is tracked (expectLeg), which then holds it.
+	isClaimHeld := true
+	defer func() {
+		if isClaimHeld {
+			s.unclaim(callID)
+		}
+	}()
 
 	if err := s.limiter.Take(ctx); err != nil {
 		return Placement{}, err
@@ -861,7 +883,17 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		legKind: "TRUNK", legLabel: req.To,
 	}
 	s.expectLeg(job)
+	isClaimHeld = false
 	jobID, err := s.sw.Originate(customerLeg, endpoint, vars)
+	if isUnconfirmed(err) {
+		// The customer may still be called: arm the bridge to the bot, keep
+		// the line and the business data, and let the switch decide.
+		s.holdUnconfirmed(job, s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To, did.IsRecordingEnabled,
+			campaignRef{campaignID: req.CampaignID, attemptID: req.AttemptID}))
+		s.log.Warn("ai outbound unconfirmed: the switch did not answer the originate in time; tracking it",
+			"callId", callID, "channelId", customerLeg, "to", req.To, "did", did.Number, "error", err)
+		return Placement{CallID: callID}, unconfirmedError(err)
+	}
 	if err != nil {
 		s.abandonLeg(job)
 		s.lines.Release(callID)
