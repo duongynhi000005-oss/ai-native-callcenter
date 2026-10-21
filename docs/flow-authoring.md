@@ -140,6 +140,8 @@ A tool that needs its own service, a key, or more time says so in its `http` blo
 
 The value never appears in the stored flow, an API response (`GET /flows/{flowId}` shows the reference), a log line, an error or what the model is told about the call; an error names the header and the variable. Secrets live only in the environment, so rotating one takes a restart. A variable unset at call time fails the tool.
 
+**Who can use a secret.** Keeping the value out of the flow does not limit who can use it. A secret is not tied to a host: anyone who can write flows (`config:write`) can give a tool any configured secret in a header, point it at any host the deployment's host policy lets tools reach (the whole LAN, by default), and map whatever that backend echoes back into what the bot says or the slots record. So `config:write` amounts to the use of every tool secret on the deployment. Grant it only to people you would trust with those secrets, and give each secret the least privilege at its backend: a read-only key scoped to the one service the tool calls, never an administrator credential.
+
 **The host policy.** Which hosts a tool may reach is the deployment's decision, not the flow author's. It is decided on the address the host resolves to, as the connection is made:
 
 - Private and loopback addresses (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `::1`, `fc00::/7`) need no configuration.
