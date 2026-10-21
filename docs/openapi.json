@@ -7151,11 +7151,8 @@
             "$ref": "#/components/schemas/Role"
           },
           "locale": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Preferred UI locale (lowercase BCP 47 subtag) or null when the user has not chosen one."
+            "type": "string",
+            "description": "The user's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. The same value `User.locale` reads."
           }
         },
         "required": [
@@ -7563,6 +7560,10 @@
           "extensionNumber": {
             "type": "string",
             "description": "The phone bound to this account, allocated from AICC_EXTENSION_RANGE when the account was created, or when a call-taking account without one was saved. Absent for an account with no phone."
+          },
+          "locale": {
+            "type": "string",
+            "description": "The account's preferred UI locale (lowercase BCP 47 subtag), `en` when the account never chose one. Send it back in `UserUpdate`, which replaces the whole account."
           }
         },
         "required": [
@@ -7570,7 +7571,8 @@
           "username",
           "displayName",
           "role",
-          "status"
+          "status",
+          "locale"
         ]
       },
       "UserList": {
@@ -7652,7 +7654,8 @@
           },
           "locale": {
             "type": "string",
-            "maxLength": 8
+            "maxLength": 8,
+            "description": "Preferred UI locale (lowercase BCP 47 subtag). Part of the whole replacement like every other field, so send back the value `User.locale` read to keep it. Absent stores no preference, which then reads as `en`."
           }
         },
         "required": [

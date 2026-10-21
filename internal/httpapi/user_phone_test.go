@@ -96,7 +96,7 @@ func (f *fixture) saveUnchanged(admin string, a store.Account) reply {
 	return f.do(call{method: http.MethodPut, path: "/users/" + a.UserID.String(), cookie: admin,
 		body: map[string]any{
 			"username": a.Username, "displayName": a.DisplayName,
-			"role": a.Role, "status": a.Status,
+			"role": a.Role, "status": a.Status, "locale": readsAs(a.Locale),
 		}})
 }
 

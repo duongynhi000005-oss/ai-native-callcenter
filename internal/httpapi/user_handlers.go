@@ -268,6 +268,13 @@ func accountOut(a store.Account) api.User {
 		DisplayName: a.DisplayName,
 		Role:        api.Role(a.Role),
 		Status:      api.UserStatus(a.Status),
+		// Returned so a read-modify-write keeps it: UserUpdate replaces the
+		// whole account, and a client that never saw the locale would send
+		// none back and clear it (#289).
+		Locale: auth.DefaultLocale,
+	}
+	if a.Locale != nil && *a.Locale != "" {
+		out.Locale = *a.Locale
 	}
 	// Absent rather than empty: an administrator has no agent identity at all,
 	// and an empty string would read as one that is merely unnamed.

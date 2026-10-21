@@ -46,7 +46,21 @@ type Identity struct {
 	Username    string    `json:"username"`
 	DisplayName string    `json:"displayName"`
 	Role        Role      `json:"role"`
-	Locale      *string   `json:"locale"`
+	// Locale is the stored preference, or DefaultLocale when there is none.
+	Locale string `json:"locale"`
+}
+
+// DefaultLocale is what an account that never chose a UI locale reads as,
+// everywhere the account is read (owner decisions on #289). Saving such an
+// account back unchanged stores it, which reads the same.
+const DefaultLocale = "en"
+
+// localeOf is the stored locale, or the default where none was chosen.
+func localeOf(stored *string) string {
+	if stored == nil || *stored == "" {
+		return DefaultLocale
+	}
+	return *stored
 }
 
 // Errors returned by the service. Handlers map them to API error codes.
@@ -169,7 +183,7 @@ func identityOf(u queries.User) Identity {
 		Username:    u.Username,
 		DisplayName: u.DisplayName,
 		Role:        Role(u.Role),
-		Locale:      u.Locale,
+		Locale:      localeOf(u.Locale),
 	}
 }
 

@@ -17,7 +17,7 @@ const as = (role: Role): Identity => ({
   username: role.toLowerCase(),
   displayName: role,
   role,
-  locale: null,
+  locale: 'en',
 })
 
 /** A thrown redirect carries the page it sends the visitor to. */

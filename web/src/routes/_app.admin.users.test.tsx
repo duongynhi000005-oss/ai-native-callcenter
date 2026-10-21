@@ -24,6 +24,8 @@ function userFixture(over: Partial<User>): User {
     displayName: 'Amy',
     role: 'AGENT',
     status: 'ACTIVE',
+    // What an account that never chose one reads as.
+    locale: 'en',
     ...over,
   }
 }
@@ -31,15 +33,15 @@ function userFixture(over: Partial<User>): User {
 const ACCOUNTS: User[] = [
   // An agent whose identity never got a phone.
   userFixture({ userId: id(1), username: 'amy', displayName: 'Amy Lin', agentId: id(11),
-    callcenterName: 'agent-amy' }),
+    callcenterName: 'agent-amy', locale: 'en' }),
   // A suspended supervisor in the same state.
   userFixture({ userId: id(2), username: 'cara', displayName: '王卡拉', role: 'SUPERVISOR',
-    status: 'SUSPENDED', agentId: id(12), callcenterName: 'agent-cara' }),
+    status: 'SUSPENDED', agentId: id(12), callcenterName: 'agent-cara', locale: 'zh' }),
   // An administrator: no phone, and none to give.
   userFixture({ userId: id(3), username: 'root', displayName: 'Root', role: 'ADMIN' }),
   // An agent who has one.
   userFixture({ userId: id(4), username: 'wei', displayName: 'Wei', agentId: id(14),
-    callcenterName: 'agent-wei', extensionNumber: '1003' }),
+    callcenterName: 'agent-wei', extensionNumber: '1003', locale: 'zh-CN' }),
 ]
 
 interface Recorded {
@@ -114,8 +116,15 @@ describe('assigning a phone', () => {
       {
         method: 'PUT',
         path: `/users/${id(2)}`,
-        // Exactly what the row reads: nothing about the account changes.
-        body: { username: 'cara', displayName: '王卡拉', role: 'SUPERVISOR', status: 'SUSPENDED' },
+        // Exactly what the row reads, locale included: nothing about the
+        // account changes (#289).
+        body: {
+          username: 'cara',
+          displayName: '王卡拉',
+          role: 'SUPERVISOR',
+          status: 'SUSPENDED',
+          locale: 'zh',
+        },
       },
     ])
     expect(await within(rowOf('cara')).findByText('1004')).toBeInTheDocument()
@@ -135,5 +144,71 @@ describe('assigning a phone', () => {
       'There are no free extension numbers left in the pool.',
     )
     expect(within(rowOf('cara')).queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #289: an update replaces the whole account, so the dialog, which has no
+ * locale field, sends back the locale it read. Leaving it out cleared the
+ * person's stored preference on every save.
+ */
+describe('editing an account', () => {
+  type Typist = ReturnType<typeof renderWithProviders>['user']
+
+  async function editAndSave(username: string, change: (dialog: HTMLElement, user: Typist) => Promise<void>) {
+    const requests = stubUsers(ACCOUNTS)
+    const { user } = renderWithProviders(<Users />)
+    await screen.findByText(username)
+    await user.click(within(rowOf(username)).getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog')
+    await change(dialog, user)
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(requests.some((r) => r.method === 'PUT')).toBe(true))
+    return requests.filter((r) => r.method !== 'GET')
+  }
+
+  it('sends back the locale it read when only the name changes', async () => {
+    const puts = await editAndSave('wei', async (dialog, user) => {
+      const name = within(dialog).getByLabelText(/^name$/i)
+      await user.clear(name)
+      await user.type(name, 'Wei (nights)')
+    })
+    expect(puts).toEqual([
+      {
+        method: 'PUT',
+        path: `/users/${id(4)}`,
+        body: {
+          username: 'wei',
+          displayName: 'Wei (nights)',
+          role: 'AGENT',
+          status: 'ACTIVE',
+          locale: 'zh-CN',
+        },
+      },
+    ])
+  })
+
+  it('keeps the locale when an account is suspended', async () => {
+    const puts = await editAndSave('amy', async (dialog, user) => {
+      await user.selectOptions(within(dialog).getByLabelText(/^status$/i), 'SUSPENDED')
+    })
+    expect(puts[0].body).toEqual({
+      username: 'amy',
+      displayName: 'Amy Lin',
+      role: 'AGENT',
+      status: 'SUSPENDED',
+      locale: 'en',
+    })
+  })
+
+  it('sends en, as read, for an account that never chose a locale', async () => {
+    const puts = await editAndSave('root', async () => {})
+    expect(puts[0].body).toEqual({
+      username: 'root',
+      displayName: 'Root',
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      locale: 'en',
+    })
   })
 })
