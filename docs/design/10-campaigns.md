@@ -405,7 +405,9 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   new `callId` is a second call.
 - **Idempotency covers it, and concurrency.** A `callId` is claimed for one placement from just after
   the do-not-call check until the placement's ending is settled: the job's result, the window, or
-  the placement-failure CDR having been written. Every placement in progress, confirmed or not, is
+  the placement-failure CDR having been written. With the claim held, the registry and the ledger
+  are asked again, so a request that waited while another placed and settled the same `callId`
+  finds it. Every placement in progress, confirmed or not, is
   therefore answered as already placed, and two concurrent requests with one `callId` dial once.
 - **Reconciled from what the switch does:**
   - its channel appears within the window: that is the call. Its answer window restarts at the
@@ -415,14 +417,20 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   - its job result arrives: the bgapi reply that named the Job-UUID never came, so the result is
     matched by the `origination_uuid` in the job's `Job-Command-Arg` (`SwitchEvent.JobChannelID`).
     A failure before any channel is a placement failure with the switch's cause (§5.5);
-  - nothing within the window: the placement-failure CDR (`tech.isPlacementFailure`), with
-    `hangupCause` `PLACEMENT_UNCONFIRMED`, a platform word. The line and the business data are
-    given back.
+  - nothing within the window, and no result from the switch: the placement-failure CDR
+    (`tech.isPlacementFailure`) with `hangupCause` `PLACEMENT_UNCONFIRMED`, a platform word, written
+    when the window ends. The line and the business data are given back. Either placement-failure
+    row is superseded by the record of a late channel (next point), as by any fuller row.
+  - the window is decided under the service's lock, after asking the registry whether the call is
+    live: the dispatch loop gives each event to the coordinator before this service, so a call can
+    be live a moment before `noteChannel` has seen its leg. Such a leg is adopted, its answer window
+    counted from then.
 - **A channel after the window** is hung up the moment it is created (`ALLOTTED_TIMEOUT`, the same
   word as a late answer), not adopted. By then the call is recorded as failed, a campaign may have
   scheduled the contact again, and a leg nobody will bridge must not sit in `park()` on a person.
-  The leg id is remembered for 10 minutes (at most 4,096 of them); a switch later than that is left
-  to the reconcile that follows a reconnect. The channel's own CDR then replaces the placement
+  The leg id is remembered for 10 minutes (at most 4,096 of them). A late leg created while the
+  link was down is ended the same way by the reconcile that follows the reconnect, never re-armed;
+  a switch later than 10 minutes is left to that reconcile's ordinary rules. The channel's own CDR then replaces the placement
   failure, as any fuller row does. This is the one case the owner's decision did not settle; it was
   the smallest safe choice.
 - **Campaigns.** `ClassifyDialError` maps the unconfirmed error to *pending*, not `ORIGINATE_FAILED`.
@@ -433,7 +441,10 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   (`ORIGINATE_FAILED` from the placement-failure row, or the real outcome), or `UNKNOWN` if no row
   could be written.
 
-Not covered, and follow-ups: the same treatment for the other commands whose timeout is still a
+Not covered, and follow-ups: an ESL write has no deadline, so a switch whose socket buffers are
+full blocks the command before its 10 s timer starts; a job result dispatched in the instant
+between the originate's timeout and the placement being held as unconfirmed is not matched, and its
+cause is lost (the window then records `PLACEMENT_UNCONFIRMED`); the same treatment for the other commands whose timeout is still a
 plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an `esl.ErrDown` that
 arrives after the command was written (the link closed while waiting: also ambiguous, still
 answered `503 SWITCH_DOWN`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
