@@ -455,7 +455,7 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 	if err := s.checkDNC(ctx, destination); err != nil {
 		return uuid.Nil, err
 	}
-	if err := s.claimCall(ctx, callID); err != nil {
+	if err := s.claimCall(ctx, callID, req.CallID == uuid.Nil); err != nil {
 		return callID, err
 	}
 	// Held until the placement is tracked (expectLeg), which then holds it.
@@ -807,7 +807,7 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 	if err := s.checkDNC(ctx, req.To); err != nil {
 		return Placement{}, err
 	}
-	if err := s.claimCall(ctx, callID); err != nil {
+	if err := s.claimCall(ctx, callID, req.CallID == uuid.Nil); err != nil {
 		return Placement{CallID: callID}, err
 	}
 	// Held until the placement is tracked (expectLeg), which then holds it.

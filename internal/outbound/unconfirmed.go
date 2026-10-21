@@ -101,8 +101,9 @@ func (s *Service) checkPlaced(ctx context.Context, requested uuid.UUID) (uuid.UU
 // that race with one callId dial once; the second is ErrAlreadyPlaced. It is
 // taken after the pre-send refusals (do-not-call), so those answer every
 // request alike, and before anything is held under the callId (the line, the
-// business data).
-func (s *Service) claimCall(ctx context.Context, callID uuid.UUID) error {
+// business data). isMinted is a callId minted for this request, which nobody
+// else can hold, so the ledger is not asked about it.
+func (s *Service) claimCall(ctx context.Context, callID uuid.UUID, isMinted bool) error {
 	s.mu.Lock()
 	if _, busy := s.placing[callID]; busy {
 		s.mu.Unlock()
@@ -118,6 +119,9 @@ func (s *Service) claimCall(ctx context.Context, callID uuid.UUID) error {
 	// may have placed it and seen it settled since checkPlaced: the call is
 	// then live, or its placement-failure CDR is written, since it stayed
 	// claimed until it was.
+	if isMinted {
+		return nil
+	}
 	if s.isLiveCall(callID) {
 		s.unclaim(callID)
 		return ErrAlreadyPlaced
