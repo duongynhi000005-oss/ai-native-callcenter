@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { KeyRound, Pencil, Trash2 } from 'lucide-react'
 import { Dialog, Popover } from 'radix-ui'
 
+import { CopyButton } from '@/components/copy-button'
 import { PageHeader } from '@/components/page-header'
 import { Field, Input, RecordDialog, Select, useRecordForm } from '@/components/record-dialog'
 import { DataTable, TBody, THead, TableMessage, Td, Th, Tr } from '@/components/table'
@@ -34,6 +35,7 @@ function ExtensionsPage() {
   // state, not in an input's value, not in anything a draft or a devtools
   // panel would carry. State holds only whether one exists.
   const minted = useRef<string | null>(null)
+  const mintedShown = useRef<HTMLElement>(null)
   const [hasMinted, setHasMinted] = useState(false)
 
   const rows = data?.items ?? []
@@ -170,10 +172,13 @@ function ExtensionsPage() {
           >
             {hasMinted ? (
               <span className="flex items-center gap-2">
-                <code className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm">
+                <code
+                  ref={mintedShown}
+                  className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm"
+                >
                   {minted.current}
                 </code>
-                <CopyButton key={minted.current} value={minted.current ?? ''} />
+                <CopyButton key={minted.current} value={minted.current ?? ''} target={mintedShown} />
               </span>
             ) : editing.id ? (
               <span className="flex gap-2">
@@ -232,34 +237,6 @@ function ExtensionsPage() {
 }
 
 /**
- * Puts a secret on the clipboard and says so.
- *
- * The confirmation is the whole point: a credential copies silently, so a
- * button that does not change is indistinguishable from one that did nothing,
- * and the reader's next move is to select the text by hand. It stays
- * confirmed — re-copying the same string has nothing new to report.
- */
-function CopyButton({ value }: { value: string }) {
-  const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant="outline"
-      disabled={!value}
-      onClick={() => {
-        if (!value) return
-        void navigator.clipboard.writeText(value)
-        setCopied(true)
-      }}
-    >
-      {copied ? t('admin.copied') : t('admin.copy')}
-    </Button>
-  )
-}
-
-/**
  * What a phone was given, shown once and on request.
  *
  * Fetched only when asked, never carried by the list: the read is recorded in
@@ -276,6 +253,7 @@ function RevealPassword({
   onClose: () => void
 }) {
   const { t } = useTranslation()
+  const shown = useRef<HTMLElement>(null)
   const { data, isPending, isError, error } = useQuery({
     queryKey: ['catalog', 'extensions', extension.id, 'password'],
     queryFn: () => catalogApi.extensionPassword(extension.id),
@@ -296,14 +274,17 @@ function RevealPassword({
           <p className="mt-1 text-xs text-muted-foreground">{t('admin.revealHint')}</p>
 
           <div className="mt-3 flex items-center gap-2">
-            <code className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm">
+            <code
+              ref={shown}
+              className="flex-1 truncate rounded-md border bg-background px-2 py-1.5 font-mono text-sm"
+            >
               {isPending
                 ? t('common.loading')
                 : isError
                   ? describeError(error, t)
                   : data?.password}
             </code>
-            <CopyButton key={data?.password} value={data?.password ?? ''} />
+            <CopyButton key={data?.password} value={data?.password ?? ''} target={shown} />
           </div>
 
           <div className="mt-3 flex justify-end">

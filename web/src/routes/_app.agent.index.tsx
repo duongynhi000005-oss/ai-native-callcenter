@@ -1,7 +1,8 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { flushSync } from 'react-dom'
 import { useMutation } from '@tanstack/react-query'
 import {
   ArrowRightLeft, Copy, Grid3x3, Mic, MicOff, Pause, Phone, PhoneOff, PhoneOutgoing,
@@ -15,6 +16,7 @@ import { Select } from '@/components/record-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { copyText, selectContents } from '@/lib/clipboard'
 import { describeError } from '@/lib/errors'
 import { requireRole } from '@/lib/guards'
 import {
@@ -716,38 +718,71 @@ function CallerCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
  *
  * The confirmation is inline rather than a toast: this codebase has no toast
  * layer, and the one it does have for copied credentials — the label changing
- * where the click happened — says the same thing without a second system.
+ * where the click happened — says the same thing without a second system. It
+ * appears only after a write that succeeded. A refused copy (the clipboard
+ * needs a secure context, and this page is often served over plain HTTP) says
+ * so and shows the whole id selected beneath the button, so Ctrl/Cmd+C
+ * finishes the job; it stays until the next attempt or the next call, rather
+ * than vanishing with the selection while the agent reaches for the keys.
  */
 function CallID({ callID }: { callID: string }) {
   const { t } = useTranslation()
-  const [isCopied, setIsCopied] = useState(false)
+  const [outcome, setOutcome] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const wholeID = useRef<HTMLElement>(null)
+  // The id a copy that settles late is checked against: an answer about the
+  // last call says nothing about this one.
+  const current = useRef(callID)
 
-  // A new call is a new id, so a confirmation left over from the last one
-  // would be claiming this one had been copied.
-  useEffect(() => setIsCopied(false), [callID])
+  // A new call is a new id, so an outcome left over from the last one would be
+  // claiming something about this one.
+  useEffect(() => {
+    current.current = callID
+    setOutcome('idle')
+  }, [callID])
 
   useEffect(() => {
-    if (!isCopied) return
-    const timer = setTimeout(() => setIsCopied(false), 2_000)
+    if (outcome !== 'copied') return
+    const timer = setTimeout(() => setOutcome('idle'), 2_000)
     return () => clearTimeout(timer)
-  }, [isCopied])
+  }, [outcome])
 
   return (
-    <button
-      type="button"
-      // The whole uuid, on the element the pointer is already over.
-      title={callID}
-      aria-label={t('agent.copyCallId')}
-      className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-      onClick={() => {
-        void navigator.clipboard.writeText(callID)
-        setIsCopied(true)
-      }}
-    >
-      <span>{isCopied ? t('agent.callIdCopied') : t('agent.callId')}</span>
-      <span className="tabular">{shortenID(callID)}</span>
-      <Copy className="size-3 shrink-0" aria-hidden="true" />
-    </button>
+    <>
+      <button
+        type="button"
+        // The whole uuid, on the element the pointer is already over.
+        title={callID}
+        aria-label={t('agent.copyCallId')}
+        className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        onClick={async () => {
+          const copying = callID
+          const isCopied = await copyText(copying)
+          if (current.current !== copying) return
+          if (isCopied) {
+            setOutcome('copied')
+            return
+          }
+          // Rendered first, so the selection is made on what the agent sees.
+          flushSync(() => setOutcome('failed'))
+          selectContents(wholeID.current)
+        }}
+      >
+        <span>
+          {outcome === 'copied'
+            ? t('agent.callIdCopied')
+            : outcome === 'failed'
+              ? t('agent.callIdCopyFailed')
+              : t('agent.callId')}
+        </span>
+        <span className="tabular">{shortenID(callID)}</span>
+        <Copy className="size-3 shrink-0" aria-hidden="true" />
+      </button>
+      {outcome === 'failed' && (
+        <code ref={wholeID} className="mt-1 block select-all break-all font-mono text-xs">
+          {callID}
+        </code>
+      )}
+    </>
   )
 }
 
