@@ -5,6 +5,220 @@ under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
 run them together. From v0.2.0 on, the GitHub release of the same tag also
 carries the one-line installer's files.
 
+## v0.6.0 - 2026-10-21
+
+### Upgrade notes
+
+- Upgrade both images together, as always: they are published under one tag
+  and the deploy stack names both. The switch image itself has no functional
+  change in this release; only its documentation changed (a trunk needs a
+  mounted gateway file, see Fixed). The application adds migration 00042,
+  which runs at startup: campaign contacts gain `last_attempt_id` and
+  `last_call_id` (new columns with a CHECK that both or neither are set),
+  backfilled from each contact's latest finished attempt, and `callbacks`
+  gains an index on `call_id`. Nothing is dropped or narrowed.
+- On every start the server now gives a phone from `AICC_EXTENSION_RANGE` to
+  each AGENT or SUPERVISOR agent identity that has none, suspended accounts
+  included, keeping its agent id, and mirrors the repaired agents to
+  mod_callcenter. An exhausted pool is logged and does not stop the server.
+  A binding cleared on purpose with `PUT /agents/{agentId}` therefore does
+  not last for a call-taking account: it gets a phone again on its next save
+  or the next start (#268).
+- HTTP tools now connect only through the new outbound host policy, do not
+  follow redirects (a 3xx fails the tool) and no longer use the
+  `HTTP_PROXY`/`HTTPS_PROXY` environment. Private and loopback addresses stay
+  reachable without configuration, and the host of `AICC_BOT_BACKEND_BASE` is
+  always allowed, so existing flows load and send the same requests as
+  before. Link-local, cloud metadata and unspecified addresses are refused
+  even for that host. A tool that names a public backend with the new
+  `baseUrl` needs that host in `AICC_TOOL_ALLOWED_HOSTS` (#286).
+- The server now refuses to start when `AICC_TOOL_ALLOWED_HOSTS` is
+  malformed, including a bare `*` or a single-label wildcard such as `*.com`.
+  With the AI leg enabled, publishing a flow whose HTTP tool header references
+  an unset `AICC_TOOL_SECRET_<NAME>` is refused; saving it as a draft only
+  warns (#286).
+- API contract: `POST /calls` can now answer `202` (same body as `201`) when
+  the switch has not confirmed the placement; the customer may still be
+  called, so a client must not place the call again under a new `callId`
+  (a retry with the same `callId` answers `200` with `isDuplicate`). A link to
+  the switch that is down answers `503 SWITCH_DOWN` there, as every other call
+  operation does, instead of `502` (#221). `CampaignContact` gains
+  `lastCallId` and `lastAttemptId`, and `GET /callbacks` gains a `callId`
+  filter (#188). `User` gains a required `locale`, and `Identity.locale`
+  (`/auth/login`, `/auth/me`) is now a string that reads `en` when the account
+  never chose one, instead of `null` (#289). `PUT /users/{userId}` gives a
+  call-taking account without a phone one, or answers
+  `409 EXTENSION_POOL_EXHAUSTED` (#268). Hold, retrieve and transfer declare
+  the `409 OPERATION_NOT_ALLOWED_FOR_CALL_TYPE` they already answered on an
+  INTERNAL call (#269). A transfer requested by an agent who is not on the
+  call is now refused with the declared `403 NOT_CALL_PARTY` (#239). Nothing
+  was removed, and `make api-breaking` against v0.5.0 reports no breaking
+  change.
+- New settings, both optional: `AICC_TOOL_ALLOWED_HOSTS` (empty lists nothing)
+  and the `AICC_TOOL_SECRET_<NAME>` family, one variable per secret.
+  `.env.example` describes both.
+- Building from source needs Go 1.27.3 or later (#294).
+- The seeded `campaign_lead_followup` flow changed (see Fixed). The seed never
+  replaces a flow that already exists, so a deployment seeded earlier keeps
+  its published revision; load the new one from
+  `internal/seed/flows/campaign_lead_followup.json` with `aicc flowadd` if you
+  use it.
+
+### Added
+
+- HTTP tools can reach a backend of their own, authenticate to it and take
+  more time. A tool's `http` block gains `baseUrl` (an absolute `http`/`https`
+  URL that overrides `AICC_BOT_BACKEND_BASE` for that tool), `headers`,
+  `timeoutMs` (default 5000, from 500 to 10000) and `query`, and `path` may
+  reference required arguments and slots. Substituted values are escaped so a
+  model-supplied value cannot change the host or leave its path segment; an
+  empty, `.`, `..`, object or list value is refused before any connection, as
+  a failure the model can correct. A header value references a secret as
+  `{secrets.NAME}`, resolved from `AICC_TOOL_SECRET_<NAME>` when the call is
+  made; the value is never stored in the flow, returned by the API, logged or
+  shown to the model. `Authorization`, `Cookie` and any header whose name
+  contains `auth`, `token`, `key`, `secret` or `password` must reference a
+  secret, and a secret may appear only in a header value. Logs carry the path
+  template and query parameter names, never rendered values. Which hosts a
+  tool may reach is the deployment's outbound host policy, decided on the
+  resolved address as the connection is made (`AICC_TOOL_ALLOWED_HOSTS`, see
+  Upgrade notes); a refusal fails the tool and logs `http tool connection
+  refused by the outbound host policy` with the host, address and rule. Every
+  field is checked at load. Anyone who can write flows (`config:write`) can
+  send any configured secret to any host the policy allows, so grant it only
+  to people trusted with those secrets. `aicc flowsim` sends a placeholder for
+  every secret. Guide: `docs/flow-authoring.md` 2.4.1 (#286, part A).
+- Campaign leads link to their call by id: a campaign contact names its
+  latest finished attempt and that attempt's call (`lastAttemptId`,
+  `lastCallId`), and `GET /callbacks?callId=` returns the callback a HIGH lead's
+  call filed. The Leads tab resolves a HIGH lead's callback this way instead
+  of matching phone digits, so two campaigns reaching one number no longer
+  show each other's callback, and it links to the call record only when the
+  attempt rang (#188).
+- "Assign a phone" on the users screen, for an AGENT or SUPERVISOR account
+  that has no phone. It saves the account unchanged; `PUT /users/{userId}`
+  now provisions the phone for any call-taking account without one, not only
+  for a promoted administrator, and keeps the existing agent id with its
+  state history and wrap-ups (#268).
+- An isolated end-to-end environment for outbound calls (`deploy/e2e/`,
+  `make e2e-up`, `e2e-smoke`, `e2e-campaign`, `e2e-capacity`, `e2e-down`):
+  PostgreSQL, the published switch image, the application built from the
+  checkout, the mock provider and a scripted callee on one internal network
+  with no way out, guarded against real keys, real trunks and public
+  endpoints before anything starts. It places an AI outbound call through the
+  public API and checks the dialog and the CDR; runs campaigns of US and
+  Chinese numbers through busy, rejected, invalid, unanswered, early-media,
+  do-not-call, answered and retried cases and SIP response probes, with
+  run-wide invariants (provider sessions equal answered dialogs, no redial
+  after an answer, capacity released, one CDR per placed attempt); and checks
+  bot-slot overflow and the DID line limit. It runs in CI on changes to the
+  paths it covers. Built on two test tools that are not shipped in the
+  release images or bundle: `aicc-calleesim`, a SIP callee that plays a
+  scenario per number and attempt, and a scenario mode for
+  `aicc-mockprovider` with scripted speech, tool calls and session end
+  (#242, #243, #244, #245, #246, #247).
+- `make test-stress PKG=... [RUN=...]` for contributors: runs tests with
+  `-race -count=20 -cpu 1,2,8` on a few CPUs kept busy by a parallel test run
+  and busy loops, as a loaded CI runner would. A change that adds or alters a
+  test with goroutines, fakes, sockets or timers runs it, and
+  `CONTRIBUTING.md` describes it with the injected-sleep check (#255).
+
+### Changed
+
+- An internal call (one extension calling another) no longer puts either
+  agent into after-call work. Wrap-up starts when an agent's own answered leg
+  hangs up on a call that is not INTERNAL, decided by the call type stamped at
+  creation, so an internal call transferred out to a customer still owes no
+  wrap-up. Calls a SIP phone dials by itself are still typed INTERNAL whatever
+  they dial (#77), so until that is fixed such a call to a customer number
+  opens no wrap-up either; the browser phone cannot place one (#272).
+- `isAutoAnswer` on an agent now does only what its new description says: the
+  phone answers a call a queue delivers without ringing. A direct dial, a
+  transfer or a colleague's click-to-dial to that extension rings and is
+  answered by hand; the agent's own click-to-dial still answers their phone by
+  itself. Transfers used to auto-answer at every extension, flagged or not,
+  only because of the leaked header fixed below (#266).
+- Agent-placed calls in the CDR journey: when the agent who placed a call
+  handed it on (to a colleague, a queue or an outside number) and left before
+  it ended, the journey keeps an `AGENT` leg for them, timed by their own
+  bridges, and every journey is now listed in the order its legs joined. A
+  call the agent stayed on is still one trunk leg. The `AGENT` leg of an agent
+  who dialled a bot now counts their bridged time rather than answered to
+  released. The demo history gains such calls, and `AICC_SEED=fresh` removes
+  contacts only for the inbound calls the seed created (#267).
+- Go 1.27.3 and newer `golang.org/x/net`, `golang.org/x/crypto` and
+  `google.golang.org/grpc`, for reported vulnerabilities in code the server
+  calls (certificate verification, HTTP/2, `net/http`, `crypto/tls`,
+  `html/template`) (#294).
+
+### Fixed
+
+- An AI outbound call or click-to-dial whose originate reply was late, because
+  the switch had stalled, was answered `502 SWITCH_DOWN` while the switch went
+  on to place it: the customer's phone rang for a call the client had been
+  told failed, a retry with the same `callId` would have dialled again, a
+  campaign counted `ORIGINATE_FAILED` for a ringing phone, and a click-to-dial
+  agent leg could sit parked with nothing to transfer it. A late reply is now
+  an unconfirmed placement: `POST /calls` answers `202`, the line, business
+  data and answer handling stay held, and the placement is tracked for the
+  answer window plus a margin. A channel the switch creates in that time is
+  the call, handled like any other; a failure the switch reports is recorded
+  with its own cause; if nothing happens, a FAILED CDR with `hangupCause`
+  `PLACEMENT_UNCONFIRMED` is written. A channel created after that is hung up
+  (`ALLOTTED_TIMEOUT`) and its own record supersedes the failed one.
+  Concurrent requests with one `callId` dial once, and a campaign attempt in
+  this state stays in flight until it can be settled from a record or as
+  `UNKNOWN` (#221).
+- A click-to-dial's auto-answer request (`Call-Info: answer-after=0`) no
+  longer reaches the carrier or any leg dialled after the agent's: it is
+  removed when the agent's own leg answers, so a call transferred to another
+  extension rings there instead of being answered without ringing (#266).
+- `POST /calls/{callId}/transfer` moved the customer of any call whose id an
+  agent held, even one they were not on. It now requires the requesting agent
+  to have a live leg on the call and answers `403 NOT_CALL_PARTY` otherwise,
+  sending nothing to the switch (#239).
+- Saving an account no longer clears the person's UI locale. `User` never
+  returned `locale`, so a read-modify-write had nothing to send back; it now
+  reads the stored value, or `en`, and the edit dialog and "Assign a phone"
+  send it back (#289).
+- The Realtime client no longer waits forever on a `response.create` the
+  engine silently ignores, which left later lines queued and tool results
+  waiting for a turn that never came. An unanswered request is given up after
+  a bounded wait: a line waiting behind it is asked for instead, otherwise the
+  request is retried once (a line with its direction put in the conversation),
+  and a retry that is not answered either is dropped. A request that was only
+  late still gets one turn. Each case logs one WARN and counts
+  `aicc_provider_response_unanswered_total`. Doubao is unaffected (#231).
+- A hangup that moves the call into a terminal phase with a closing line now
+  waits for a later turn that played audio: an audio-less turn no longer runs
+  the armed ending or counts as the line, and a repeated hangup with nothing
+  said since is refused once with `CALL_ENDING`, asking for the line. A model
+  that insists is hung up after that turn plays; one that never speaks ends at
+  the cap with a warning (#207).
+- The seeded `campaign_lead_followup` flow hears a change of mind: after a
+  HIGH, MEDIUM or LOW stance the bot confirms in one sentence and asks once
+  whether there is anything else, records again if the stance changes, and
+  hangs up on "nothing else", a goodbye or silence. A clear no (`NONE`) and
+  `DO_NOT_CALL` still end the call at once (#206).
+- An audit row is no longer lost when the client disconnects after the
+  handler answered: the trail, and the record of a revealed extension
+  password, are written on a context detached from the request, with a
+  timeout so a stalled database cannot hold the request (#273).
+- Copy buttons work over plain HTTP, where the browser has no clipboard API:
+  the extension SIP password, the API key shown once and the cockpit's call
+  id. "Copied" appears only after a confirmed copy; otherwise the button asks
+  for Ctrl+C (⌘C) and selects the value (#290).
+- The "Set up your phone" card opens soon after the page loads when the page
+  carries no sign of the phone extension, instead of after a full run of
+  unanswered hellos, and its first step is already ticked or unticked when it
+  opens. A page the extension has marked keeps the full run (#292).
+- Docs: the switch's READMEs and its Docker Hub page called
+  `PSTN_GATEWAY_HOST`/`PSTN_GATEWAY_PORT` the whole trunk configuration. The
+  image ships no gateway: a trunk is a gateway file in
+  `conf/sip_profiles/external/` and an outbound route in
+  `conf/dialplan/aicc/`, and without the gateway outbound calls fail with
+  `INVALID_GATEWAY` (#251).
+
 ## v0.5.0 - 2026-10-16
 
 ### Upgrade notes
