@@ -398,8 +398,16 @@ func (d *Dialer) dialFailed(ctx context.Context, c campaign.Campaign, f *flight,
 	}
 	verdict := campaign.ClassifyDialError(err, campaign.DialErrorKinds{
 		NumberOnDNC: outbound.ErrNumberOnDNC, BadNumber: outbound.ErrBadNumber,
-		LineLimit: outbound.ErrDIDChannelsExhausted,
+		LineLimit: outbound.ErrDIDChannelsExhausted, Unconfirmed: outbound.ErrPlacementUnconfirmed,
 	})
+	if verdict.IsPending {
+		// The switch may still place it. The flight stays, and its backstop
+		// (nextCheck) settles it from what the switch did: the CDR of the call
+		// if the channel appeared, or of the failed placement if it never did.
+		d.log.Warn("dialer: the switch has not confirmed the placement; the attempt stays in flight",
+			"campaignId", c.ID, "callId", f.callID, "error", err)
+		return
+	}
 	if verdict.IsVoid {
 		d.voidAttempt(ctx, f, now)
 		return

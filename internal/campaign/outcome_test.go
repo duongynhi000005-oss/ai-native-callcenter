@@ -144,8 +144,8 @@ func TestWhichBudgetEachOutcomePays(t *testing.T) {
 }
 
 func TestTheSyncDialErrors(t *testing.T) {
-	dnc, bad, limit := errors.New("dnc"), errors.New("bad"), errors.New("limit")
-	kinds := DialErrorKinds{NumberOnDNC: dnc, BadNumber: bad, LineLimit: limit}
+	dnc, bad, limit, unconfirmed := errors.New("dnc"), errors.New("bad"), errors.New("limit"), errors.New("unconfirmed")
+	kinds := DialErrorKinds{NumberOnDNC: dnc, BadNumber: bad, LineLimit: limit, Unconfirmed: unconfirmed}
 	tests := []struct {
 		name string
 		err  error
@@ -155,6 +155,7 @@ func TestTheSyncDialErrors(t *testing.T) {
 		{"wrapped", errors.Join(errors.New("dial"), dnc), DialVerdict{Outcome: OutcomeDNCSkipped}},
 		{"a bad number", bad, DialVerdict{Outcome: OutcomeInvalidNumber}},
 		{"the line limit", limit, DialVerdict{IsVoid: true}},
+		{"unconfirmed by the switch", errors.Join(unconfirmed, errors.New("esl command timed out")), DialVerdict{IsPending: true}},
 		{"anything else", errors.New("bgapi send failed"), DialVerdict{Outcome: OutcomeOriginateFailed}},
 		{"limiter cancelled", errCanceled, DialVerdict{Outcome: OutcomeOriginateFailed}},
 	}
