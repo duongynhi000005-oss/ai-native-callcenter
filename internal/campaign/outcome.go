@@ -26,6 +26,10 @@ const (
 	// CauseVanished: the switch no longer had the channel and nothing said
 	// how it ended (telephony.VanishedCause).
 	CauseVanished = "CHANNEL_VANISHED"
+	// CauseBotBridgeUnconfirmed: the customer answered and the switch never
+	// confirmed or ran the bridge to the bot, so the leg was hung up
+	// (outbound.BridgeUnconfirmedCause).
+	CauseBotBridgeUnconfirmed = "BOT_BRIDGE_UNCONFIRMED"
 )
 
 // CallEnd is what a finished call tells about how it went: the facts of the
@@ -102,9 +106,10 @@ func CauseTable() map[string]Outcome {
 //   - An answered customer is never anything but an answered outcome, because
 //     an answered number is never dialled again (owner's decision, design 10
 //     section 7.2). The cause only chooses which: BOT_FAILED when the bot side
-//     failed (the ledger calls the call FAILED, or recovery or a late answer
-//     ended the leg), ANSWERED otherwise. A call lost to CHANNEL_VANISHED is
-//     ANSWERED when a bot had been talking and BOT_FAILED when none had.
+//     failed (the ledger calls the call FAILED, or recovery, a late answer or
+//     a bridge to the bot that never ran ended the leg), ANSWERED otherwise.
+//     A call lost to CHANNEL_VANISHED is ANSWERED when a bot had been talking
+//     and BOT_FAILED when none had.
 //   - A hang-up in the first second, a voicemail and a call that recorded no
 //     lead are ANSWERED: the customer's own ending is not the bot's failure,
 //     so it cannot trip the provider breaker.
@@ -119,7 +124,7 @@ func Classify(e CallEnd) Outcome {
 	}
 	if e.IsAnswered {
 		switch e.HangupCause {
-		case CauseRecovery, CauseLateAnswer:
+		case CauseRecovery, CauseLateAnswer, CauseBotBridgeUnconfirmed:
 			return OutcomeBotFailed
 		case CauseVanished:
 			if e.HasBot {

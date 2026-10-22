@@ -19,7 +19,11 @@ import (
 // says the job was accepted. When that reply does not arrive within the ESL
 // command timeout, nothing is known: the switch may be stalled with the
 // command queued on its socket, and it runs the originate when it recovers,
-// a minute or two later in the incident that found this. Treating the timeout
+// a minute or two later in the incident that found this. The same holds when
+// the link closes after the command was written, or its write is cut off
+// (#302): a job the switch accepted runs whatever happens to the socket. The
+// ESL client reports all of these as esl.ErrTimeout, and esl.ErrDown only for
+// a command none of which was written. Treating the timeout
 // as "not taken" told the client the call failed while the customer's phone
 // rang, left the late leg parked with nobody to bridge it, and let a retry
 // with the same callId dial a second time.
@@ -45,10 +49,11 @@ import (
 //     will bridge must not be left parked on a person.
 
 // ErrPlacementUnconfirmed means the originate was written to the switch and the
-// switch did not confirm it in time. The call may still be placed; it is
-// tracked under its callId, a retry with that callId answers ErrAlreadyPlaced,
-// and if the switch never places it a FAILED CDR with UnconfirmedCause is
-// written once the window has passed. The CallID is set alongside it.
+// switch did not confirm it: not in time, or not before the link closed. The
+// call may still be placed; it is tracked under its callId, a retry with that
+// callId answers ErrAlreadyPlaced, and if the switch never places it a FAILED
+// CDR with UnconfirmedCause is written once the window has passed. The CallID
+// is set alongside it.
 var ErrPlacementUnconfirmed = errors.New("outbound: the switch has not confirmed the placement")
 
 // UnconfirmedCause is the hangupCause of the placement-failure CDR of an
@@ -64,7 +69,9 @@ const (
 	lateLegMax = 4096
 )
 
-// isUnconfirmed reports an originate error that leaves the outcome unknown.
+// isUnconfirmed reports an originate error that leaves the outcome unknown:
+// some of the command was written (esl.ErrTimeout), whether the reply then
+// timed out or the link closed. esl.ErrDown, nothing written, is not one.
 func isUnconfirmed(err error) bool { return errors.Is(err, esl.ErrTimeout) }
 
 // unconfirmedError is what Dial and PlaceAI return for an unconfirmed
@@ -163,16 +170,39 @@ func (s *Service) IsPlacing(callID uuid.UUID) bool {
 // its channel may appear at any point of that window, and its own answer
 // window is counted from then (noteChannel). A placement that a job result
 // already finished is left alone.
+//
+// The job's result may have been dispatched before this runs, between the
+// originate's timeout and now (handleJob kept it on the job). It is applied
+// here, once the placement is held, as a later one would be: a failure
+// before any channel is recorded at once with the switch's cause, not as
+// PLACEMENT_UNCONFIRMED when the window ends.
 func (s *Service) holdUnconfirmed(job *trackedJob, onAnswer func()) {
+	if s.beforeHold != nil {
+		s.beforeHold(job.legID)
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.legJobs[job.legID] != job {
+		s.mu.Unlock()
 		return
 	}
+	job.hasReturned = true
 	window := s.cfg.AnswerWindow + s.margin()
 	s.pending[job.legID] = &pendingLeg{onAnswer: onAnswer, expiresAt: s.now().Add(window)}
 	job.isUnconfirmed = true
 	job.timer = s.afterFunc(window, func() { s.unconfirmedExpired(job) })
+	res := job.result
+	if res == nil {
+		s.mu.Unlock()
+		return
+	}
+	job.result = nil
+	job.jobID = res.jobID
+	hadChannel := job.hadChannel
+	s.forgetJobLocked(job)
+	s.mu.Unlock()
+	s.log.Info("unconfirmed placement's job result arrived before it was held; applying it",
+		"callId", job.callID, "channelId", job.legID, "jobId", res.jobID, "isOk", res.isOK, "cause", res.cause)
+	s.settleJob(job, hadChannel, res.isOK, res.cause)
 }
 
 // unconfirmedExpired ends the wait for an unconfirmed placement. If its channel

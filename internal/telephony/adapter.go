@@ -278,6 +278,11 @@ func (a *Adapter) SendDTMF(channelID, digits string) error {
 // The empty-string default stays NORMAL_CLEARING for the same reason it
 // always did — a missing cause must not fail a hangup — but nothing in this
 // package relies on it any more.
+//
+// An error wrapping esl.ErrTimeout means the kill was written and not
+// confirmed: a stalled switch runs it when it recovers, so the leg may still
+// end. It is not a refusal (#303); EndLeg is how the platform's own endings
+// settle it.
 func (a *Adapter) Hangup(channelID, cause string) error {
 	if cause == "" {
 		cause = "NORMAL_CLEARING"
@@ -292,6 +297,9 @@ func (a *Adapter) Hangup(channelID, cause string) error {
 // transfer to is one aicc defines, and the stock dialplan defines none of
 // them: landing a transfer in `default` would route it by rules written for a
 // different product.
+// An error wrapping esl.ErrTimeout means the transfer was written and not
+// confirmed, and may still run; see Coordinator.TransferLeg for what keeps a
+// second one from racing it.
 func (a *Adapter) TransferToExtension(channelID, extension, context string) error {
 	if context == "" {
 		context = "aicc"
@@ -311,6 +319,10 @@ func (a *Adapter) TransferToExtension(channelID, extension, context string) erro
 // comma, which would split the command inside the {var,var} block and hand
 // bridge a truncated argument (found live — the call died with
 // DESTINATION_OUT_OF_ORDER before the new leg ever routed).
+//
+// An error wrapping esl.ErrTimeout means the bridge was written and not
+// confirmed: the new leg, under newPartyID, may still be dialled when a
+// stalled switch catches up.
 func (a *Adapter) BridgeToEndpoint(channelID string, newPartyID uuid.UUID, endpoint string, vars map[string]string) error {
 	all := map[string]string{"origination_uuid": newPartyID.String()}
 	for k, v := range vars {
@@ -322,9 +334,11 @@ func (a *Adapter) BridgeToEndpoint(channelID string, newPartyID uuid.UUID, endpo
 // Originate creates a new outbound leg parked and waiting, so call control
 // stays with us rather than with the dialplan.
 //
-// An error wrapping esl.ErrTimeout means the switch read the command and did
-// not confirm it in time: the leg may still be created, under partyID, when a
-// stalled switch catches up.
+// An error wrapping esl.ErrTimeout means the command, or part of it, was
+// written and the switch did not confirm it: its reply did not come in time,
+// or the link closed first. The leg may still be created, under partyID, when
+// a stalled switch catches up or a job it accepted runs. esl.ErrDown means
+// nothing was written: no leg can come of it.
 func (a *Adapter) Originate(partyID uuid.UUID, endpoint string, vars map[string]string) (string, error) {
 	all := map[string]string{
 		"origination_uuid":   partyID.String(),
@@ -334,6 +348,26 @@ func (a *Adapter) Originate(partyID uuid.UUID, endpoint string, vars map[string]
 		all[k] = v
 	}
 	return a.cmd.BgAPI(fmt.Sprintf("originate {%s}%s &park()", renderOriginateVars(all), endpoint))
+}
+
+// ChannelExists asks the switch whether a channel is still up. It is how a
+// command whose reply never came (esl.ErrTimeout) is settled: the answer comes
+// from a switch that is answering again, and on one link the switch runs
+// commands in the order they were written, so whatever was sent before this
+// question has been run by the time it is answered.
+func (a *Adapter) ChannelExists(channelID string) (bool, error) {
+	cmd := "uuid_exists " + channelID
+	reply, err := a.cmd.API(cmd)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", cmd, err)
+	}
+	switch strings.TrimSpace(reply) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("%s: unexpected reply %q", cmd, strings.TrimSpace(reply))
 }
 
 // StartRecording and StopRecording control a call's recording.

@@ -411,6 +411,41 @@ func (e *Engine) CloseAtUnhungFarewell() string {
 	return e.enter(target)
 }
 
+// ReturnTo puts the call back in a phase it moved out of, because the move
+// never happened on the line: a transfer to a person that the switch never
+// ran leaves the call in the terminal phase the transfer led to ("you are
+// being put through"), where no rule fires and no guard of a live
+// conversation runs, while the caller is in fact still talking to the bot.
+//
+// It is not entering the phase. No visit is counted and no announce is due:
+// the caller has been in this phase before and heard its line. What the move
+// changed is put back: the phase and its "node" slot. What measures the
+// conversation since its last progress starts over, as on any phase change:
+// the turns-without-a-tool count, the run of silence (the silence the caller
+// sat through while the platform waited on the switch was not theirs), and
+// whether the next turn answers the caller or a tool. Collected slots, tool
+// results and the maxTurns count stay: they happened.
+//
+// It reports false and changes nothing for a phase the flow does not have, or
+// a terminal one, which would leave the call where it is.
+func (e *Engine) ReturnTo(nodeID string) bool {
+	node, ok := e.spec.Node(nodeID)
+	if !ok || node.IsTerminal {
+		e.log.Error("cannot return to the phase", "node", nodeID, "from", e.current.id,
+			"isKnown", ok)
+		return false
+	}
+	from := e.current.id
+	e.current = node
+	e.slots["node"] = nodeID
+	e.resetTurnsWithoutTool()
+	e.slots["noInput.count"] = 0
+	e.isCallerAwaitingReply = false
+	e.isToolReplyNext = false
+	e.log.Info("flow returned to phase", "node", nodeID, "from", from)
+	return true
+}
+
 // resetTurnsWithoutTool starts the wall's count over.
 func (e *Engine) resetTurnsWithoutTool() {
 	e.turnsWithoutTool = 0

@@ -103,6 +103,18 @@ type callActions struct {
 	// model answering the handover cue with hangup after the transfer has run
 	// cannot arm a second ending.
 	isEndingLocked bool
+	// isHandingOver says a transfer the switch did not confirm is being
+	// settled (handover.go): the session is hushed and the ending locked.
+	isHandingOver bool
+	// isTransferFailed says a transfer on this call never ran; no other is
+	// sent (handover.go).
+	isTransferFailed bool
+	// failedHandovers carries a handover that never ran from the goroutine
+	// that settled it to the call's own (drive), which alone may move the
+	// flow (handoversFailed).
+	failedHandovers chan failedHandover
+	// handoverAfter replaces time.After for the handover's waits. Tests only.
+	handoverAfter func(time.Duration) <-chan time.Time
 }
 
 // TransferToAgent checks the queue can take the caller, then arms the
@@ -112,6 +124,10 @@ func (a *callActions) TransferToAgent(ctx context.Context, request flow.Transfer
 		a.log.Info("transfer ignored: the call's time limit has already decided how it ends",
 			"asked", request.Queue)
 		return flow.Succeeded(nil, ""), nil
+	}
+	if refused, isFailed := a.transferFailed(); isFailed {
+		a.log.Info("transfer refused: a transfer on this call already never ran", "asked", request.Queue)
+		return refused, nil
 	}
 	if isArmed, isTransfer := a.armedState(); isArmed {
 		a.log.Info("transfer ignored: the call's ending is already armed",
@@ -175,8 +191,14 @@ func (a *callActions) TransferToAgent(ctx context.Context, request flow.Transfer
 		// and naming one here is how the bot came to hand its callers to a
 		// context where the queue extension does not exist. They heard hold
 		// music and joined nothing.
-		if err := a.orchestrator.cfg.Switch.TransferToExtension(
-			a.callerChannel, queue.ExtNumber, ""); err != nil {
+		err := a.orchestrator.cfg.Switch.TransferToExtension(a.callerChannel, queue.ExtNumber, "")
+		if isUnconfirmed(err) {
+			// Sent and not answered: the switch may still move the caller,
+			// and closing our leg now would race it (handover.go).
+			a.awaitHandover(queue, request.FromPhase)
+			return
+		}
+		if err != nil {
 			a.log.Error("transfer failed", "queue", queue.Name, "error", err)
 		}
 		// Our SIP leg's job is done either way; the caller's leg has moved on.
@@ -731,7 +753,11 @@ func (a *callActions) rescueCaller() {
 				a.log.Info("rescuing the caller to the fallback queue", "queue", queue.Name)
 				a.handOnCaller()
 				if err := a.orchestrator.cfg.Switch.TransferToExtension(
-					a.callerChannel, queue.ExtNumber, ""); err != nil {
+					a.callerChannel, queue.ExtNumber, ""); isUnconfirmed(err) {
+					// The conversation is over either way; the switch may
+					// still move the caller when it recovers.
+					a.log.Warn("rescue transfer sent and not confirmed; the switch may still run it", "error", err)
+				} else if err != nil {
 					a.log.Error("rescue transfer failed", "error", err)
 				}
 				break

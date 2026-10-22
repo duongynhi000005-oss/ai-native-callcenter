@@ -63,6 +63,7 @@ func (*countingSwitch) TransferToExtension(string, string, string) error { retur
 func (*countingSwitch) Hangup(string, string) error                      { return nil }
 func (*countingSwitch) SetVariable(string, string, string) error         { return nil }
 func (*countingSwitch) StartCallRecording(string, string) error          { return nil }
+func (*countingSwitch) ChannelExists(string) (bool, error)               { return true, nil }
 func (*countingSwitch) Endpoint(ext string) string                       { return "user/" + ext + "@test" }
 
 func (s *countingSwitch) count() int {

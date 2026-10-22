@@ -553,6 +553,15 @@ func (u *UAS) handleInvite(msg *sipMessage, addr *net.UDPAddr) {
 	// fresh slot, and at capacity gets 486.
 	key := reservationKey(msg)
 	switch {
+	case key != "" && u.cfg.Slots.IsWithdrawn(key):
+		// The answered leg this bridge was for waited past its window for a
+		// bridge the switch did not confirm, and is being hung up (#303). A
+		// conversation started now would be with nobody, and would take a
+		// slot it no longer holds.
+		u.send(buildReject(msg, "480 Temporarily Unavailable", newTag()), addr)
+		u.log.Warn("invite refused: its reservation was withdrawn, the leg it was for is being ended",
+			"callId", callID, "reservation", key)
+		return
 	case key != "" && u.cfg.Slots.Consume(key):
 		u.log.Info("bot slot taken from reservation", "callId", callID, "reservation", key)
 	case u.cfg.Slots.TryAcquire():

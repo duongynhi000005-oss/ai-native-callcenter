@@ -193,6 +193,20 @@ func (r *callRecorder) markHandedOver(queueID uuid.UUID) {
 	r.mu.Unlock()
 }
 
+// markHandoverFailed records that the transfer the switch was told to make
+// never ran (handover.go): the caller did not go to the queue, and the
+// conversation goes on. The decision's summary and reason stay; the queue and
+// the TRANSFER ending go, so a later ending marks itself as it always does.
+func (r *callRecorder) markHandoverFailed() {
+	r.mu.Lock()
+	r.isTransferred = false
+	r.transferQueue = nil
+	if r.endReason == "TRANSFER" {
+		r.endReason = ""
+	}
+	r.mu.Unlock()
+}
+
 // markUnbackedClaim records one kind of claim the bot made with no tool call
 // behind it.
 func (r *callRecorder) markUnbackedClaim(kind string) {

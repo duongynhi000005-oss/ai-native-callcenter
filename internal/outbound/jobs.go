@@ -70,7 +70,22 @@ type trackedJob struct {
 	// isUnconfirmed: the originate timed out, so the Job-UUID is unknown and
 	// the placement is tracked by its leg alone (unconfirmed.go).
 	isUnconfirmed bool
-	timer         stopper
+	// hasReturned is set once the originate has returned and its outcome
+	// was taken in hand (attachJob or holdUnconfirmed). Until then a result
+	// matched by the leg is kept in result, and applied by whichever of the
+	// two runs: it cannot be applied before, because the caller is about to
+	// arm the answer or hold the placement, and would undo it.
+	hasReturned bool
+	result      *jobResult
+	timer       stopper
+}
+
+// jobResult is a BACKGROUND_JOB result kept for a placement whose originate
+// has not returned yet.
+type jobResult struct {
+	jobID string
+	isOK  bool
+	cause string
 }
 
 // stopper is a timer that can be stopped: a *time.Timer, or a test's own.
@@ -114,10 +129,23 @@ func (s *Service) abandonLeg(job *trackedJob) {
 	delete(s.placing, job.callID)
 }
 
-// attachJob gives an expected leg the Job-UUID bgapi returned. A failure that
-// was already dispatched is applied at once.
+// attachJob gives an expected leg the Job-UUID bgapi returned. A result that
+// was already dispatched is applied at once: one matched by the leg and kept
+// on the job (handleJob), or a failure kept by its Job-UUID.
 func (s *Service) attachJob(job *trackedJob, jobID string) {
 	s.mu.Lock()
+	job.hasReturned = true
+	if res := job.result; res != nil {
+		job.result = nil
+		hadChannel := job.hadChannel
+		job.jobID = res.jobID
+		s.forgetJobLocked(job)
+		s.mu.Unlock()
+		s.log.Info("originate job finished before its reply was handled",
+			"callId", job.callID, "jobId", res.jobID, "isOk", res.isOK, "cause", res.cause)
+		s.settleJob(job, hadChannel, res.isOK, res.cause)
+		return
+	}
 	if jobID == "" {
 		// Nothing to correlate with; the CDR alone will tell.
 		s.forgetJobLocked(job)
@@ -194,13 +222,26 @@ func (s *Service) noteChannel(channelID string) {
 }
 
 // handleJob consumes one BACKGROUND_JOB result.
+//
+// A placement that has no Job-UUID yet is recognised by the leg the command
+// asked for (JobChannelID), registered by expectLeg before the originate was
+// sent: an unconfirmed placement, which never learns its Job-UUID, and one
+// whose originate has not returned yet, because the result can be dispatched
+// before the bgapi reply is handled or before an originate that timed out is
+// held (#302). The second kind keeps the result for attachJob or
+// holdUnconfirmed to apply, so the switch's cause is never lost to a window.
 func (s *Service) handleJob(ev telephony.SwitchEvent) {
 	s.mu.Lock()
 	job := s.jobs[ev.JobID]
 	if job == nil && ev.JobChannelID != "" {
-		// An unconfirmed placement never learnt its Job-UUID; its result is
-		// recognised by the leg the command asked for.
-		if j := s.legJobs[ev.JobChannelID]; j != nil && j.isUnconfirmed && j.jobID == "" {
+		if j := s.legJobs[ev.JobChannelID]; j != nil && j.jobID == "" {
+			if !j.hasReturned {
+				if ev.IsJobOK || ev.JobCause != "" {
+					j.result = &jobResult{jobID: ev.JobID, isOK: ev.IsJobOK, cause: ev.JobCause}
+				}
+				s.mu.Unlock()
+				return
+			}
 			j.jobID = ev.JobID
 			job = j
 		}
@@ -224,13 +265,18 @@ func (s *Service) handleJob(ev telephony.SwitchEvent) {
 	s.forgetJobLocked(job)
 	hadChannel := job.hadChannel
 	s.mu.Unlock()
+	s.settleJob(job, hadChannel, ev.IsJobOK, ev.JobCause)
+}
 
-	if ev.IsJobOK {
+// settleJob acts on a job's result once the job has left the maps, which is
+// what makes it run once.
+func (s *Service) settleJob(job *trackedJob, hadChannel, isOK bool, cause string) {
+	if isOK {
 		s.unclaim(job.callID)
-		s.log.Debug("originate job ok", "callId", job.callID, "jobId", ev.JobID)
+		s.log.Debug("originate job ok", "callId", job.callID, "jobId", job.jobID)
 		return
 	}
-	s.finishJob(job, hadChannel, ev.JobCause)
+	s.finishJob(job, hadChannel, cause)
 }
 
 // finishJob acts on a failed job that has already left the map, so it runs
@@ -272,8 +318,10 @@ func (s *Service) jobExpired(job *trackedJob) {
 		return
 	}
 	s.forgetJobLocked(job)
-	delete(s.placing, job.callID)
 	s.mu.Unlock()
+	// The claim goes last, after the line: a retry with this callId may claim
+	// it the moment it is free, and must not have its line released under it.
+	defer s.unclaim(job.callID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -578,6 +578,7 @@ const (
 	ErrorCodeSWITCHDOWN                     ErrorCode = "SWITCH_DOWN"
 	ErrorCodeTERMINALANNOUNCEREQUIRED       ErrorCode = "TERMINAL_ANNOUNCE_REQUIRED"
 	ErrorCodeTRANSCRIPTIONDISABLED          ErrorCode = "TRANSCRIPTION_DISABLED"
+	ErrorCodeTRANSFERINPROGRESS             ErrorCode = "TRANSFER_IN_PROGRESS"
 	ErrorCodeUSERDATATOOLARGE               ErrorCode = "USER_DATA_TOO_LARGE"
 	ErrorCodeUSERSUSPENDED                  ErrorCode = "USER_SUSPENDED"
 	ErrorCodeVALIDATIONFAILED               ErrorCode = "VALIDATION_FAILED"
@@ -655,6 +656,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeTERMINALANNOUNCEREQUIRED:
 		return true
 	case ErrorCodeTRANSCRIPTIONDISABLED:
+		return true
+	case ErrorCodeTRANSFERINPROGRESS:
 		return true
 	case ErrorCodeUSERDATATOOLARGE:
 		return true

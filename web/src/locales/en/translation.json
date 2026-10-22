@@ -130,6 +130,7 @@
     "CAMPAIGN_FIELD_LOCKED": "That cannot be changed while the campaign is running, paused or finished.",
     "CAMPAIGN_INVALID_TRANSITION": "The campaign is not in a state that allows this.",
     "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE": "This kind of call does not offer that.",
+    "TRANSFER_IN_PROGRESS": "A transfer of this caller is already on its way. Wait for it to complete.",
     "LAST_ADMIN": "This would leave nobody able to administer the platform.",
     "EXTENSION_POOL_EXHAUSTED": "There are no free extension numbers left in the pool.",
     "rules": {

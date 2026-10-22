@@ -348,6 +348,11 @@ type Call struct {
 
 	CreatedAt time.Time
 	EndedAt   time.Time
+
+	// transfers are the legs of this call with a transfer on its way, by
+	// channel (transfer.go). Never on the wire: a client learns the outcome
+	// from the events the transfer causes.
+	transfers map[string]transferClaim
 }
 
 // QueueFacts is one passage through a queue: from joining it to leaving it.

@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -25,17 +28,52 @@ type fakeSwitch struct {
 	// switch reads the command and then sits on it, as a loaded FreeSWITCH
 	// does. Nothing after it on the connection is read until it is closed.
 	stall chan struct{}
+
+	// deafen, when set, makes the first connection stop reading after it
+	// has answered the event subscription, until deafen is closed: a switch
+	// whose socket buffers fill up. It then reads what the client managed to
+	// write, to the end of the stream, into the connection's heard.
+	deafen   chan struct{}
+	isDeafed atomic.Bool
+
+	// hangUpOnBgapi is how many bgapi commands are read and answered by
+	// closing the connection, with no reply.
+	hangUpOnBgapi atomic.Int32
 }
 
 type fakeConn struct {
 	net.Conn
 	reader *bufio.Reader
 	cmds   chan string
+
+	// heard is everything a deafened connection had been sent, closed once
+	// it is read.
+	heard     []byte
+	heardDone chan struct{}
 }
 
 func newFakeSwitch(t *testing.T, password string) *fakeSwitch {
+	return newFakeSwitchBuffered(t, password, 0)
+}
+
+// newFakeSwitchBuffered is a fake switch whose connections have a receive
+// buffer of about rcvBuf bytes (0 leaves the system's), set on the listening
+// socket so it is in force from the handshake on.
+func newFakeSwitchBuffered(t *testing.T, password string, rcvBuf int) *fakeSwitch {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	lc := net.ListenConfig{}
+	if rcvBuf > 0 {
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var serr error
+			if err := c.Control(func(fd uintptr) {
+				serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, rcvBuf)
+			}); err != nil {
+				return err
+			}
+			return serr
+		}
+	}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -57,7 +95,8 @@ func newFakeSwitch(t *testing.T, password string) *fakeSwitch {
 func (f *fakeSwitch) addr() string { return f.ln.Addr().String() }
 
 func (f *fakeSwitch) serve(conn net.Conn) {
-	fc := &fakeConn{Conn: conn, reader: bufio.NewReader(conn), cmds: make(chan string, 16)}
+	fc := &fakeConn{Conn: conn, reader: bufio.NewReader(conn), cmds: make(chan string, 16),
+		heardDone: make(chan struct{})}
 
 	fmt.Fprint(conn, "Content-Type: auth/request\n\n")
 
@@ -83,12 +122,22 @@ func (f *fakeSwitch) serve(conn net.Conn) {
 		case strings.HasPrefix(cmd, "event "):
 			fc.cmds <- cmd
 			fmt.Fprint(conn, "Content-Type: command/reply\nReply-Text: +OK event listener enabled plain\n\n")
+			if f.deafen != nil && f.isDeafed.CompareAndSwap(false, true) {
+				<-f.deafen
+				fc.heard, _ = io.ReadAll(fc.reader)
+				close(fc.heardDone)
+				return
+			}
 		case strings.HasPrefix(cmd, "api "):
 			fc.cmds <- cmd
 			body := "+OK " + strings.TrimPrefix(cmd, "api ")
 			fmt.Fprintf(conn, "Content-Type: api/response\nContent-Length: %d\n\n%s", len(body), body)
 		case strings.HasPrefix(cmd, "bgapi "):
 			fc.cmds <- cmd
+			if f.hangUpOnBgapi.Add(-1) >= 0 {
+				conn.Close()
+				return
+			}
 			if f.stall != nil {
 				<-f.stall
 			}

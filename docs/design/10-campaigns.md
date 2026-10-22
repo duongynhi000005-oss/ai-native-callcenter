@@ -396,6 +396,17 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
 `esl.ErrDown`, and an originate that ends with it is an **unconfirmed placement**
 (`outbound.ErrPlacementUnconfirmed`, `internal/outbound/unconfirmed.go`). Decided 2026-10-21:
 
+- **What the ESL client reports (#302).** One deadline, the command timeout counted from the call,
+  bounds a command's turn to write, its write (`SetWriteDeadline`: a switch that stops reading fills
+  the socket buffers and blocks the write) and its reply, so no caller waits longer whatever the
+  switch does. `esl.ErrTimeout` is any command some of whose bytes reached the connection without a
+  reply: the reply timed out, the link closed after the write (a bgapi job the switch accepted runs
+  whatever happens to the socket), or the write was cut off. A cut-off or failed write closes the
+  link before the next command may write, since a half-written command leaves the stream unframed;
+  the `Link` reconnects. `esl.ErrDown` is only a command none of whose bytes were written: the link
+  was closed before its turn, it waited out its timeout for a turn, or the kernel took none of its
+  bytes. Only that answers `503 SWITCH_DOWN`.
+
 - **Nothing is undone.** The line, the business data and the continuation armed for the answer (the
   bridge to the bot, or click-to-dial's transfer to the destination) stay held, and the placement
   stays tracked under the leg id it minted, for the answer window plus the job margin
@@ -416,7 +427,11 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
     comes from its events;
   - its job result arrives: the bgapi reply that named the Job-UUID never came, so the result is
     matched by the `origination_uuid` in the job's `Job-Command-Arg` (`SwitchEvent.JobChannelID`).
-    A failure before any channel is a placement failure with the switch's cause (§5.5);
+    A failure before any channel is a placement failure with the switch's cause (§5.5), written at
+    once. The leg is registered before the originate is sent, so a result is matched whenever it
+    arrives, also before the originate has returned or before the placement is held as
+    unconfirmed (#302): it is kept on the placement and applied as soon as the placement is held,
+    or, for an originate whose reply did arrive, when the reply's job is attached. It is applied once;
   - nothing within the window, and no result from the switch: the placement-failure CDR
     (`tech.isPlacementFailure`) with `hangupCause` `PLACEMENT_UNCONFIRMED`, a platform word, written
     when the window ends. The line and the business data are given back. Either placement-failure
@@ -441,15 +456,55 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   (`ORIGINATE_FAILED` from the placement-failure row, or the real outcome), or `UNKNOWN` if no row
   could be written.
 
-Not covered, and follow-ups: an ESL write has no deadline, so a switch whose socket buffers are
-full blocks the command before its 10 s timer starts; a job result dispatched in the instant
-between the originate's timeout and the placement being held as unconfirmed is not matched, and its
-cause is lost (the window then records `PLACEMENT_UNCONFIRMED`); the same treatment for the other commands whose timeout is still a
-plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an `esl.ErrDown` that
-arrives after the command was written (the link closed while waiting: also ambiguous, still
-answered `503 SWITCH_DOWN`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
+Not covered, and follow-ups: an HTTP access log, and a `GET /calls/{callId}`, which the contract
 does not have: a client polls `GET /calls` or the event stream while the call is live and
-`GET /cdrs/{callId}` once it has ended.
+`GET /cdrs/{callId}` once it has ended. The other commands are §5.7.
+
+### 5.7 Every other command the switch did not confirm (#303)
+
+A stalled switch runs a `uuid_kill` or a `uuid_transfer` late exactly as it runs an originate late,
+so `esl.ErrTimeout` from any of them is "sent, not confirmed", never a failure the switch decided,
+and nothing is retried blindly.
+
+- **The API.** Every call operation answered through `callResult` (answer, hold, retrieve, mute,
+  unmute, hangup, transfer, DTMF, monitor) answers `202`, as it does for success; the contract's 202
+  says the outcome arrives as an event. `esl.ErrDown` keeps `503 SWITCH_DOWN`, a switch refusal
+  (`-ERR …`) keeps `500`.
+- **One transfer of a leg at a time** (`internal/telephony/transfer.go`). The leg is claimed in its
+  call's actor before `uuid_transfer` is sent, by the agent's `transferCall` and by the bot's
+  handover alike (the bot's switch routes its transfer through `Coordinator.TransferLeg`). A second
+  transfer while the claim stands answers `409 TRANSFER_IN_PROGRESS`, nothing sent. The switch
+  answering releases it; an unanswered one keeps it until the leg's events show it moved (unbridge,
+  bridge, queue join, hangup) or a minute has passed (`transferInFlightFor`).
+- **The bot's handover** (`internal/aicall/handover.go`). An unconfirmed transfer does not close the
+  bot leg (that raced the late transfer, and with the teardown rule already restored could hang the
+  caller up). The session is hushed both ways and every other ending locked; the bot leg ending
+  settles it; after 20 s (`handoverWait`) the switch is asked whether the caller's channel exists.
+  It answers commands in order on a link, so a bot leg still up then means the transfer did not run:
+  the conversation goes on, the teardown rule goes back to the bot bridge's, and `transfer_to_agent`
+  is refused (`TRANSFER_FAILED`) for the rest of the call, so no second transfer can race a first
+  that runs after all. The flow goes back to the phase `transfer_to_agent` was called in
+  (`Engine.ReturnTo`: no visit counted, no `announce` said again, the silence and
+  turns-without-a-tool counts started over), not the terminal phase the transfer led to, where no
+  rule fires and neither the time limit nor `closingTarget` would ever end the call. The settling
+  goroutine hands the failure to the call's own (`drive`), which moves the flow back, re-pins the
+  standing instructions (instructions only), then lifts the hush and tells the model the transfer
+  failed so it offers a message. A provider failure after that sends no rescue transfer: the bot
+  leg closes unmarked and the dialplan's fallback takes the caller, as for any bot that vanished.
+  The time limit's own handover ends the call instead (`SESSION_LIMIT`). A switch that answers
+  nothing after three questions leaves the caller to the dialplan.
+- **The platform's own endings** (`telephony.EndLeg`: overflow, late answer, recovery, the
+  supervisor's previous monitoring leg, a bridge that never ran). The kill is sent once; one the
+  switch did not answer is followed after 20 s (`HangupCheckAfter`) by `uuid_exists`, and only a leg
+  the switch still has is stamped and killed a second time.
+- **The bridge to the bot** (`internal/outbound/bridge.go`). The slot reservation is extended before
+  the command over its timeout and a 20 s window after it (`bridgeUnconfirmedFor`), since a late
+  INVITE would otherwise find it expired. The bot leg's `CHANNEL_CREATE` (or the customer's bridge
+  or hangup) settles it; the INVITE consumes the reservation as usual. When the window ends, the
+  reservation is withdrawn (`BotSlots.Withdraw`): one the INVITE consumed means the bridge ran; one
+  still held means it did not, the key is refused to any later INVITE (`480`) for 10 minutes, and
+  the customer leg is hung up with `hangupCause` `BOT_BRIDGE_UNCONFIRMED`, a platform word stamped
+  like `OVERFLOW`. A campaign attempt so ended is `BOT_FAILED`.
 
 ---
 
@@ -655,7 +710,7 @@ any channel (§5.5) — not from `releaseReason` alone, because `FAILED` folds a
 | outcome | typical causes | dialled again? | default interval | budget |
 |---|---|---|---|---|
 | `ANSWERED` | answered, any talk time | no — contact `DONE` | — | `maxAttempts` |
-| `BOT_FAILED` | answered; the bot side failed before the flow ended | no — contact `DONE` | — | `maxAttempts` |
+| `BOT_FAILED` | answered; the bot side failed before the flow ended, or the bridge to it never ran (`BOT_BRIDGE_UNCONFIRMED`, §5.7) | no — contact `DONE` | — | `maxAttempts` |
 | `OVERFLOW` | answered; no bot slot after `overflowHold` (§6.4) | no — contact `DONE` | — | `maxAttempts` |
 | `NO_ANSWER` | `NO_ANSWER`, `NO_USER_RESPONSE`, our ring timeout | yes | 2 h | `maxAttempts` |
 | `BUSY` | `USER_BUSY` | yes | 30 min | `maxAttempts` |

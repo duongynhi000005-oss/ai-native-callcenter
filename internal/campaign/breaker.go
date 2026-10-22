@@ -59,7 +59,8 @@ type DialErrorKinds struct {
 	// 6.6); the placer cannot return it before that slice exists.
 	LineLimit error
 	// Unconfirmed: the originate reached the switch and its reply did not come
-	// back in time, so the call may still be placed (#221).
+	// back, in time or before the link closed, so the call may still be placed
+	// (#221, #302).
 	Unconfirmed error
 }
 

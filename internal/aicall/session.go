@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -259,6 +260,10 @@ type Session struct {
 	// published and before the dead-air watch starts.
 	afterPlaybackDone func()
 
+	// isHushed is set while a transfer the switch has not confirmed is
+	// settled (hush): nothing passes between the caller and the model.
+	isHushed atomic.Bool
+
 	closeOnce sync.Once
 	done      chan struct{}
 	wg        sync.WaitGroup
@@ -475,6 +480,15 @@ func (s *Session) Close(ctx context.Context) {
 	})
 }
 
+// hush stops the conversation, or lets it go on again, while a transfer the
+// switch has not confirmed is settled (handover.go). Hushed, the caller's
+// audio does not reach the model and nothing the model says reaches the
+// caller: the caller has been told they are being put through, and the bot
+// must not talk to them meanwhile, nor hear something to answer. The leg and
+// the model's session both stay up, because the switch may not have run the
+// transfer, and then the conversation goes on.
+func (s *Session) hush(isHushed bool) { s.isHushed.Store(isHushed) }
+
 // isClosed reports whether Close has been called.
 func (s *Session) isClosed() bool {
 	select {
@@ -568,6 +582,10 @@ func (s *Session) pumpCallerAudio() {
 			if !ok {
 				return
 			}
+			if s.isHushed.Load() {
+				media.PutBytes(frame)
+				continue
+			}
 			converted = s.uplink.Convert(converted, frame)
 			media.PutBytes(frame)
 
@@ -584,6 +602,9 @@ func (s *Session) pumpCallerAudio() {
 
 // playAudio converts one chunk of model speech and queues it on the leg.
 func (s *Session) playAudio(audio []byte) {
+	if s.isHushed.Load() {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

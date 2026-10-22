@@ -126,9 +126,10 @@ func (o *Orchestrator) enforceSessionLimit(ctx context.Context, session *Session
 
 	if queue, ok := actions.openFallbackQueue(ctx); ok {
 		result, err := actions.TransferToAgent(ctx, flow.TransferRequest{
-			Queue:   queue.Name,
-			Reason:  hangupCauseSessionLimit,
-			Summary: sessionLimitSummary(lang),
+			Queue:     queue.Name,
+			Reason:    hangupCauseSessionLimit,
+			Summary:   sessionLimitSummary(lang),
+			FromPhase: runtime.Engine().NodeID(),
 		})
 		if err == nil && result.IsOK {
 			log.Warn("call reached its time limit; transferring the caller",

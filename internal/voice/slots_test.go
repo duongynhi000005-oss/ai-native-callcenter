@@ -452,3 +452,63 @@ func (b *BotSlots) total() int {
 	defer b.mu.Unlock()
 	return b.inUse + len(b.reserved)
 }
+
+// Keep holds a reservation past its default expiry, for a bridge the switch is
+// slow to run (#303), and never takes one that lapsed or was consumed again:
+// the INVITE may hold a slot for it already. Withdraw takes it back, says
+// whether the INVITE had taken it, and keeps the key out.
+func TestAKeptReservationOutlivesItsExpiryAndAWithdrawnOneIsGone(t *testing.T) {
+	clock := newManualClock()
+	b := newSlots(t, 2, 0, clock)
+
+	if !b.Reserve("slow") || !b.Keep("slow", time.Minute) {
+		t.Fatal("setup")
+	}
+	clock.advance(DefaultReservationTTL + time.Second)
+	if b.Reserved() != 1 {
+		t.Fatal("a kept reservation expired on its default")
+	}
+	clock.advance(time.Minute)
+	if b.Reserved() != 0 {
+		t.Fatal("a kept reservation never expired")
+	}
+	// Lapsed, or consumed: not taken again.
+	if b.Keep("slow", 0) || b.Reserved() != 0 {
+		t.Fatal("a lapsed reservation was taken again")
+	}
+	if !b.Reserve("fast") || !b.Consume("fast") || b.Keep("fast", 0) || b.Reserved() != 0 {
+		t.Fatal("a consumed reservation was taken again, counting the call twice")
+	}
+	b.Free()
+	if !b.Reserve("slow") {
+		t.Fatal("setup")
+	}
+
+	if !b.Withdraw("slow") {
+		t.Fatal("Withdraw did not find the reservation it took back")
+	}
+	if b.Reserved() != 0 || !b.IsWithdrawn("slow") {
+		t.Fatal("a withdrawn reservation is still held or still let in")
+	}
+	if b.Keep("slow", 0) || b.Consume("slow") {
+		t.Fatal("a withdrawn key was reserved again")
+	}
+
+	// The INVITE got there first: nothing held, which Withdraw reports.
+	if !b.Reserve("ran") || !b.Consume("ran") {
+		t.Fatal("setup")
+	}
+	if b.Withdraw("ran") {
+		t.Fatal("Withdraw reported a reservation the INVITE had consumed")
+	}
+
+	// Withdrawn keys are forgotten after a while.
+	clock.advance(withdrawnFor)
+	if b.IsWithdrawn("slow") {
+		t.Fatal("a withdrawn key is refused forever")
+	}
+	st := b.Stats()
+	if st.Made != st.Consumed+st.Released+st.Expired {
+		t.Fatalf("a reservation ended nowhere: %+v", st)
+	}
+}

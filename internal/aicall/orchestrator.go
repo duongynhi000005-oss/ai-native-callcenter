@@ -81,6 +81,9 @@ type Switch interface {
 	// the caller is handed on. The inbound script suspends it for the bot
 	// bridge; everything downstream of us expects it back.
 	EndCallerWithTheirBridge(channelID string) error
+	// ChannelExists asks the switch whether the caller's channel is up: how a
+	// transfer it did not confirm is settled (handover.go).
+	ChannelExists(channelID string) (bool, error)
 }
 
 // CallDataSource answers what business data a call was placed with. Only a
@@ -180,6 +183,10 @@ type Orchestrator struct {
 
 	mu    sync.Mutex
 	calls map[string]*activeCall
+
+	// budgetAfter replaces time.After for the clocks drive keeps (the time
+	// budget and its re-looks). Tests only.
+	budgetAfter func(time.Duration) <-chan time.Time
 }
 
 type activeCall struct {
@@ -482,8 +489,9 @@ func sessionConfigFor(spec *flow.Spec, runtime *flow.Runtime, language string) p
 // drive consumes the bridge's events and lets the flow steer, and keeps the
 // call inside its time budget (sessionBudget). The budget's clocks are
 // delivered here, on the call's own goroutine, because the engine and the
-// runtime they act on belong to it; stopping them when drive returns is all
-// the cancelling they need.
+// runtime they act on belong to it; nobody reading them once drive returns is
+// all the cancelling they need. A handover the switch never ran is delivered
+// here too, for the same reason (resumeAfterFailedHandover).
 func (o *Orchestrator) drive(ctx context.Context, session *Session,
 	runtime *flow.Runtime, actions *callActions, recorder *callRecorder,
 	budget sessionBudget, log *slog.Logger) {
@@ -500,16 +508,12 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 	deadline := time.Now().Add(budget.limitAfter)
 	var wrapUpDue, limitDue <-chan time.Time
 	if budget.wrapUpAfter > 0 {
-		timer := time.NewTimer(budget.wrapUpAfter)
-		defer timer.Stop()
-		wrapUpDue = timer.C
+		wrapUpDue = o.after(budget.wrapUpAfter)
 	}
-	var limitTimer *time.Timer
 	if budget.limitAfter > 0 {
-		limitTimer = time.NewTimer(budget.limitAfter)
-		defer limitTimer.Stop()
-		limitDue = limitTimer.C
+		limitDue = o.after(budget.limitAfter)
 	}
+	handoversFailed := actions.handoversFailed()
 	// isLimitWaiting is a limit that came due while the bot held the floor,
 	// waiting for it to be free; limitDue is then its backstop.
 	isLimitWaiting := false
@@ -526,11 +530,26 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 	for {
 		select {
 		case <-wrapUpDue:
+			if actions.isSettlingHandover() {
+				// The call is in the phase the transfer led to, which the
+				// steer would take for one already ending. Looked at again
+				// later, in case the transfer never ran and the conversation
+				// goes on.
+				wrapUpDue = o.after(handoverWait)
+				continue
+			}
 			wrapUpDue = nil
 			o.handleWrapUpDue(ctx, session, runtime, actions, deadline, log)
 			continue
 
 		case <-limitDue:
+			if actions.isSettlingHandover() {
+				// The caller is being put through, unconfirmed: the handover
+				// decides the ending. Looked at again later, in case it never
+				// ran and the conversation goes on.
+				limitDue = o.after(handoverWait)
+				continue
+			}
 			switch {
 			case isLimitWaiting:
 				log.Warn("the bot kept the floor past the time limit; ending the call anyway")
@@ -540,10 +559,14 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				// it off; the limit waits for the floor, but not forever.
 				log.Info("call reached its time limit; waiting for the bot to finish its turn")
 				isLimitWaiting = true
-				limitTimer.Reset(cmp.Or(budget.floorWait, actionGraceCap))
+				limitDue = o.after(cmp.Or(budget.floorWait, actionGraceCap))
 			default:
 				enforceLimit(limitFloorFree)
 			}
+			continue
+
+		case failed := <-handoversFailed:
+			o.resumeAfterFailedHandover(failed, session, runtime, actions, log)
 			continue
 
 		case event, ok := <-events:
@@ -577,6 +600,11 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				o.answerToolCall(ctx, event, &batch, session, runtime, actions, recorder, log)
 
 			case EventTypeNoInput:
+				if actions.isSettlingHandover() {
+					// The caller was told they are being put through and
+					// hears nothing until the switch settles it.
+					continue
+				}
 				if isLimitWaiting {
 					enforceLimit(limitCallerSilent)
 					continue
@@ -622,6 +650,26 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				o.handlePlaybackDone(event.Turn, event.HasAudio, &wall, session, runtime, actions, log)
 
 			case EventTypeFailed:
+				if actions.isSettlingHandover() {
+					// The caller is already being moved, unconfirmed; a
+					// rescue would be a second transfer racing it.
+					log.Warn("conversation failed while a transfer was unconfirmed; leaving the caller to it",
+						"reason", event.Text)
+					return
+				}
+				if actions.hasTransferFailed() {
+					// The rescue is a transfer, and a transfer on this call
+					// has already been sent and never ran: a second one could
+					// race it (handover.go). The bot leg goes, unmarked, and
+					// the dialplan sends the caller to the number's fallback
+					// queue, as it does for any bot that vanished.
+					log.Warn("conversation failed after a transfer that never ran; "+
+						"leaving the caller to the dialplan's fallback, with no second transfer",
+						"reason", event.Text)
+					recorder.markFailed(hangupCauseMediaOrProvider)
+					session.Close(context.Background())
+					return
+				}
 				// The conversation cannot continue; the caller still can.
 				log.Warn("conversation failed, rescuing the caller",
 					"reason", event.Text)
@@ -634,6 +682,15 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			}
 		}
 	}
+}
+
+// after is drive's clock: time.After, whose timer is collected once nobody
+// holds its channel, so a clock drive stops reading needs no stopping.
+func (o *Orchestrator) after(d time.Duration) <-chan time.Time {
+	if o.budgetAfter != nil {
+		return o.budgetAfter(d)
+	}
+	return time.After(d)
 }
 
 // reportUnbackedClaim records a claim the bot made with no tool call behind
@@ -1111,7 +1168,10 @@ func (o *Orchestrator) rescue(dialog *voice.Dialog) {
 		if queue.ID == *did.FallbackQueueID {
 			o.log.Info("transferring the caller to the fallback queue",
 				"callId", dialog.CallID, "queue", queue.Name)
-			if err := o.cfg.Switch.TransferToExtension(channel, queue.ExtNumber, ""); err != nil {
+			if err := o.cfg.Switch.TransferToExtension(channel, queue.ExtNumber, ""); isUnconfirmed(err) {
+				o.log.Warn("fallback transfer sent and not confirmed; the switch may still run it",
+					"callId", dialog.CallID, "error", err)
+			} else if err != nil {
 				o.log.Error("fallback transfer failed", "callId", dialog.CallID, "error", err)
 			}
 			return

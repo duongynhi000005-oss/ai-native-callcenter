@@ -414,6 +414,9 @@ func (a *actor) loop() {
 // applySwitchEvent moves the call in response to one switch event. It runs
 // inside the actor, so it may touch call state freely.
 func (a *actor) applySwitchEvent(ev SwitchEvent) {
+	// A transfer on its way is settled by the leg moving or ending, whichever
+	// party the event is about (transfer.go).
+	a.call.settleTransfers(ev)
 	party := a.call.PartyByChannel(ev.ChannelID)
 	if party == nil {
 		return

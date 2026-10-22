@@ -556,7 +556,7 @@ export interface paths {
         put?: never;
         /**
          * Transfer the other party away
-         * @description Sends the far end to a queue extension or number. Requires the AGENT role and being a party to the call. Transferring, holding and retrieving are refused on an INTERNAL call with OPERATION_NOT_ALLOWED_FOR_CALL_TYPE (409): one extension calling another is two people on a line, not a call being handled — there is no third party to pass it to and no queue to put it back into.
+         * @description Sends the far end to a queue extension or number. Requires the AGENT role and being a party to the call. Transferring, holding and retrieving are refused on an INTERNAL call with OPERATION_NOT_ALLOWED_FOR_CALL_TYPE (409): one extension calling another is two people on a line, not a call being handled — there is no third party to pass it to and no queue to put it back into. A transfer of the caller is sent once: while one the switch has not confirmed is still on its way, from this operation or from the bot handing the caller over, another is refused with TRANSFER_IN_PROGRESS (409) rather than sent, because the switch may still run the first. It is settled by the caller's leg moving or ending, or after a minute.
          */
         post: operations["transferCall"];
         delete?: never;
@@ -1814,7 +1814,7 @@ export interface components {
          * @description Machine-readable, translatable failure identifier. The frontend renders errors.<CODE>; the backend never localizes.
          * @enum {string}
          */
-        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "DID_CHANNELS_EXHAUSTED" | "DID_NOT_OUTBOUND" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
+        ErrorCode: "INVALID_CREDENTIALS" | "SESSION_EXPIRED" | "FORBIDDEN" | "AGENT_REQUIRED" | "AGENT_IMPERSONATION_NOT_ALLOWED" | "INSUFFICIENT_SCOPE" | "VALIDATION_FAILED" | "TERMINAL_ANNOUNCE_REQUIRED" | "USER_DATA_TOO_LARGE" | "NUMBER_ON_DNC" | "DID_CHANNELS_EXHAUSTED" | "DID_NOT_OUTBOUND" | "CAMPAIGN_FLOW_HAS_TRANSFER" | "CAMPAIGN_DID_NOT_OUTBOUND" | "CAMPAIGN_RING_TIMEOUT_TOO_LONG" | "CAMPAIGN_WINDOW_OUTSIDE_LIMIT" | "CAMPAIGN_FIELD_LOCKED" | "CAMPAIGN_INVALID_TRANSITION" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "CONFLICT" | "EXTENSION_IN_USE" | "EXTENSION_ASSIGNED_TO_AGENT" | "LAST_ADMIN" | "EXTENSION_POOL_EXHAUSTED" | "AGENT_ALREADY_LOGGED_IN" | "AGENT_NOT_LOGGED_IN" | "AGENT_NOT_IN_WRAP_UP" | "DEVICE_NOT_REGISTERED" | "TRANSCRIPTION_DISABLED" | "CALL_NOT_FOUND" | "NOT_CALL_PARTY" | "OPERATION_NOT_ALLOWED_FOR_CALL_TYPE" | "TRANSFER_IN_PROGRESS" | "USER_SUSPENDED" | "SWITCH_DOWN" | "STORAGE_DOWN" | "RATE_LIMITED" | "INTERNAL";
         /** @description The single error envelope body: an error code plus interpolation params. Message is diagnostic English, never shown to end users. */
         Error: {
             code: components["schemas"]["ErrorCode"];
@@ -3716,7 +3716,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED. Holding, retrieving and transferring an INTERNAL call answer OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. Campaign operations answer CAMPAIGN_INVALID_TRANSITION (the operation does not exist in the campaign's status) or CAMPAIGN_FIELD_LOCKED (params.fields lists what cannot change in that status); publishing a flow revision or rebinding a DID that would give a campaign that has not finished a way to a person answers CAMPAIGN_FLOW_HAS_TRANSFER; clearing allowOutbound on a DID such a campaign dials from answers CAMPAIGN_DID_NOT_OUTBOUND. */
+        /** @description The request collides with current state. Codes CONFLICT, EXTENSION_IN_USE, EXTENSION_ASSIGNED_TO_AGENT, EXTENSION_POOL_EXHAUSTED, LAST_ADMIN, AGENT_ALREADY_LOGGED_IN, AGENT_NOT_LOGGED_IN, AGENT_NOT_IN_WRAP_UP, DEVICE_NOT_REGISTERED, TRANSCRIPTION_DISABLED. Holding, retrieving and transferring an INTERNAL call answer OPERATION_NOT_ALLOWED_FOR_CALL_TYPE; transferring a caller whose previous transfer the switch has not yet confirmed answers TRANSFER_IN_PROGRESS. Campaign operations answer CAMPAIGN_INVALID_TRANSITION (the operation does not exist in the campaign's status) or CAMPAIGN_FIELD_LOCKED (params.fields lists what cannot change in that status); publishing a flow revision or rebinding a DID that would give a campaign that has not finished a way to a person answers CAMPAIGN_FLOW_HAS_TRANSFER; clearing allowOutbound on a DID such a campaign dials from answers CAMPAIGN_DID_NOT_OUTBOUND. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -4462,7 +4462,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream: PARTY_ESTABLISHED when the leg is bridged. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4488,7 +4488,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream: PARTY_HELD. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4516,7 +4516,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream: PARTY_RETRIEVED. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4544,7 +4544,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream as PARTY_CHANGED with isMuted, published only once the switch has confirmed the command; an unconfirmed mute publishes nothing and may still take effect, and sending it again is safe. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4570,7 +4570,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream as PARTY_CHANGED with isMuted, published only once the switch has confirmed the command; an unconfirmed unmute publishes nothing and may still take effect, and sending it again is safe. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4596,7 +4596,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream: PARTY_RELEASED for the leg, and CALL_CDR when the call ends. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4627,7 +4627,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The outcome arrives on the event stream: the far end's leg moves (its PARTY_* events) and the agent's own leg ends with PARTY_RELEASED. While the switch has not confirmed a transfer and the leg's events have not shown it moving, a second transfer of the same caller is refused with 409 TRANSFER_IN_PROGRESS, for at most a minute. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4638,7 +4638,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description The call is INTERNAL: code OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. One extension calling another has no third party to pass it to. */
+            /** @description The call is INTERNAL: code OPERATION_NOT_ALLOWED_FOR_CALL_TYPE. One extension calling another has no third party to pass it to. Or a transfer of the caller is already on its way and the switch has not confirmed it: code TRANSFER_IN_PROGRESS. Nothing was sent; the outcome of the first arrives on the event stream. */
             409: components["responses"]["Conflict"];
             422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
@@ -4660,7 +4660,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The switch accepted the command; the outcome arrives on the event stream. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. No event follows: the tones reach the far end or they do not. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -4691,7 +4691,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The switch accepted the command; the supervisor's phone answers by itself. */
+            /** @description The command was sent. Either the switch accepted it, or it did not answer in time and may still carry it out: a stalled switch runs the commands it has read when it recovers, so an unanswered command is neither reported as failed nor sent again. The supervisor's phone answers by itself. */
             202: {
                 headers: {
                     [name: string]: unknown;

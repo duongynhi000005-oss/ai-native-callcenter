@@ -106,3 +106,21 @@ func TestARefusedInviteDoesNotLeakItsSlot(t *testing.T) {
 	// back a moment after the 488 is on the wire, not before it.
 	waitFor(t, "a refused INVITE to give its slot back", func() bool { return slots.InUse() == 0 })
 }
+
+// An answered outbound leg whose bridge the switch did not confirm in time is
+// hung up, and its reservation withdrawn (#303). A bridge the switch runs after
+// that must not start a conversation with nobody on it: the INVITE is refused,
+// with a free slot and all.
+func TestAnInviteForAWithdrawnReservationIsRefused(t *testing.T) {
+	slots := slotsOf(t, 2, 0)
+	_, _, p := startUAS(t, func(c *Config) { c.Slots = slots })
+	if !slots.Reserve(peerReservationKey) || !slots.Withdraw(peerReservationKey) {
+		t.Fatal("setup")
+	}
+
+	p.request("INVITE", p.offer())
+	p.awaitStatus(480, 2*time.Second)
+	if r, u := slots.Reserved(), slots.InUse(); r != 0 || u != 0 {
+		t.Fatalf("reserved %d, in use %d after the refused INVITE", r, u)
+	}
+}
