@@ -239,6 +239,11 @@ func (r *Runtime) CloseAtSessionLimit() string {
 	return r.engine.CloseAtSessionLimit()
 }
 
+// ReturnTo puts the call back in a phase a move that never happened on the
+// line took it out of (Engine.ReturnTo). The caller re-pins the standing
+// instructions afterwards.
+func (r *Runtime) ReturnTo(phase string) bool { return r.engine.ReturnTo(phase) }
+
 // Announce is the current phase's own line, to be spoken as written. It is
 // deliberately not part of Instructions: the instructions are a brief the model
 // writes from, and this is wording the flow is not asking anybody to rephrase.
@@ -346,10 +351,11 @@ func (r *Runtime) run(ctx context.Context, name string, args map[string]any) (Re
 	switch name {
 	case ToolTransferToAgent:
 		return r.actions.TransferToAgent(ctx, TransferRequest{
-			Queue:   stringArg(args, "queue"),
-			Reason:  stringArg(args, "reason"),
-			Summary: stringArg(args, "summary"),
-			Slots:   mapArg(args, "slots"),
+			Queue:     stringArg(args, "queue"),
+			Reason:    stringArg(args, "reason"),
+			Summary:   stringArg(args, "summary"),
+			Slots:     mapArg(args, "slots"),
+			FromPhase: r.engine.NodeID(),
 		})
 	case ToolTakeMessage:
 		return r.actions.TakeMessage(ctx, MessageRequest{

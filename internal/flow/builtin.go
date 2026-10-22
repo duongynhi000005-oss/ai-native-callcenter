@@ -62,6 +62,11 @@ type TransferRequest struct {
 	Summary string `json:"summary"`
 	// Slots is what the flow collected.
 	Slots map[string]any `json:"slots"`
+	// FromPhase is the phase the call was in when the transfer was asked
+	// for, before any move its result causes: where the call goes back to if
+	// the transfer never happens (Engine.ReturnTo). The runtime fills it; it
+	// is not a tool argument.
+	FromPhase string `json:"-"`
 }
 
 // MessageRequest is the model taking a message instead of transferring.

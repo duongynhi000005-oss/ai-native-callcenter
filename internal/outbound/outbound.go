@@ -35,6 +35,9 @@ type Switch interface {
 	TransferToExtension(channelID, extension, context string) error
 	Hangup(channelID, cause string) error
 	SetVariable(channelID, name, value string) error
+	// ChannelExists asks the switch whether a channel is up: how a command it
+	// did not confirm is settled (telephony.EndLeg, bridge.go).
+	ChannelExists(channelID string) (bool, error)
 	// StartCallRecording starts the call's stereo recording on an answered
 	// channel, filed under key (recording.Key).
 	StartCallRecording(channelID, key string) error
@@ -50,6 +53,14 @@ type BotSlots interface {
 	ReserveWait(ctx context.Context, key string, hold time.Duration) (ok bool, waited time.Duration)
 	// Release gives back a reservation the INVITE has not consumed.
 	Release(key string)
+	// Keep holds the reservation under key for d from now; zero is the
+	// counter's own expiry. It reports whether the key holds one, and never
+	// reserves a key that holds none.
+	Keep(key string, d time.Duration) bool
+	// Withdraw takes the reservation back and refuses the key to a later
+	// INVITE; it reports whether a reservation was still held (false: the
+	// INVITE consumed it, or it lapsed).
+	Withdraw(key string) bool
 }
 
 // DIDSource answers which numbers exist and which flow serves them.
@@ -196,6 +207,9 @@ type Service struct {
 	// by channel id; guarded by mu. A hangup cancels the wait and releases the
 	// reservation.
 	holds map[string]*slotHold
+	// bridges are the bridges to the bot the switch has not confirmed, by
+	// customer leg (bridge.go); guarded by mu.
+	bridges map[string]*pendingBridge
 }
 
 // slotHold is one answered leg's claim on a bot slot.
@@ -999,7 +1013,25 @@ func (s *Service) bridgeToBot(callID uuid.UUID, customerLeg, didNumber, language
 		}
 		target := "sofia/gateway/" + s.cfg.BotGateway + "/" + didNumber
 		pinCodecs(bridgeVars, target)
-		if err := s.sw.BridgeToEndpoint(customerLeg, botLeg, target, bridgeVars); err != nil {
+		// The slot is held over the command and the window after it before
+		// the command is sent: its INVITE can come later than the default
+		// expiry, and a reservation that lapsed under it would send that
+		// INVITE in unreserved (bridge.go).
+		isReserved := s.keepForBridge(key)
+		err := s.sw.BridgeToEndpoint(customerLeg, botLeg, target, bridgeVars)
+		switch {
+		case err == nil:
+			// Confirmed: the INVITE follows at once, and the reservation
+			// lapses on its usual short expiry if it never does.
+			if isReserved {
+				s.cfg.Slots.Keep(key, 0)
+			}
+		case isUnconfirmed(err):
+			s.log.Warn("ai outbound bridge to bot sent and not confirmed; holding the slot while the switch decides",
+				"callId", callID, "to", to, "botLeg", botLeg, "isReserved", isReserved,
+				"windowSec", int(bridgeUnconfirmedFor.Seconds()), "error", err)
+			s.awaitBridge(callID, customerLeg, botLeg.String(), key, to, isReserved)
+		default:
 			s.log.Error("ai outbound bridge to bot failed",
 				"callId", callID, "to", to, "error", err)
 			s.dropHold(customerLeg, key)
@@ -1053,14 +1085,13 @@ func (s *Service) takeSlot(callID uuid.UUID, customerLeg, to string) bool {
 	s.dropHold(customerLeg, key)
 	// The stamp first: uuid_kill takes the switch's causes only, so the
 	// platform's own word rides a channel variable the normalizer reads.
-	if err := s.sw.SetVariable(customerLeg, telephony.VarHangupCause, OverflowCause); err != nil {
-		s.log.Error("could not stamp the overflow cause on the leg",
-			"callId", callID, "channelId", customerLeg, "error", err)
-	}
-	if err := s.sw.Hangup(customerLeg, "NORMAL_CLEARING"); err != nil {
-		s.log.Error("hangup of an overflowed leg failed",
-			"callId", callID, "channelId", customerLeg, "error", err)
-	}
+	s.endLeg(telephony.LegEnding{
+		ChannelID:     customerLeg,
+		Cause:         "NORMAL_CLEARING",
+		PlatformCause: OverflowCause,
+		What:          "an overflowed leg",
+		Attrs:         []any{"callId", callID},
+	})
 	return false
 }
 
@@ -1084,7 +1115,16 @@ func (s *Service) dropHold(customerLeg, key string) {
 // the destination through the dialplan.
 func (s *Service) transferOnAnswer(callID uuid.UUID, agentLeg, destination string) func() {
 	return func() {
-		if err := s.sw.TransferToExtension(agentLeg, destination, "aicc"); err != nil {
+		err := s.sw.TransferToExtension(agentLeg, destination, "aicc")
+		switch {
+		case err == nil:
+		case isUnconfirmed(err):
+			// Not a failure: a stalled switch runs it when it recovers, and
+			// the agent's phone then dials on. Sent once, never again: the
+			// agent can always hang their own phone up.
+			s.log.Warn("click-to-dial transfer sent and not confirmed; the switch may still run it",
+				"callId", callID, "channelId", agentLeg, "destination", destination, "error", err)
+		default:
 			s.log.Error("click-to-dial transfer failed",
 				"callId", callID, "destination", destination, "error", err)
 		}
@@ -1160,6 +1200,7 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 	if ev.ChannelID == "" {
 		return
 	}
+	s.settleBridge(ev)
 	switch ev.Kind {
 	case telephony.KindChannelCreate:
 		s.noteChannel(ev.ChannelID)
@@ -1183,12 +1224,11 @@ func (s *Service) HandleSwitchEvent(ev telephony.SwitchEvent) {
 			// the agent's auto-answered phone.
 			s.log.Warn("answer arrived after the window; hanging up, not bridging",
 				"channelId", ev.ChannelID, "cause", LateAnswerCause)
-			go func() {
-				if err := s.sw.Hangup(ev.ChannelID, LateAnswerCause); err != nil {
-					s.log.Error("hangup of a late-answered leg failed",
-						"channelId", ev.ChannelID, "error", err)
-				}
-			}()
+			go s.endLeg(telephony.LegEnding{
+				ChannelID: ev.ChannelID,
+				Cause:     LateAnswerCause,
+				What:      "a late-answered leg",
+			})
 			return
 		}
 		// The continuation talks to the switch; the dispatch loop must not

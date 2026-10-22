@@ -122,6 +122,11 @@ const (
 	CodeStorageDown                    ErrorCode = "STORAGE_DOWN"
 	CodeRateLimited                    ErrorCode = "RATE_LIMITED"
 	CodeInternal                       ErrorCode = "INTERNAL"
+
+	// CodeTransferInProgress refuses a transfer of a caller whose previous
+	// transfer the switch has not confirmed: it may still run it, and two
+	// would race (#303). Nothing was sent.
+	CodeTransferInProgress ErrorCode = "TRANSFER_IN_PROGRESS"
 )
 
 // APIError is the single error envelope of the API.

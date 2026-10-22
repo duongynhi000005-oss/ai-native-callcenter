@@ -128,6 +128,34 @@ type fakeSwitch struct {
 	order      []string
 	recordings []recorded
 	recordErr  error
+	// channelUp overrides what ChannelExists answers for a channel, and
+	// existsErr makes it fail; existsAsked is every channel it was asked
+	// about.
+	channelUp   map[string]bool
+	existsErr   error
+	existsAsked []string
+	// bridgeErr is what a bridge answers, after it is recorded as sent.
+	bridgeErr error
+}
+
+// ChannelExists answers as a switch would: a leg this fake hung up is gone,
+// any other is up, unless the test said otherwise.
+func (f *fakeSwitch) ChannelExists(channelID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.existsAsked = append(f.existsAsked, channelID)
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	if up, ok := f.channelUp[channelID]; ok {
+		return up, nil
+	}
+	for _, h := range f.hangups {
+		if h.channelID == channelID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 type recorded struct{ channelID, key string }
@@ -186,7 +214,7 @@ func (f *fakeSwitch) BridgeToEndpoint(channelID string, _ uuid.UUID, endpoint st
 	defer f.mu.Unlock()
 	f.bridges = append(f.bridges, bridged{channelID, endpoint, vars})
 	f.order = append(f.order, "bridge")
-	return nil
+	return f.bridgeErr
 }
 
 func (f *fakeSwitch) SetVariable(channelID, name, value string) error {

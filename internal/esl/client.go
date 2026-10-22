@@ -34,11 +34,11 @@ var (
 	ErrTimeout = errors.New("esl command timed out")
 )
 
-// commandTimeout bounds a single api/bgapi round trip, from the moment the
+// CommandTimeout bounds a single api/bgapi round trip, from the moment the
 // command is issued: its turn to write, the write and the reply. FreeSWITCH
 // answers these promptly; a longer wait means the switch is in trouble and
 // callers should fail fast rather than pile up.
-const commandTimeout = 10 * time.Second
+const CommandTimeout = 10 * time.Second
 
 // Client is a single Event Socket connection in inbound mode.
 //
@@ -64,7 +64,7 @@ type Client struct {
 	closed    chan struct{}
 	closeErr  error
 
-	// timeout overrides commandTimeout; tests shorten it.
+	// timeout overrides CommandTimeout; tests shorten it.
 	timeout time.Duration
 }
 
@@ -179,7 +179,7 @@ func (c *Client) Done() <-chan struct{} { return c.closed }
 func (c *Client) command(cmd string) (string, error) {
 	timeout := c.timeout
 	if timeout <= 0 {
-		timeout = commandTimeout
+		timeout = CommandTimeout
 	}
 	deadline := time.Now().Add(timeout)
 	timer := time.NewTimer(timeout)

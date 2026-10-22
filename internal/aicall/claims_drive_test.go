@@ -54,6 +54,11 @@ func (s *orderedSwitch) EndCallerWithTheirBridge(channelID string) error {
 	return nil
 }
 
+func (s *orderedSwitch) ChannelExists(channelID string) (bool, error) {
+	s.record("exists " + channelID)
+	return true, nil
+}
+
 func (s *orderedSwitch) recorded() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

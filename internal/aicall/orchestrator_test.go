@@ -42,13 +42,29 @@ type fakeSwitch struct {
 	transfers []string // "channel→extension"
 	handedOn  []string // channels whose teardown rule was put back
 	variables map[string]string
+	// transferErr is what a transfer answers, after it is recorded as sent;
+	// exists and existsErr are what ChannelExists answers (nil exists: up).
+	transferErr error
+	exists      *bool
+	existsErr   error
+	existsAsked int
 }
 
 func (s *fakeSwitch) TransferToExtension(channelID, extension, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.transfers = append(s.transfers, channelID+"→"+extension)
-	return nil
+	return s.transferErr
+}
+
+func (s *fakeSwitch) ChannelExists(string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.existsAsked++
+	if s.existsErr != nil {
+		return false, s.existsErr
+	}
+	return s.exists == nil || *s.exists, nil
 }
 
 func (s *fakeSwitch) SetVariable(_, name, value string) error {

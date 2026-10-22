@@ -460,7 +460,7 @@ func run() error {
 			botUAS(cfg, botSlots),
 			catalogSvc,
 			st.Flows(),
-			adapter,
+			botSwitch{Adapter: adapter, coordinator: coordinator},
 			st.Ledger(),
 			transcripts,
 			backend,

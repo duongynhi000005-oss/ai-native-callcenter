@@ -429,7 +429,5 @@ func (s *Service) reap(channelID, cause string) {
 	s.reaped[channelID] = now
 	s.mu.Unlock()
 
-	if err := s.sw.Hangup(channelID, cause); err != nil {
-		s.log.Error("recovery: hangup failed", "channelId", channelID, "cause", cause, "error", err)
-	}
+	s.endLeg(telephony.LegEnding{ChannelID: channelID, Cause: cause, What: "a leg recovery ended"})
 }

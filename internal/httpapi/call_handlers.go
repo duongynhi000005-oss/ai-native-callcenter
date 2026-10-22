@@ -420,10 +420,26 @@ func (s *Server) callOp(w http.ResponseWriter, r *http.Request, callID uuid.UUID
 // operation gives. Split from callOp because not every such operation is an
 // agent's: ending a call takes no agent, and it still owes the caller the same
 // vocabulary of failures.
+//
+// A command the switch did not answer (esl.ErrTimeout) is 202 like one it
+// accepted (#303). It was written, and a stalled switch runs what it has read
+// when it recovers: a hangup ends the call a minute later, a transfer moves the
+// caller. Answering 500 "the switch rejected the request" told the client
+// something false and invited a retry that raced the first. 202 already says
+// what is true of every one of these operations, accepted and not yet done;
+// the outcome arrives as an event. Nothing is retried here.
 func (s *Server) callResult(w http.ResponseWriter, r *http.Request, callID uuid.UUID, err error) {
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusAccepted)
+	case errors.Is(err, esl.ErrTimeout):
+		slog.WarnContext(r.Context(), "call operation sent and not confirmed by the switch; it may still run",
+			"error", err, "callId", callID)
+		w.WriteHeader(http.StatusAccepted)
+	case errors.Is(err, telephony.ErrTransferInFlight):
+		writeError(w, http.StatusConflict, CodeTransferInProgress,
+			"a transfer of this caller is already on its way and the switch has not confirmed it; "+
+				"its outcome arrives on the event stream", nil)
 	case errors.Is(err, telephony.ErrCallNotFound):
 		writeError(w, http.StatusNotFound, CodeCallNotFound, "no such call", nil)
 	case errors.Is(err, telephony.ErrNoAgentLeg), errors.Is(err, telephony.ErrNotCallParty):

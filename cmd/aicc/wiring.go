@@ -581,6 +581,18 @@ func reportMissingProviderKey(log *slog.Logger, profile provider.Profile, getenv
 // with every test that builds one. Sessions used to be left the same way, and
 // is not any more — see voiceSession for why the choice of client belongs to
 // the composition root.
+// botSwitch is the switch as the bot uses it: the adapter, with the caller's
+// transfer taken through the coordinator, so the bot's handover and an agent's
+// transfer of the same leg share one guard and cannot race (#303).
+type botSwitch struct {
+	*telephony.Adapter
+	coordinator *telephony.Coordinator
+}
+
+func (b botSwitch) TransferToExtension(channelID, extension, dialplanContext string) error {
+	return b.coordinator.TransferLeg(channelID, extension, dialplanContext)
+}
+
 func botConfig(
 	uas voice.Config,
 	catalogSvc aicall.Catalog,

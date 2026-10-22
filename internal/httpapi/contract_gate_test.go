@@ -385,18 +385,21 @@ func TestEveryContractOperationHasASecurityRow(t *testing.T) {
 // holds this list to that switch, so a branch added there and not here fails
 // rather than going undriven.
 var callFailures = map[string]error{
-	"telephony.ErrCallNotFound":   telephony.ErrCallNotFound,
-	"telephony.ErrNoAgentLeg":     telephony.ErrNoAgentLeg,
-	"telephony.ErrNotCallParty":   telephony.ErrNotCallParty,
-	"telephony.ErrNoExtensionLeg": telephony.ErrNoExtensionLeg,
-	"telephony.ErrNotForCallType": telephony.ErrNotForCallType,
-	"telephony.ErrInvalidDTMF":    telephony.ErrInvalidDTMF,
-	"esl.ErrDown":                 esl.ErrDown,
+	"telephony.ErrCallNotFound":     telephony.ErrCallNotFound,
+	"telephony.ErrNoAgentLeg":       telephony.ErrNoAgentLeg,
+	"telephony.ErrNotCallParty":     telephony.ErrNotCallParty,
+	"telephony.ErrNoExtensionLeg":   telephony.ErrNoExtensionLeg,
+	"telephony.ErrNotForCallType":   telephony.ErrNotForCallType,
+	"telephony.ErrInvalidDTMF":      telephony.ErrInvalidDTMF,
+	"esl.ErrDown":                   esl.ErrDown,
+	"esl.ErrTimeout":                esl.ErrTimeout,
+	"telephony.ErrTransferInFlight": telephony.ErrTransferInFlight,
 }
 
-// Every operation can also succeed, find the switch unreachable, or have it
-// refuse the command for a reason of its own (callResult's default branch).
-var everyCallOutcome = []string{"", "esl.ErrDown", "the switch refused"}
+// Every operation can also succeed, find the switch unreachable, go
+// unanswered by a stalled switch, or have it refuse the command for a reason
+// of its own (callResult's default branch).
+var everyCallOutcome = []string{"", "esl.ErrDown", "esl.ErrTimeout", "the switch refused"}
 
 // callOperation is one operation answered through callResult, and the
 // failures the coordinator method behind it can actually return. The lists
@@ -434,9 +437,11 @@ func callOperations() []callOperation {
 		{"hangupCall", (*Server).HangupCall, "", system,
 			[]string{"telephony.ErrCallNotFound", "telephony.ErrNoExtensionLeg"}},
 		// Transfer reads the call itself: INTERNAL first, then whether the
-		// asker and a caller are both on it.
+		// asker and a caller are both on it; then whether a transfer of the
+		// caller is already on its way.
 		{"transferCall", (*Server).TransferCall, `{"destination":"2001"}`, agent,
-			[]string{"telephony.ErrCallNotFound", "telephony.ErrNotForCallType", "telephony.ErrNotCallParty"}},
+			[]string{"telephony.ErrCallNotFound", "telephony.ErrNotForCallType", "telephony.ErrNotCallParty",
+				"telephony.ErrTransferInFlight"}},
 		// SendDTMF: the digits, agentChannel, then a far end to send them to.
 		{"sendCallDTMF", (*Server).SendCallDTMF, `{"digits":"1"}`, agent,
 			[]string{"telephony.ErrInvalidDTMF", "telephony.ErrCallNotFound",

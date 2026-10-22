@@ -115,6 +115,12 @@ type Coordinator struct {
 	// tap and addresses the transcript once.
 	bridgedMu sync.Mutex
 	bridged   map[string]string
+
+	// now and after are the clock and the timers of the settling of commands
+	// the switch did not confirm (transfer.go, EndLeg); nil is the real ones.
+	// Tests replace them.
+	now   func() time.Time
+	after func(time.Duration, func())
 }
 
 // Audiences records who may see a call's live transcript. Nil leaves every
@@ -1009,11 +1015,13 @@ func (c *Coordinator) merge(ctx context.Context, keep, absorb uuid.UUID) {
 	var movedBot BotShare
 	var movedUserData map[string]any
 	var movedData UserDataChange
+	var movedTransfers map[string]transferClaim
 	_ = c.registry.Do(absorb, func(call *Call) {
 		moved = append(moved, call.Parties...)
 		movedStays = slices.Clone(call.QueueStays)
 		movedBot = call.Bot
 		movedUserData = call.UserData
+		movedTransfers = maps.Clone(call.transfers)
 	})
 
 	err := c.registry.do(keep, func(a *actor) {
@@ -1030,6 +1038,17 @@ func (c *Coordinator) merge(ctx context.Context, keep, absorb uuid.UUID) {
 		// halves had been through a queue (#283).
 		call.MergeQueueStays(movedStays)
 		call.Bot.Merge(movedBot)
+		// A transfer on its way moves with its leg, or a second one could be
+		// sent the moment the leg changed calls.
+		for channelID, claim := range movedTransfers {
+			if _, held := call.transfers[channelID]; held {
+				continue
+			}
+			if call.transfers == nil {
+				call.transfers = map[string]transferClaim{}
+			}
+			call.transfers[channelID] = claim
+		}
 		// The business data too. It moved with everything else or it did not
 		// move at all, and which of two calls is kept depends on which leg the
 		// switch announced first — so leaving it behind would lose a caller's
@@ -1444,7 +1463,10 @@ func (c *Coordinator) Transfer(ctx context.Context, callID, agentID uuid.UUID, d
 	// Naming the stock context sent queue transfers to a dialplan with no
 	// queue extensions in it, which fails by doing nothing at all — the caller
 	// hears hold music and has joined no queue.
-	return c.adapter.TransferToExtension(callerChannel, destination, "")
+	//
+	// One transfer of the caller at a time (transfer.go): a second request
+	// while the switch has not confirmed the first is ErrTransferInFlight.
+	return c.sendTransfer(ctx, callID, callerChannel, destination, "")
 }
 
 // CallsForAgent returns the live calls an agent is part of.
@@ -1546,10 +1568,12 @@ func (c *Coordinator) endObserverAt(ctx context.Context, extension string) {
 	}
 	slog.InfoContext(ctx, "ending the supervisor's previous monitoring leg",
 		"extension", extension, "channelId", channelID)
-	if err := c.adapter.Hangup(channelID, "NORMAL_CLEARING"); err != nil {
-		slog.DebugContext(ctx, "the previous monitoring leg was already gone",
-			"channelId", channelID, "error", err)
-	}
+	EndLeg(c.adapter, c.after, LegEnding{
+		ChannelID: channelID,
+		Cause:     "NORMAL_CLEARING",
+		What:      "the previous monitoring leg",
+		Attrs:     []any{"extension", extension},
+	}, slog.Default())
 }
 
 // AllCalls returns every live call, for supervision.
