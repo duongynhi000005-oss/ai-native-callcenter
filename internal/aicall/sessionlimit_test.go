@@ -203,9 +203,21 @@ func TestTheLimitTransfersToAnOpenQueueAfterTheHandoverLine(t *testing.T) {
 	if got := h.sw.recordedTransfers(); len(got) != 0 {
 		t.Fatalf("transferred before the handover line was heard: %v", got)
 	}
-	if h.recorder.hangupCause != "SESSION_LIMIT" || h.recorder.endReason != "TRANSFER" {
-		t.Errorf("recorder cause=%q end=%q, want SESSION_LIMIT and TRANSFER",
-			h.recorder.hangupCause, h.recorder.endReason)
+	// A caller who hangs up during the handover line leaves the bot's
+	// provisional row as the final one: the bot ended the call, so it says
+	// SESSION_LIMIT, with the reason beside the summary and no queue, since
+	// the caller never reached one. aicc_bot_sec is not stamped yet, so the
+	// human path declines to write the call (telephony BotShare.HandedOver).
+	if got := h.sw.variable("aicc_bot_sec"); got != "" {
+		t.Errorf("aicc_bot_sec = %q before the handover; the human path would claim the row", got)
+	}
+	provisional := newFakeLedger()
+	h.recorder.finish(provisional, testFacts(), discard())
+	if cdr := provisional.cdrs[0]; cdr.HangupCause != "SESSION_LIMIT" || cdr.IsContained ||
+		cdr.QueueID != nil || cdr.UserData["botReason"] != "SESSION_LIMIT" {
+		t.Errorf("row before the handover: cause=%q contained=%v queue=%v botReason=%v, "+
+			"want SESSION_LIMIT, not contained, no queue, botReason SESSION_LIMIT",
+			cdr.HangupCause, cdr.IsContained, cdr.QueueID, cdr.UserData["botReason"])
 	}
 
 	// The model answers the cue by hanging up; the transfer stands.
@@ -219,6 +231,17 @@ func TestTheLimitTransfersToAnOpenQueueAfterTheHandoverLine(t *testing.T) {
 	}
 	if got := h.sw.variable("aicc_bot_finished"); got != "" {
 		t.Errorf("aicc_bot_finished = %q; a model hangup replaced the transfer", got)
+	}
+	// Handed over, the call is the human path's: its row replaces the bot's
+	// provisional one, with the final leg's cause and botReason=SESSION_LIMIT
+	// (TestASessionLimitTransferKeepsTheFinalLegsCause). The handover itself
+	// is what stamps aicc_bot_sec, which hands the row to that path.
+	if h.recorder.endReason != "TRANSFER" || h.recorder.transferQueue == nil {
+		t.Errorf("recorder end=%q queue=%v, want TRANSFER to the queue",
+			h.recorder.endReason, h.recorder.transferQueue)
+	}
+	if h.sw.variable("aicc_bot_sec") == "" {
+		t.Error("no aicc_bot_sec stamped at the handover; the human path would not write the row")
 	}
 }
 
