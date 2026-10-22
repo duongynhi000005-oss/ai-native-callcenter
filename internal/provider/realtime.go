@@ -209,6 +209,21 @@ type Realtime struct {
 	unheardItems     []string
 	hasResponseAudio syncatomic.Bool
 
+	// The fields that tell the model a tool's answer went unheard. See
+	// noteUnheardResult.
+	//
+	// isResultUnheard means a tool result is in the conversation and no turn
+	// made with it in view has yet run to its end with its audio handed to
+	// the consumer. isAnswerResponse says the response now open is such a
+	// turn (not a line's), and answerItemID is the spoken item of the latest
+	// one, which is what lets a later Interrupt with 0 ms recognise it.
+	// isUnheardNoted means the note has been put in the conversation for the
+	// results now waiting, so a second cut turn does not repeat it.
+	isResultUnheard  bool
+	isAnswerResponse bool
+	answerItemID     string
+	isUnheardNoted   bool
+
 	// deleteSentAt is when this client last asked the provider to delete an
 	// item, which is what lets a refusal of that be recognised; see
 	// isAnsweredDelete.
@@ -837,6 +852,7 @@ func (r *Realtime) onResponseCreated() (isLine bool) {
 	r.mu.Lock()
 	isLine = r.isResponseRequested && r.request.kind == responseKindLine
 	r.isLineResponse = isLine
+	r.isAnswerResponse = !isLine && r.isResultUnheard
 	r.settleRequestLocked()
 	r.isCallerSpeaking = false
 	// Whoever asked for this response — this client or the provider's own
@@ -946,6 +962,7 @@ func (r *Realtime) SendToolResult(toolCallID, output string) error {
 	// line's turn ends. Without this a result that arrived while a wait line
 	// was on its way (#286) rode on the line and was never answered.
 	r.mu.Lock()
+	r.isResultUnheard, r.isUnheardNoted = true, false
 	isOpen := r.isResponseOpen.Load()
 	isLineRequested := !isOpen && r.isResponseRequested && r.request.kind == responseKindLine
 	isOwed := isOpen || r.isTurnOwed || isLineRequested
@@ -1129,7 +1146,15 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 			return err
 		}
 		if playedMs == 0 && !isDeleteDeferred {
-			return r.deleteUnheardItem(itemID, "")
+			if err := r.deleteUnheardItem(itemID, ""); err != nil {
+				return err
+			}
+			r.mu.Lock()
+			isAnswer := itemID == r.answerItemID
+			r.mu.Unlock()
+			if isAnswer {
+				return r.noteUnheardResult()
+			}
 		}
 	}
 	return nil
@@ -1408,6 +1433,9 @@ func (r *Realtime) handle(event *wireEvent) {
 			r.mu.Lock()
 			r.responseItemID = event.Item.ID
 			r.spokenItems = append(r.spokenItems, event.Item.ID)
+			if r.isAnswerResponse {
+				r.answerItemID = event.Item.ID
+			}
 			r.mu.Unlock()
 		}
 		// A function call is open until its arguments are done; see
@@ -1711,11 +1739,20 @@ func (r *Realtime) removeUnheardTurn(response *wireResponse) {
 	r.mu.Lock()
 	spoken, unheard := r.spokenItems, r.unheardItems
 	r.spokenItems, r.unheardItems = nil, nil
+	isAnswer, isPreempted := r.isAnswerResponse, r.isPreemptedForSpeak
+	r.isAnswerResponse = false
 	r.mu.Unlock()
 
 	status := ""
 	if response != nil {
 		status = response.Status
+	}
+	// An answer that ran to its end with its audio handed out was delivered;
+	// whether it was heard is the consumer's to report (Interrupt).
+	if isAnswer && (status == "" || status == statusCompleted) && r.hasResponseAudio.Load() {
+		r.mu.Lock()
+		r.isResultUnheard, r.isUnheardNoted = false, false
+		r.mu.Unlock()
 	}
 	ids := make([]string, 0, len(spoken)+len(unheard))
 	seen := make(map[string]struct{}, cap(ids))
@@ -1751,6 +1788,56 @@ func (r *Realtime) removeUnheardTurn(response *wireResponse) {
 				"itemId", id, "error", err)
 		}
 	}
+	// The turn that answered a tool result went unheard: the caller's next
+	// reply must give it. A turn stopped for a line is not: the line is the
+	// next turn, and it must say the line alone.
+	if isAnswer && len(ids) > 0 && !isPreempted {
+		if err := r.noteUnheardResult(); err != nil {
+			r.log.Debug("could not tell the model the result went unheard", "error", err)
+		}
+	}
+}
+
+// noteUnheardResult tells the model, as a note in the conversation, that the
+// caller has not heard the tool result it answered, so its next reply gives it.
+// Once per result: SendToolResult arms it again.
+//
+// Taking the unheard answer out (removeUnheardTurn) is not enough on its own.
+// On #286 live call 01a1627d-7eae-77c2-98f7-e997fca088da the answer was cut
+// before its audio and its item deleted, and the reply to the caller's "你在吗"
+// was still "在的，请问有什么可以帮您？", the reply qwen gives when the history
+// holds the answer as said. Measured on TestLiveQwenUnheardResultNote
+// (qwen-findings W-Q9): with the cut answer's words left in the history the
+// reply gave the result 1 of 8, with this note after them 9 of 9; with the
+// history clean it gave it 12 of 12 without the note and 4 of 4 with it, and a
+// follow-up question was answered alike either way. Why the live history was
+// not clean is not known; the note is what holds whatever is left in it.
+func (r *Realtime) noteUnheardResult() error {
+	r.mu.Lock()
+	if r.isUnheardNoted {
+		r.mu.Unlock()
+		return nil
+	}
+	r.isUnheardNoted = true
+	language := r.cfg.Language
+	r.mu.Unlock()
+	if err := r.sendEvent(userTextItem(unheardResultNote(language))); err != nil {
+		return err
+	}
+	r.log.Info("told the model the caller has not heard the tool's result")
+	return nil
+}
+
+// unheardResultNote is the note noteUnheardResult puts in the conversation, in
+// the session's language.
+func unheardResultNote(language string) string {
+	if strings.HasPrefix(strings.ToLower(language), "zh") {
+		return "（系统提示：刚才的查询结果还没有说给来电者听，来电者一个字也没有听到。" +
+			"下一次回复来电者时，先简短回应他，然后把查询结果告诉他。）"
+	}
+	return "(System note: the caller has not heard the result of the lookup yet, " +
+		"not a word of it. In your next reply to the caller, first respond briefly, " +
+		"then tell them the result.)"
 }
 
 // deleteUnheardItem takes one spoken item the caller heard none of out of the

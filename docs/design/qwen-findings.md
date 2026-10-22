@@ -1120,3 +1120,60 @@ because qwen ignores the truncate. Covered by
 
 **NOT MEASURED**: the flushed-behind-a-tail shape on a live call; a turn heard in
 part (qwen still keeps its whole text, #53); openai, grok and the gateway live.
+
+**Deletion alone was not enough on a live call.** On 06b465d, call
+01a1627d-7eae-77c2-98f7-e997fca088da (15:22): the caller spoke over the wait
+line's tail about 450 ms before the result ("余伟你在吗？"), the session's
+barge-in flushed the line's tail (`playedMs=1300`), the answer was asked for,
+cut by qwen before its audio and deleted (the INFO line fired, status
+`cancelled`), and the reply was still "在的，请问有什么可以帮您？"; the result came
+12 s later in the dead-air prompt. The deleted item was the answer's: the line's
+response had completed with audio, so it is never deleted on this path, and
+`Interrupt(SPEECH, 1300)` aims at the client's latest spoken item, which from the
+answer's `response.created` on is the answer's or none, and on qwen a truncate
+changes nothing anyway. The INFO log cannot show whether qwen honoured the
+delete or what else the history held.
+
+**Measured, outside timing.** `TestLiveQwenUnheardResultNote` builds the history
+directly (the model's call, the wait line, the result with no request for its
+turn), then the caller's words, answered by qwen's own turn detection. Counts
+are runs where the reply gave the result; "real" is the caller's audio cut from
+the call's recording (not in the repository), "tts" is `q_are_you_there.pcm`:
+
+| History after the result | real | tts |
+|---|---|---|
+| the cut answer's words kept (assistant item "合约期内变更套餐需支付200元违约金，由") | 0 / 4 | 1 / 4 |
+| kept, plus the note | 5 / 5 | 4 / 4 |
+| clean (no answer item) | 6 / 6 | 6 / 6 |
+| clean, plus the note | 4 / 4 | — |
+
+A follow-up question after the reply ("好的，那还有别的费用吗？") restated the
+200 yuan in 2 of 4 with the note and 3 of 4 without: the note does not make the
+result be said again. So the live reply is the one a history still holding the
+answer's words draws, and the note overrides it.
+
+**The shape, replayed.** `TestLiveQwenSpeechOverTheLineTail`: the caller's words
+start 2550 ms after the model's call, over the line's tail, and the first
+`speech_started` after the line gets the session's `Interrupt(SPEECH, 1300)`.
+Without `removeUnheardTurn`: the answer cut before its audio 4 of 4, the result
+given in the reply 3 of 4 (the miss was the run whose cut answer had written its
+whole text). With it and the note: cut 3 of 4, given 3 of 3; the fourth run's
+answer was not cut and was heard in full.
+
+**The note (`provider.Realtime.noteUnheardResult`).** When the turn that answers
+a tool result is deleted unheard (cut short before its audio, or reported
+flushed with 0 ms played), the client puts one caller-side note in the
+conversation, after the delete and before any request: "（系统提示：刚才的查询结果
+还没有说给来电者听，来电者一个字也没有听到。下一次回复来电者时，先简短回应他，然后
+把查询结果告诉他。）" (English for an English session). An answer turn is any
+turn other than a line's made while a result waits that no turn has yet
+delivered (run to its end with its audio handed out). Once per result: a
+second unheard turn does not repeat it, a new result arms it again. Not for a
+turn stopped to make room for a line, whose turn must say the line alone.
+Covered by `TestAnUnheardAnswerIsNotedOnceForTheReply`,
+`TestOnlyAnUnheardAnswerIsNoted`, `TestAnAnswerStoppedForALineIsNotNoted`,
+`TestADeliveredAnswerIsNotNotedAndANewResultIs` and
+`TestAnAnswerFlushedUnplayedIsNoted`.
+
+**NOT MEASURED**: the note on a live call; the English note; openai, grok and
+the gateway.

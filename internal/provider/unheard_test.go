@@ -5,6 +5,7 @@ package provider
 import (
 	"encoding/base64"
 	"testing"
+	"time"
 )
 
 // itemIDsOf lists the item ids of the messages given.
@@ -249,5 +250,213 @@ func TestATurnReportedUnheardIsDeleted(t *testing.T) {
 		}
 		f.awaitMessages("conversation.item.truncate", 1)
 		f.refuteMessage("conversation.item.delete")
+	})
+}
+
+// notesIn lists the unheard-result notes the client put in the conversation.
+func notesIn(f *fakeProvider) []string {
+	var notes []string
+	for _, m := range f.messagesOfType("conversation.item.create") {
+		item, _ := m["item"].(map[string]any)
+		content, _ := item["content"].([]any)
+		for _, c := range content {
+			part, _ := c.(map[string]any)
+			text, _ := part["text"].(string)
+			if text == unheardResultNote("en") {
+				notes = append(notes, text)
+			}
+		}
+	}
+	return notes
+}
+
+// awaitNotes waits until n notes were sent, then checks no more follow.
+func awaitNotes(t *testing.T, f *fakeProvider, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(notesIn(f)) < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := len(notesIn(f)); got != n {
+		t.Fatalf("the client sent %d unheard-result notes, want %d; it sent %v",
+			got, n, typesOf(f.messages()))
+	}
+}
+
+// answerTurn starts the turn that answers a tool result, with a spoken item.
+func answerTurn(t *testing.T, f *fakeProvider, session *Realtime, itemID string) {
+	t.Helper()
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": itemID, "type": "message"}})
+}
+
+// sendAudio hands the client one chunk of the open turn's audio.
+func sendAudio(t *testing.T, f *fakeProvider, session *Realtime) {
+	t.Helper()
+	f.send(map[string]any{"type": "response.audio.delta",
+		"delta": base64.StdEncoding.EncodeToString(make([]byte, 320))})
+	awaitEvent(t, session, EventTypeAudioDelta)
+}
+
+// finishAnswerTurn ends the open turn with a status and waits for the client to say so.
+func finishAnswerTurn(t *testing.T, f *fakeProvider, session *Realtime, status string) {
+	t.Helper()
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{"status": status}})
+	if status == statusCancelled {
+		awaitEvent(t, session, EventTypeInterrupted)
+	} else {
+		awaitEvent(t, session, EventTypeResponseDone)
+	}
+}
+
+// Live call 01a1627d-7eae-77c2-98f7-e997fca088da: the answer was cut before
+// its audio and taken out, and the reply to the caller still took it as given.
+// The model is told, once, that the caller has not heard the result, after the
+// item is gone and before anything asks for a turn; a second unheard turn (the
+// provider's reply cut by the caller's next words) does not repeat it.
+func TestAnUnheardAnswerIsNotedOnceForTheReply(t *testing.T) {
+	f, session := startWaitLineCall(t, QwenProfile())
+	if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+	answerTurn(t, f, session, "item_answer")
+	// A cue while the answer is open owes a turn past it.
+	if err := session.SendUserText("(The caller pressed 2.)"); err != nil {
+		t.Fatalf("cue: %v", err)
+	}
+	finishAnswerTurn(t, f, session, statusCancelled)
+	awaitNotes(t, f, 1)
+	f.awaitMessages("response.create", 3)
+	types := typesOf(f.messages())
+	deleteAt := indexOf(types, "conversation.item.delete")
+	lastCreate := len(types) - 1 - indexOf(reversed(types), "response.create")
+	lastItem := len(types) - 1 - indexOf(reversed(types), "conversation.item.create")
+	if deleteAt > lastItem || lastItem > lastCreate {
+		t.Errorf("want the delete, then the note, then the owed turn: %v", types)
+	}
+
+	// The owed turn is cut before its audio too.
+	answerTurn(t, f, session, "item_again")
+	finishAnswerTurn(t, f, session, statusCancelled)
+	f.awaitMessages("conversation.item.delete", 2)
+	awaitNotes(t, f, 1)
+}
+
+// A turn that is not an answer to a result is taken out unheard with no note:
+// a cue's reply with no result waiting, and the turn of a line.
+func TestOnlyAnUnheardAnswerIsNoted(t *testing.T) {
+	t.Run("cue reply", func(t *testing.T) {
+		f, session := startWaitLineCall(t, QwenProfile())
+		if err := session.SendUserText("(The caller pressed 1.)"); err != nil {
+			t.Fatalf("cue: %v", err)
+		}
+		f.awaitMessages("response.create", 2)
+		answerTurn(t, f, session, "item_reply")
+		finishAnswerTurn(t, f, session, statusCancelled)
+		f.awaitMessages("conversation.item.delete", 1)
+		awaitNotes(t, f, 0)
+	})
+	t.Run("line", func(t *testing.T) {
+		f, session := startWaitLineCall(t, QwenProfile())
+		sayWaitLine(t, f, session)
+		// The result arrives while the line's request is in flight: its turn
+		// is owed past the line, and the line's turn is not its answer.
+		if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+			t.Fatalf("send tool result: %v", err)
+		}
+		answerTurn(t, f, session, "item_line")
+		finishAnswerTurn(t, f, session, statusCancelled)
+		f.awaitMessages("conversation.item.delete", 1)
+		awaitNotes(t, f, 0)
+	})
+}
+
+// An answer whose turn is stopped to make room for a line is taken out unheard
+// with no note: the line is the next turn and must say the line alone.
+func TestAnAnswerStoppedForALineIsNotNoted(t *testing.T) {
+	f, session := startWaitLineCall(t, QwenProfile())
+	if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+	answerTurn(t, f, session, "item_answer")
+	if err := session.SpeakText("Let me put you through.", false); err != nil {
+		t.Fatalf("speak: %v", err)
+	}
+	f.awaitMessages("response.cancel", 1)
+	finishAnswerTurn(t, f, session, statusCancelled)
+	f.awaitMessages("conversation.item.delete", 1)
+	f.awaitMessages("response.create", 3)
+	awaitNotes(t, f, 0)
+}
+
+// An answer that ran to its end with its audio handed out was delivered: a
+// later turn cut before its audio is taken out with no note. Until a new
+// result arrives; that one is noted again if its answer goes unheard.
+func TestADeliveredAnswerIsNotNotedAndANewResultIs(t *testing.T) {
+	f, session := startWaitLineCall(t, QwenProfile())
+	if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+	answerTurn(t, f, session, "item_answer")
+	sendAudio(t, f, session)
+	finishAnswerTurn(t, f, session, statusCompleted)
+
+	if err := session.SendUserText("(The caller pressed 1.)"); err != nil {
+		t.Fatalf("cue: %v", err)
+	}
+	f.awaitMessages("response.create", 3)
+	answerTurn(t, f, session, "item_reply")
+	finishAnswerTurn(t, f, session, statusCancelled)
+	f.awaitMessages("conversation.item.delete", 1)
+	awaitNotes(t, f, 0)
+
+	if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	f.awaitMessages("response.create", 4)
+	answerTurn(t, f, session, "item_second")
+	finishAnswerTurn(t, f, session, statusCancelled)
+	f.awaitMessages("conversation.item.delete", 2)
+	awaitNotes(t, f, 1)
+}
+
+// An answer flushed before a frame of it played (Interrupt, 0 ms) is noted
+// after it is deleted; a turn that is not an answer is deleted with no note.
+func TestAnAnswerFlushedUnplayedIsNoted(t *testing.T) {
+	t.Run("answer", func(t *testing.T) {
+		f, session := startWaitLineCall(t, QwenProfile())
+		if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
+			t.Fatalf("send tool result: %v", err)
+		}
+		f.awaitMessages("response.create", 2)
+		answerTurn(t, f, session, "item_answer")
+		sendAudio(t, f, session)
+		finishAnswerTurn(t, f, session, statusCompleted)
+		if err := session.Interrupt(InterruptReasonSpeech, 0); err != nil {
+			t.Fatalf("interrupt: %v", err)
+		}
+		f.awaitMessages("conversation.item.delete", 1)
+		awaitNotes(t, f, 1)
+	})
+	t.Run("not an answer", func(t *testing.T) {
+		f, session := startWaitLineCall(t, QwenProfile())
+		if err := session.SendUserText("(The caller pressed 1.)"); err != nil {
+			t.Fatalf("cue: %v", err)
+		}
+		f.awaitMessages("response.create", 2)
+		answerTurn(t, f, session, "item_reply")
+		sendAudio(t, f, session)
+		finishAnswerTurn(t, f, session, statusCompleted)
+		if err := session.Interrupt(InterruptReasonSpeech, 0); err != nil {
+			t.Fatalf("interrupt: %v", err)
+		}
+		f.awaitMessages("conversation.item.delete", 1)
+		awaitNotes(t, f, 0)
 	})
 }
