@@ -192,6 +192,11 @@ type Realtime struct {
 	// removeUnfinishedCalls.
 	callItems     map[string]string
 	finishedCalls map[string]struct{}
+	// isLineResponse says the response now open is the one a line asked for
+	// (onResponseCreated). A function call it makes is never handed out, and
+	// it is taken out of the conversation when the response ends; see
+	// onLineCall.
+	isLineResponse bool
 
 	// deleteSentAt is when this client last asked the provider to delete an
 	// item, which is what lets a refusal of that be recognised; see
@@ -591,7 +596,7 @@ func (r *Realtime) askForLine(request responseRequest) error {
 				return err
 			}
 		}
-		return r.sendEvent(speakRequest(request.direction))
+		return r.sendEvent(speakRequest(request.direction, r.profile.AcceptsResponseToolChoice))
 	}()
 	if err != nil {
 		r.mu.Lock()
@@ -608,11 +613,19 @@ func (r *Realtime) askForLine(request responseRequest) error {
 // carries has no counterpart on a response, and both name the per-response
 // override the same way, so there is nothing here for a dialect to disagree
 // about.
-func speakRequest(direction string) map[string]any {
-	return map[string]any{
-		"type":     "response.create",
-		"response": map[string]any{"instructions": direction},
+//
+// isToolBarred adds the per-response tool_choice "none", on a profile that
+// takes one (AcceptsResponseToolChoice). A line is words the flow chose, and
+// the turn that says them must not call a tool: asked for while a slow tool's
+// call was still unanswered (the wait line, #286), qwen answered the line's
+// request with a second, identical call to that tool, so the backend was hit
+// twice and the caller heard the answer twice (qwen-findings W-Q8).
+func speakRequest(direction string, isToolBarred bool) map[string]any {
+	response := map[string]any{"instructions": direction}
+	if isToolBarred {
+		response["tool_choice"] = "none"
 	}
+	return map[string]any{"type": "response.create", "response": response}
 }
 
 // SayExactly is how a model is asked for particular words rather than for a
@@ -771,7 +784,7 @@ func (r *Realtime) sendRetry(expired responseRequest) error {
 			return err
 		}
 	}
-	return r.sendEvent(speakRequest(expired.direction))
+	return r.sendEvent(speakRequest(expired.direction, r.profile.AcceptsResponseToolChoice))
 }
 
 // onResponseCreated stops a turn that was superseded before it existed.
@@ -785,6 +798,7 @@ func (r *Realtime) sendRetry(expired responseRequest) error {
 func (r *Realtime) onResponseCreated() (isLine bool) {
 	r.mu.Lock()
 	isLine = r.isResponseRequested && r.request.kind == responseKindLine
+	r.isLineResponse = isLine
 	r.settleRequestLocked()
 	r.isCallerSpeaking = false
 	// Whoever asked for this response — this client or the provider's own
@@ -1390,6 +1404,9 @@ func (r *Realtime) handle(event *wireEvent) {
 		return
 
 	case "response.function_call_arguments.done":
+		if r.onLineCall(event) {
+			return
+		}
 		r.finishCall(event.ItemID, event.CallID)
 		arguments := event.Arguments
 		if arguments == "" {
@@ -1509,8 +1526,35 @@ func (r *Realtime) finishCall(itemID, callID string) {
 	}
 }
 
+// onLineCall reports whether a finished function call belongs to a line's
+// turn, and if so keeps it from the consumer.
+//
+// A line is words the flow chose, and the turn asked for to say them must not
+// act. qwen ignores every way the request can say so (a response-level
+// tool_choice "none" and a response-level empty tools list, measured
+// 2026-10-22, qwen-findings W-Q8): asked for a wait line while a slow tool's
+// call was unanswered, it said the line and called the same tool again with
+// the same arguments. Handed out, that call hit the backend a second time and
+// its result made a second answer turn. So the call is not handed out, and it
+// is left open: removeUnfinishedCalls takes it out of the conversation when
+// the line's turn ends, as it does a call a cancelled turn left half made, so
+// that no later turn reads it as a call still waiting for its output. The
+// call the line was said over is the earlier turn's and is answered as usual.
+func (r *Realtime) onLineCall(event *wireEvent) bool {
+	r.mu.Lock()
+	isLine := r.isLineResponse
+	r.mu.Unlock()
+	if !isLine {
+		return false
+	}
+	r.log.Info("the turn asked for a line called a tool; the call is not handed out and is taken back when the turn ends",
+		"tool", event.Name, "callId", event.CallID, "itemId", event.ItemID)
+	return true
+}
+
 // removeUnfinishedCalls takes out of the conversation every function call a
-// response that did not complete left half made.
+// response that did not complete left half made, and every function call a
+// line's turn made (onLineCall), however that turn ended.
 //
 // A response cut off while it is writing a call's arguments (a keypress, a
 // barge-in, a preempting line) leaves the call item in the conversation, with
@@ -1534,18 +1578,27 @@ func (r *Realtime) finishCall(itemID, callID string) {
 // the event); see isAnsweredDelete.
 func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
 	r.mu.Lock()
-	open, finished := r.callItems, r.finishedCalls
-	r.callItems, r.finishedCalls = nil, nil
+	open, finished, isLine := r.callItems, r.finishedCalls, r.isLineResponse
+	r.callItems, r.finishedCalls, r.isLineResponse = nil, nil, false
 	r.mu.Unlock()
 
-	if response == nil || response.Status == "" || response.Status == statusCompleted {
+	isCutShort := response != nil && response.Status != "" && response.Status != statusCompleted
+	if !isCutShort && !isLine {
 		return
+	}
+	status := ""
+	if response != nil {
+		status = response.Status
 	}
 	ids := make(map[string]struct{}, len(open))
 	for id := range open {
 		ids[id] = struct{}{}
 	}
-	for _, item := range response.Output {
+	var output []wireItem
+	if response != nil {
+		output = response.Output
+	}
+	for _, item := range output {
 		if item.Type != "function_call" || item.ID == "" {
 			continue
 		}
@@ -1567,8 +1620,8 @@ func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
 				"itemId", id, "error", err)
 			continue
 		}
-		r.log.Debug("took the function call a cancelled response left unfinished out of the conversation",
-			"itemId", id, "status", response.Status)
+		r.log.Debug("took a function call out of the conversation",
+			"itemId", id, "status", status, "isLine", isLine)
 	}
 }
 

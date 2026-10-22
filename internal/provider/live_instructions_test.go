@@ -186,8 +186,14 @@ type midCall struct {
 
 func openMidCall(t *testing.T, profile Profile, withTool bool) *midCall {
 	t.Helper()
-	session, err := New(profile, slog.New(slog.NewTextHandler(os.Stderr,
+	return openMidCallLogged(t, profile, withTool, slog.New(slog.NewTextHandler(os.Stderr,
 		&slog.HandlerOptions{Level: slog.LevelWarn})))
+}
+
+// openMidCallLogged is openMidCall with the client's logger chosen by the test.
+func openMidCallLogged(t *testing.T, profile Profile, withTool bool, log *slog.Logger) *midCall {
+	t.Helper()
+	session, err := New(profile, log)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}

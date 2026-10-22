@@ -137,6 +137,28 @@ type Profile struct {
 	// no sampling parameter at all. Sending it anyway risks a rejected
 	// session.update, which costs the whole session.
 	AcceptsTemperature bool
+
+	// AcceptsResponseToolChoice means a response.create may carry tool_choice
+	// in its response object and the engine obeys it, and this client sends
+	// "none" on every request for a line (SpeakText: a phase's announce, the
+	// wait line), so the turn that says the line does not call a tool. Other
+	// requests carry none: the turn that answers a tool result or a caller must
+	// still be able to call one.
+	//
+	// A line asked for while a tool's call is unanswered was answered with a
+	// second, identical call to the same tool on qwen: 4 calls of 4 in the
+	// #286 live round, and 3 of 3 sessions of TestLiveQwenLineCallsNoTool, one
+	// without the field, one with tool_choice "none", one with an empty tools
+	// list (qwen-findings W-Q8). Whatever the profile, the client never hands
+	// such a call out and takes it back out of the conversation (onLineCall);
+	// this field is what lets an engine that obeys it say the line instead of
+	// spending the turn on a call.
+	//
+	// Where it is false the field is not sent: an engine that ignores it gains
+	// nothing, and one that refuses it costs the line (the Realtime gateway
+	// rejects response.tool_choice and response.tools alike as "Unsupported
+	// parameter").
+	AcceptsResponseToolChoice bool
 }
 
 // OpenAIProfile is the provider used outside mainland China.
@@ -163,6 +185,10 @@ func OpenAIProfile() Profile {
 		LinearInput:           media.PCM16Format(media.RateProviderOut),
 		LinearOutput:          media.PCM16Format(media.RateProviderOut),
 		CancelsResponseItself: true,
+		// Documented: the GA response object takes tool_choice ("none",
+		// "auto", "required" or a forced function), read 2026-10-22. Not
+		// measured live here.
+		AcceptsResponseToolChoice: true,
 	}
 }
 
@@ -209,6 +235,12 @@ func QwenProfile() Profile {
 		// the conversation already there (W-Q1, and a dead-air goodbye on live
 		// call 01a0cbb9-…); the opening turn, told both ways, did not.
 		NeedsDirectedLineInConversation: true,
+		// Undocumented (the vendor's response.create lists no fields at all,
+		// the instructions override included), and measured 2026-10-22
+		// (qwen-findings W-Q8): tool_choice "none" and an empty tools list on
+		// the response are both accepted without an error and both ignored;
+		// the line's turn called the tool anyway.
+		AcceptsResponseToolChoice: false,
 	}
 }
 
@@ -259,6 +291,11 @@ func GatewayProfile() Profile {
 		// accepts — the refusal that forces a cue on Qwen's own realtime
 		// dialect does not exist here.
 		NeedsCueForFirstTurn: false,
+		// Its response.create rejects response.tool_choice and response.tools
+		// as "Unsupported parameter: ... Cascade does not implement it."
+		// (cascade-realtime-gateway, internal/protocol/decode.go,
+		// decodeResponseCreate). Sending the bar would cost every line.
+		AcceptsResponseToolChoice: false,
 	}
 }
 
@@ -268,7 +305,7 @@ func GatewayProfile() Profile {
 // It is therefore the one profile whose values do not all mean what they mean
 // above: everything the Realtime client alone reads — Style,
 // TranscribeModel, CancelsResponseItself, NeedsCueForFirstTurn,
-// NeedsDirectedLineInConversation — is left
+// NeedsDirectedLineInConversation, AcceptsResponseToolChoice — is left
 // at zero, because the client that answers for this name
 // (internal/provider/doubao) reads none of them. What it does read is the name,
 // the endpoint, the credential, the voice and the two audio
@@ -355,6 +392,10 @@ func GrokProfile() Profile {
 		// Measured (grok-findings 5.3): any number is accepted and echoed, but
 		// no effect on output was seen at 3 samples per value; off until one is.
 		AcceptsTemperature: false,
+		// Undocumented: xAI's response.create documents the instructions
+		// override alone. Not measured, so not sent; a line's tool call is
+		// still never handed out (onLineCall).
+		AcceptsResponseToolChoice: false,
 	}
 }
 

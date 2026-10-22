@@ -947,3 +947,65 @@ value the model must recall verbatim (the marker is a style rule, the easiest
 kind of instruction to check), an update late in a long call when the provider
 trims its own history, and a phase paragraph that competes with a tool result's
 hint.
+
+## W-Q8: a line asked for over an unanswered call repeats the call (2026-10-22)
+
+**W-Q8 — a `response.create` asking for a line (`SpeakText`, a per-response
+`instructions` override) while a tool's call is still unanswered is answered
+with a second function call to the same tool with the same arguments, and
+nothing on the request stops it.** Found in the live round of #286 (the wait
+line), 4 calls on DID 95012, 2026-10-22 13:07–13:10, model
+`qwen-audio-3.1-realtime-plus`.
+
+**On the calls.** In every call the orchestrator said the wait line at the 1 s
+mark, and the transcript shows `TOOL_CALL kb_search_slow`, then straight after
+the line's request a second `TOOL_CALL kb_search_slow` with the same query. The
+second call was dispatched like the first: the backend was hit twice, the two
+results made two answer turns, and the answer was said twice. On the recordings:
+4.6 s of silence and no wait line (call 1); the wait line only ~5.4 s after the
+tool call, together with the answer (call 2); an apology after ~4 s instead of
+2 s for a tool with `timeoutMs` 2000 (calls 3 and 4).
+
+**Measured.** `TestLiveQwenLineCallsNoTool`
+(`internal/provider/live_line_tools_test.go`), through the product client:
+`lookup_order` declared at Start, the caller's order question (`q_order.pcm`),
+the model calls the tool, and with that call unanswered the test asks for
+"请稍等，我查一下。" with `SpeakText`. One session per arm:
+
+| Line request | Line's turn |
+|---|---|
+| `response.instructions` only (as shipped) | said the line, then called `lookup_order {"orderId": "12345"}` again |
+| plus `response.tool_choice: "none"` | the same: no error, the field ignored |
+| plus `response.tools: []` | the same: no error, the field ignored |
+
+The vendor's guide documents no field of `response.create`'s `response` at all
+(the `instructions` override included, which is obeyed), so neither result
+contradicts it. OpenAI documents a response-level `tool_choice` with `"none"`;
+xAI documents the `instructions` override alone; the Realtime gateway refuses
+`response.tool_choice` and `response.tools` as "Unsupported parameter"
+(cascade-realtime-gateway, `internal/protocol/decode.go`).
+
+**The fix (`provider.Realtime`).** A function call made in a line's turn
+(`onLineCall`: the response created for a `responseKindLine` request) is never
+handed out as a tool call, on any profile, and its item is deleted with
+`conversation.item.delete` when that turn ends, however it ends, through the
+same path that removes a cancelled turn's half-made call (W-Q5), so no later
+turn reads it as a call still waiting for its output. The call the line was said
+over belongs to the earlier turn and is answered as usual. On a profile that
+obeys a response-level bar (`AcceptsResponseToolChoice`, openai only, on its
+documentation), every line request also carries `tool_choice: "none"`, so the
+model says the line instead of spending the turn on a call; qwen, grok and the
+gateway do not get the field. With the fix the same session passed: the line was
+said (first audio 1.1 s after the request), the provider's second call
+(`call_bc1159eb…`) was kept back and its item deleted (`conversation.item.deleted`
+acknowledged), the result made exactly one answer turn
+(`您的订单已发货，预计明天送达。`), and nothing else started in the 6 s after it.
+Covered by `TestACallMadeInALinesTurnIsNeverHandedOut`,
+`TestALineRequestBarsToolsWhereTheProfileObeysIt` and
+`TestOnlyALineRequestBarsTools` (`internal/provider/line_tools_test.go`).
+
+**NOT MEASURED**: how often qwen makes the call (1 session per arm here, 4 of 4
+on the calls), a line's turn that makes only the call and says nothing (call 1's
+shape: the line is then lost, and nothing asks for it again), session-level
+`tool_choice` or a mid-call `session.update` with `tools: []`, and the openai
+and grok behaviour (the openai bar rests on its documentation).
