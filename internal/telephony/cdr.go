@@ -288,10 +288,16 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 	// the person being called. When what they reached was a bot, there is no
 	// leg dialled out and the bot's answer is the call's.
 	placed := isAgentPlaced(originator)
+	handedOver := placed && placerHandedOver(snap, originator, cdr.EndedAt)
 
 	if originator != nil {
 		cdr.FromNumber = originator.Number
 		cdr.HangupCause = originator.ReleaseCause
+		if handedOver {
+			// The placer's leg ended at the hand-over, so its cause says how
+			// the transfer went, not how the call did (#282).
+			cdr.HangupCause = endingCause(snap, originator)
+		}
 		switch {
 		case cdr.DID == "":
 			cdr.ToNumber = originator.OtherNumber
@@ -309,8 +315,21 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 		}
 	}
 
-	// The queue's identity and timings.
-	queueName := snap.Queue.Name
+	// The queue's identity and timings: the first queue the caller joined,
+	// and that stay's wait (owner decision on #283). The row has one queue
+	// and the reports group by it, so a call that passed through two queues
+	// counts once, under the queue it first reached; the journey lists every
+	// stay. Each stay's wait is its own: the first queue's bridge, never a
+	// later queue's join, which is how a two-queue call used to come out
+	// with a negative wait. A call the bot handed to a queue the caller never
+	// joined (gone before the queue took them in) has no stay and is counted
+	// under the bot's queue, with no wait; the contract's CDR.queueId says so.
+	stays := queueStays(snap)
+	var first QueueFacts
+	if len(stays) > 0 {
+		first = stays[0]
+	}
+	queueName := first.Name
 	if queueName == "" {
 		queueName = snap.Bot.Queue
 	}
@@ -319,14 +338,8 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 			cdr.QueueID = &id
 		}
 	}
-	if !snap.Queue.JoinedAt.IsZero() {
-		waitEnd := snap.Queue.BridgedAt
-		if waitEnd.IsZero() {
-			waitEnd = snap.Queue.LeftAt
-		}
-		if !waitEnd.IsZero() {
-			cdr.QueueWaitSec = int(waitEnd.Sub(snap.Queue.JoinedAt).Seconds())
-		}
+	if len(stays) > 0 {
+		cdr.QueueWaitSec = stayWaitSec(first)
 	}
 
 	// The people involved, and how long they talked.
@@ -389,7 +402,10 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 	// however long the bot spoke first. Reading the bot's own answer as the
 	// call's hid every abandoned queue call here, because every inbound call
 	// meets the bot first.
-	soughtAPerson := len(agentLegs) > 0 || !snap.Queue.JoinedAt.IsZero()
+	//
+	// Any stay will do: a caller who joined a queue at any point was waiting
+	// for a person from then on.
+	soughtAPerson := len(agentLegs) > 0 || len(stays) > 0
 	metBot := botLeg(snap) != nil || snap.Bot.Sec > 0
 
 	switch {
@@ -427,15 +443,15 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 		if calleeWasBusy(snap, originator, dialled, placed) {
 			cdr.Status = store.CDRStatusBusy
 		}
-		cdr.MissedReason = a.missedReason(snap, agentLegs)
+		cdr.MissedReason = a.missedReason(stays, agentLegs)
 		cdr.RingSec = ringSpan(agentLegs)
 	}
 
 	if placed {
-		cdr.Legs = buildLegs(snap, originator, append(slices.Clone(agentLegs), dialled...), cdr.BotSec,
-			placerIsAHop(snap, originator, dialled, metBot, cdr.EndedAt), cdr.EndedAt)
+		cdr.Legs = buildLegs(snap, stays, originator, append(slices.Clone(agentLegs), dialled...), cdr.BotSec,
+			placerIsAHop(dialled, metBot, handedOver), cdr.EndedAt)
 	} else {
-		cdr.Legs = buildLegs(snap, originator, agentLegs, cdr.BotSec, false, cdr.EndedAt)
+		cdr.Legs = buildLegs(snap, stays, originator, agentLegs, cdr.BotSec, false, cdr.EndedAt)
 	}
 	cdr.UnbackedClaims = snap.Bot.UnbackedClaims
 	if snap.Bot.Summary != "" {
@@ -622,6 +638,39 @@ func ringSpan(agentLegs []*PartySnapshot) int {
 	return int(last.Sub(first).Seconds())
 }
 
+// queueStays is every queue stay the call made, in the order joined, leaving
+// out a stay whose join was never seen: with no start there is no wait to
+// measure and no place in the journey, which is how the single record was
+// read too. A snapshot built with only the current stay (Snapshot.Queue) and
+// no history is read as that one stay.
+func queueStays(snap Snapshot) []QueueFacts {
+	stays := snap.QueueStays
+	if len(stays) == 0 {
+		stays = []QueueFacts{snap.Queue}
+	}
+	var out []QueueFacts
+	for _, s := range stays {
+		if !s.JoinedAt.IsZero() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// stayWaitSec is how long the caller waited in one stay: from joining to the
+// bridge, or to leaving when nobody was reached. A stay with neither (the
+// call ended before the queue said so) has no wait to report.
+func stayWaitSec(stay QueueFacts) int {
+	end := stay.BridgedAt
+	if end.IsZero() {
+		end = stay.LeftAt
+	}
+	if end.IsZero() {
+		return 0
+	}
+	return int(end.Sub(stay.JoinedAt).Seconds())
+}
+
 // billDriftTolerance is how far the ledger and the switch may differ on
 // billable seconds before it is worth saying so. One second is arithmetic — we
 // truncate, the switch rounds — and measured drift on live calls has stayed
@@ -629,8 +678,18 @@ func ringSpan(agentLegs []*PartySnapshot) int {
 const billDriftTolerance = 2
 
 // missedReason follows the design's precedence: the caller's own phase first.
-func (a *CDRAssembler) missedReason(snap Snapshot, agentLegs []*PartySnapshot) string {
-	queue := snap.Queue
+//
+// The phase is the one the caller was in when the call ended, so on a call
+// that passed through several queues it is the last stay (#283): a caller the
+// first queue timed out on and who then gave up waiting in the second
+// abandoned the call; the first queue's timeout is how they got to the
+// second, not how the call ended. Every stay is unanswered here — this is only
+// asked of a call nobody answered.
+func (a *CDRAssembler) missedReason(stays []QueueFacts, agentLegs []*PartySnapshot) string {
+	var queue QueueFacts
+	if len(stays) > 0 {
+		queue = stays[len(stays)-1]
+	}
 
 	// Only ever asked about a call nobody answered, so a queue that bridged
 	// did not stay bridged, and the phase the caller was in when they gave up
@@ -720,8 +779,10 @@ func isCallerGone(queue QueueFacts) bool {
 // carried by two people: the placer's stretch with the customer came first,
 // and leaving it out drew a journey that started with the colleague who took
 // over (#267) — while the same transfer on an inbound call names both agents.
-func placerIsAHop(snap Snapshot, originator *PartySnapshot, dialled []*PartySnapshot, metBot bool, end time.Time) bool {
-	return (metBot && len(dialled) == 0) || placerHandedOver(snap, originator, end)
+//
+// handedOver is placerHandedOver's answer, which assemble already has.
+func placerIsAHop(dialled []*PartySnapshot, metBot, handedOver bool) bool {
+	return (metBot && len(dialled) == 0) || handedOver
 }
 
 // placerHandedOver reports whether the agent who placed the call passed it on
@@ -734,6 +795,10 @@ func placerIsAHop(snap Snapshot, originator *PartySnapshot, dialled []*PartySnap
 // the call went on to a queue, or a leg was dialled, after the placer's own
 // conversation had begun. The legs the placer dialled to reach the customer
 // were all created before that, so they never count.
+//
+// Any queue stay joined after the placer's conversation began is somebody
+// new: the placer passed the customer to a queue. With one record per call
+// that was the latest join, so asking of every stay is the same question.
 func placerHandedOver(snap Snapshot, originator *PartySnapshot, end time.Time) bool {
 	if originator.ReleasedAt == nil || !originator.ReleasedAt.Before(end) {
 		return false
@@ -743,8 +808,10 @@ func placerHandedOver(snap Snapshot, originator *PartySnapshot, end time.Time) b
 		// Nobody was reached, so there was nothing to hand over.
 		return false
 	}
-	if snap.Queue.JoinedAt.After(talked) {
-		return true
+	for _, stay := range queueStays(snap) {
+		if stay.JoinedAt.After(talked) {
+			return true
+		}
 	}
 	for i := range snap.Parties {
 		if p := &snap.Parties[i]; p.Role != RoleOriginator && p.CreatedAt.After(talked) {
@@ -752,6 +819,156 @@ func placerHandedOver(snap Snapshot, originator *PartySnapshot, end time.Time) b
 		}
 	}
 	return false
+}
+
+// teardownWindow is how soon after one leg of a bridge releases the switch
+// takes its partner down. Propagation is milliseconds; a second is generous
+// and still far shorter than any wait a caller sits through on their own.
+const teardownWindow = time.Second
+
+// endingCause is the hangup cause of a call whose placer handed it on: the
+// cause of the leg whose release ended the call (#282). The placer's own leg
+// ended at the hand-over, and its NORMAL_CLEARING read the same whether the
+// customer gave up while the colleague's phone rang, the onward number was
+// busy or the colleague hung up.
+//
+// The customer's leg is the one the call is about after the hand-over, so it
+// decides: its cause, when it released last or released first and the rest
+// followed it down. When a leg that could take the customer down released
+// just before them, that leg's release is what did — the colleague hanging
+// up, the onward number refusing — and the cause is that leg's
+// (couldEndCustomer). Only when the customer's leg cannot be found, or the
+// call outlived it, is the answer the last leg to release.
+//
+// Equal timestamps are the customer's: nothing says the other leg went
+// first.
+func endingCause(snap Snapshot, originator *PartySnapshot) string {
+	var last *PartySnapshot
+	for i := range snap.Parties {
+		p := &snap.Parties[i]
+		if p == originator || p.ReleasedAt == nil {
+			continue
+		}
+		if last == nil || p.ReleasedAt.After(*last.ReleasedAt) {
+			last = p
+		}
+	}
+	if last == nil {
+		return originator.ReleaseCause
+	}
+	customer := customerLeg(snap, originator)
+	if customer == nil || customer.ReleasedAt == nil {
+		return last.ReleaseCause
+	}
+	gone := *customer.ReleasedAt
+
+	// The last leg able to take the customer down that released before they
+	// did, if it went close enough before to have done it.
+	var before *PartySnapshot
+	for i := range snap.Parties {
+		p := &snap.Parties[i]
+		if p == originator || p == customer || p.ReleasedAt == nil || !p.ReleasedAt.Before(gone) {
+			continue
+		}
+		if !couldEndCustomer(snap, originator, customer, p) {
+			continue
+		}
+		if before == nil || p.ReleasedAt.After(*before.ReleasedAt) {
+			before = p
+		}
+	}
+	if before != nil && gone.Sub(*before.ReleasedAt) <= teardownWindow {
+		return before.ReleaseCause
+	}
+	// Released last, or released first and the rest followed it down.
+	if !last.ReleasedAt.After(gone.Add(teardownWindow)) {
+		return customer.ReleaseCause
+	}
+	return last.ReleaseCause
+}
+
+// couldEndCustomer reports whether leg p's release can be what took the
+// customer's leg down. Only two kinds of leg can:
+//
+//   - a leg bridged with the customer when it released: the colleague who
+//     answered and hung up, or whose phone dropped. The switch tears down the
+//     partner of a bridge that ends with a hangup.
+//   - the leg the hand-over was dialling straight at: created at the hand-over
+//     (no earlier than the placer's release, less the teardown window) and
+//     not while the customer was waiting in a queue. Its refusal ends the
+//     transfer's bridge application, and the customer with it: an extension
+//     rejecting the transfer (CALL_REJECTED, live 01a161a2), an outside
+//     number answering USER_BUSY.
+//
+// A queue's offer is neither. A phone the queue rang that was not answered
+// (NO_ANSWER), or lost a ring-all race (LOSE_RACE), leaves the customer
+// waiting in the queue; it releasing a moment before the customer gave up is
+// a coincidence, not a cause.
+func couldEndCustomer(snap Snapshot, originator, customer, p *PartySnapshot) bool {
+	released := *p.ReleasedAt
+	if bridgedAt(p, customer.ChannelID, released) || bridgedAt(customer, p.ChannelID, released) {
+		return true
+	}
+	if originator.ReleasedAt == nil ||
+		p.CreatedAt.Before(originator.ReleasedAt.Add(-teardownWindow)) {
+		return false
+	}
+	for _, stay := range queueStays(snap) {
+		if !p.CreatedAt.Before(stay.JoinedAt) && (stay.LeftAt.IsZero() || !p.CreatedAt.After(stay.LeftAt)) {
+			return false // offered by the queue the customer was waiting in
+		}
+	}
+	return true
+}
+
+// bridgedAt reports whether leg p was bridged to the channel other at moment
+// t: a stretch that began by then and had not ended more than the teardown
+// window before it. A hangup closes a leg's own stretch at its release, but
+// the switch can report the unbridge a few milliseconds ahead of the hangup.
+func bridgedAt(p *PartySnapshot, other string, t time.Time) bool {
+	if other == "" {
+		return false
+	}
+	for _, b := range p.Bridges {
+		if b.OtherChannelID != other || b.StartedAt.After(t) {
+			continue
+		}
+		if b.EndedAt.IsZero() || !b.EndedAt.Before(t.Add(-teardownWindow)) {
+			return true
+		}
+	}
+	return false
+}
+
+// customerLeg is the leg the placer was talking to: the other end of their
+// first bridge. A placer whose bridge names no leg on the call falls back to
+// the earliest leg dialled before that bridge began, which is the one they
+// dialled to reach the customer.
+func customerLeg(snap Snapshot, originator *PartySnapshot) *PartySnapshot {
+	var first *BridgeSpan
+	for i := range originator.Bridges {
+		if b := &originator.Bridges[i]; first == nil || b.StartedAt.Before(first.StartedAt) {
+			first = b
+		}
+	}
+	if first == nil {
+		return nil
+	}
+	for i := range snap.Parties {
+		if p := &snap.Parties[i]; p != originator && p.ChannelID != "" && p.ChannelID == first.OtherChannelID {
+			return p
+		}
+	}
+	var earliest *PartySnapshot
+	for _, p := range dialledLegs(snap) {
+		if p.CreatedAt.After(first.StartedAt) {
+			continue
+		}
+		if earliest == nil || p.CreatedAt.Before(earliest.CreatedAt) {
+			earliest = p
+		}
+	}
+	return earliest
 }
 
 // placerLeg is the hop of the agent who placed the call: their own time with
@@ -803,7 +1020,11 @@ func joinedAt(snap Snapshot, p *PartySnapshot) time.Time {
 // call they transferred to a colleague listed the colleague before the
 // customer the agent had dialled (#267), and an agent who passed a caller to
 // a queue appeared after it.
-func buildLegs(snap Snapshot, originator *PartySnapshot, parties []*PartySnapshot, botSec int, withPlacer bool, end time.Time) []store.Leg {
+//
+// One QUEUE leg per stay (#283), each with its own wait and its own cancel
+// reason: a caller answered in one queue and transferred to another passed
+// through both, and the journey says so.
+func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, parties []*PartySnapshot, botSec int, withPlacer bool, end time.Time) []store.Leg {
 	type hop struct {
 		leg    store.Leg
 		joined time.Time
@@ -823,28 +1044,30 @@ func buildLegs(snap Snapshot, originator *PartySnapshot, parties []*PartySnapsho
 		}
 		hops = append(hops, hop{store.Leg{Kind: "BOT", Label: snap.Bot.FlowSlug, DurationSec: botSec}, joined})
 	}
-	if !snap.Queue.JoinedAt.IsZero() {
-		leg := store.Leg{Kind: "QUEUE", Label: snap.Queue.Name}
-		end := snap.Queue.BridgedAt
-		if end.IsZero() {
-			end = snap.Queue.LeftAt
+	for _, stay := range stays {
+		leg := store.Leg{Kind: "QUEUE", Label: stay.Name, DurationSec: stayWaitSec(stay)}
+		if stay.CancelReason != "" {
+			leg.Note = stay.CancelReason
 		}
-		if !end.IsZero() {
-			leg.DurationSec = int(end.Sub(snap.Queue.JoinedAt).Seconds())
-		}
-		if snap.Queue.CancelReason != "" {
-			leg.Note = snap.Queue.CancelReason
-		}
-		hops = append(hops, hop{leg, snap.Queue.JoinedAt})
+		hops = append(hops, hop{leg, stay.JoinedAt})
 	}
 	for _, agent := range parties {
 		// A leg belonging to an agent is theirs; one the agent dialled out
 		// of the building went through a carrier.
-		kind := "AGENT"
-		if agent.AgentID == nil && snap.CallType == events.CallTypeOutbound {
+		//
+		// A leg at one of our own phones is an agent's leg whether or not
+		// anybody is signed in there: it never left the building (#284). The
+		// extension is what the leg itself said, so a carrier caller whose
+		// number merely resembles one stays a trunk.
+		kind, label := "AGENT", agent.Number
+		switch {
+		case agent.AgentID != nil:
+		case agent.ExtensionNumber != "":
+			label = agent.ExtensionNumber
+		case snap.CallType == events.CallTypeOutbound:
 			kind = "TRUNK"
 		}
-		leg := store.Leg{Kind: kind, Label: agent.Number}
+		leg := store.Leg{Kind: kind, Label: label}
 		if agent.AnsweredAt != nil {
 			end := snap.CreatedAt
 			if agent.ReleasedAt != nil {

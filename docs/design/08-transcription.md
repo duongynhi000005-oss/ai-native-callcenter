@@ -357,13 +357,13 @@ it (`web/src/lib/events.ts:61`) — but no Go code publishes it.
 | 9 | Bot leg torn down | SIP `BYE` to our UAS | `internal/voice/uas.go:642` (`handleBye`) | `aicall` session closes; `EventTypeEnded` | `onCallEnded` (`orchestrator.go:183`) | — |
 | 10 | **Transcript written** | — | deferred `recorder.finish` `orchestrator.go:256` → `ledger.go:136` | — | — | **`INSERT` into `transcripts` (batch)**; CDR skipped (`ledger.go:139`) |
 | 11 | Bot leg hangup observed | `CHANNEL_HANGUP_COMPLETE` | `switchevent.go:229-236` | `PARTY_RELEASED` (`registry.go:329`) | party → `RELEASED`; `BotShare` captured from channel vars (`registry.go:326`) | — |
-| 12 | Caller enters the queue | `CUSTOM callcenter::info` `CC-Action=member-queue-start` | `switchevent.go:315` → `KindQueueMemberJoined` | — | `call.Queue.JoinedAt` (`registry.go:350`) | `queue_events` `JOINED` (`cdr.go:349`) |
+| 12 | Caller enters the queue | `CUSTOM callcenter::info` `CC-Action=member-queue-start` | `switchevent.go:315` → `KindQueueMemberJoined` | — | a new stay in `call.QueueStays` (`Call.JoinQueue`) | `queue_events` `JOINED` (`cdr.go:349`) |
 | 13 | An agent is chosen | `agent-offering` | `switchevent.go:322` | **`QUEUE_AGENT_OFFERED`**, scoped to that agent (`coordinator.go:359-369`) | — | `queue_events` `OFFERED` |
 | 14 | Agent's phone dialled | `CHANNEL_CREATE` (outbound, `dialed_user`) | `coordinator.adopt():170`, `agentForLeg():593` | **`PARTY_RINGING`** with screen-pop payload (`coordinator.go:246-258`) | **a *separate, provisional* call is created for the agent leg** (`coordinator.go:196-217`); `SetOnCall(true)` | — |
 | 15 | Agent clicks Answer | `POST /calls/{id}/answer` → `uuid_phone_event <agent_leg> talk` | `coordinator.Answer():393`, `adapter.go:142` | — | — | — |
 | 16 | Phone picks up | `CHANNEL_ANSWER` | `registry.go:335` | — | `party.AnsweredAt` only (the billing fact); **no event** | — |
 | 17 | Legs bridged | `CHANNEL_BRIDGE` | `coordinator.join():266`, `registry.establish()` | **`PARTY_ESTABLISHED`** (one per leg — C55) | **the agent-only call is absorbed into the caller's minted call** (`coordinator.go:280-289`, `merge():294`); channels rebind; the absorbed actor retires | — |
-| 18 | Queue confirms the bridge | `bridge-agent-start` | `switchevent.go:326` | — | `call.Queue.BridgedAt` (`registry.go:358`) | `queue_events` `BRIDGED` |
+| 18 | Queue confirms the bridge | `bridge-agent-start` | `switchevent.go:326` | — | that stay's `BridgedAt` (`Call.QueueStay`) | `queue_events` `BRIDGED` |
 | 19 | Conversation ends | `CHANNEL_HANGUP_COMPLETE` ×2 | `registry.go:321-341` | `PARTY_RELEASED` ×2, then **`CALL_CDR`** | `Call.Finish` (`call.go:287`) | `CDRAssembler.CallFinished` writes the one CDR because the call has a bot leg **and** a non-zero bot share (`cdr.go:79`); recording ingested (`cdr.go:107`) |
 
 **Two consequences that shape everything downstream:**

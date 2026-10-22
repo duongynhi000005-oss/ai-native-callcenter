@@ -229,6 +229,12 @@ const hangupCauseSessionLimit = "SESSION_LIMIT"
 // markSessionLimit records that the call reached the flow's time limit. It
 // says why the call ended, not how: the transfer or hangup that follows marks
 // that as it always does.
+//
+// The SESSION_LIMIT cause reaches the ledger only on a row this recorder
+// writes as the final one: a hangup, or a caller gone before the handover. A
+// transferred call's row is the human path's, which replaces this provisional
+// one with the final leg's cause and carries the reason as
+// userData.botReason (#230).
 func (r *callRecorder) markSessionLimit() {
 	r.mu.Lock()
 	r.isSessionLimited = true

@@ -323,8 +323,9 @@ func (c *Coordinator) Handle(ctx context.Context, ev SwitchEvent) {
 	// hangup retires the call, and with it the channel binding this reads.
 	c.trackQueue(ctx, ev)
 
-	// Queue movements feed the ledger: service level and abandonment reporting
-	// read those rows, never the raw switch events.
+	// Queue movements feed the ledger's queue_events, the per-event trail
+	// served by GET /calls/{callId}/queue-events. The queue reports read the
+	// cdrs rows (queue_id, queue_wait_sec, status), not these.
 	if c.cdr != nil {
 		switch ev.Kind {
 		case KindQueueMemberJoined, KindQueueAgentOffered,
@@ -587,7 +588,8 @@ func (c *Coordinator) addParty(ctx context.Context, callID uuid.UUID, ev SwitchE
 		// Where this leg is, before and apart from whose it is. A phone this
 		// platform manages says so on the leg itself, which is what lets a
 		// call placed for an agent who never signed in still be recorded as a
-		// call an agent's phone placed.
+		// call an agent's phone placed, and a call handed to a phone nobody is
+		// signed in at as one that never left the building (#284).
 		p.ExtensionNumber = managedExtensionOf(ev)
 		if isAgentLeg {
 			p.AgentID = &agentID
@@ -1003,13 +1005,13 @@ func (c *Coordinator) tapAgentLeg(callID uuid.UUID, channels ...string) {
 // and the absorbed call retires without ever reaching the ledger.
 func (c *Coordinator) merge(ctx context.Context, keep, absorb uuid.UUID) {
 	var moved []*Party
-	var movedQueue QueueFacts
+	var movedStays []QueueFacts
 	var movedBot BotShare
 	var movedUserData map[string]any
 	var movedData UserDataChange
 	_ = c.registry.Do(absorb, func(call *Call) {
 		moved = append(moved, call.Parties...)
-		movedQueue = call.Queue
+		movedStays = slices.Clone(call.QueueStays)
 		movedBot = call.Bot
 		movedUserData = call.UserData
 	})
@@ -1022,10 +1024,11 @@ func (c *Coordinator) merge(ctx context.Context, keep, absorb uuid.UUID) {
 			}
 			call.Parties = append(call.Parties, p)
 		}
-		// Facts recorded on the absorbed half move with it.
-		if call.Queue.JoinedAt.IsZero() && !movedQueue.JoinedAt.IsZero() {
-			call.Queue = movedQueue
-		}
+		// Facts recorded on the absorbed half move with it. Every queue
+		// stay does, beside the kept half's own: copying the absorbed half's
+		// queue only when the kept one had none dropped a stay whenever both
+		// halves had been through a queue (#283).
+		call.MergeQueueStays(movedStays)
 		call.Bot.Merge(movedBot)
 		// The business data too. It moved with everything else or it did not
 		// move at all, and which of two calls is kept depends on which leg the
@@ -1596,11 +1599,38 @@ func (c *Coordinator) agentChannel(callID, agentID uuid.UUID) (string, error) {
 // "this leg is at a phone we manage" — a fact about the phone, true whether or
 // not anybody is signed in at it, which is exactly what presence cannot say.
 //
+// A leg the switch raises *towards* one of our phones carries neither stamp:
+// directory variables reach the channels a user raises, never the ones raised
+// at them (measured; aicc_track.lua). What it carries instead is dialed_user,
+// which the user endpoint (mod_dptools user_outgoing_channel) writes on the new
+// leg only after the directory returned that user, as the user's own id. Our
+// directory is luacc.directory, served by aicc_xml.lua; the static fallback
+// ships empty (CONF-DEVIATIONS.md), so a leg with dialed_user is a leg the
+// switch delivered to one of our extensions — a transfer to 1020, a colleague
+// dialled from a phone, a queue offer — whether or not anybody is signed in
+// there. Without it, a call handed to a phone nobody was signed in at was
+// recorded as if it had left through the carrier (#284, live 01a1618d).
+//
+// Only on a leg the switch created outbound. The same function also writes
+// dialed_user onto the *calling* channel the moment it bridges, so a caller's
+// leg acquires its callee's extension mid-call; reading it off an inbound leg
+// would put a customer at a phone they only dialled. Every leg is adopted from
+// its CHANNEL_CREATE, before any bridge of its own, but the direction is what
+// makes that more than a matter of timing. A carrier caller whose number
+// resembles an extension has neither variable, so it stays at no phone (#105).
+//
 // Deliberately not a lookup. Asking the agent service would reintroduce the
 // dependency this exists to break, and the leg is the more direct witness:
-// nothing else sets this variable.
+// the directory has already vouched for dialed_user by resolving it, and
+// nothing else sets aicc_extension.
 func managedExtensionOf(ev SwitchEvent) string {
-	return ev.Raw.Variable("aicc_extension")
+	if ext := ev.Raw.Variable("aicc_extension"); ext != "" {
+		return ext
+	}
+	if ev.Direction == DirectionOutbound {
+		return ev.Raw.Variable("dialed_user")
+	}
+	return ""
 }
 
 // agentForLeg reports whether a new leg is being delivered to a signed-in

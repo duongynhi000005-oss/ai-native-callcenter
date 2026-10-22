@@ -2094,7 +2094,7 @@ export interface components {
             /** Format: date-time */
             releasedAt?: string;
         };
-        /** @description A call's passage through a queue. */
+        /** @description One passage through a queue, from joining it to leaving it. */
         QueueFacts: {
             name?: string;
             /** Format: date-time */
@@ -2122,6 +2122,7 @@ export interface components {
             userData?: {
                 [key: string]: unknown;
             };
+            /** @description The caller's current queue stay: the one they are waiting in, or the last one they left. Joining another queue, or the same one again, replaces it with a fresh stay. The finished call's CDR journey lists every stay. */
             queue?: components["schemas"]["QueueFacts"];
             /** Format: date-time */
             createdAt: string;
@@ -2548,7 +2549,10 @@ export interface components {
             did?: string;
             /** Format: uuid */
             flowId?: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The queue the call was counted under: the first queue the caller joined, so a call that passed through several queues counts once, under its first. A call the bot handed to a queue the caller never joined (they hung up before the queue took them in) is counted under that queue, with a queueWaitSec of 0. Absent when the call never reached a queue. The reports group by it. The journey (legs) lists every queue stay, each with its own wait.
+             */
             queueId?: string;
             agentIds?: string[];
             /** Format: uuid */
@@ -2561,7 +2565,7 @@ export interface components {
             ringSec: number;
             /** @description Seconds the caller spent with the bot, ending when they actually left it — after any closing sentence has finished playing, not when the transfer was decided. */
             botSec: number;
-            /** @description Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it. */
+            /** @description Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it. On a call that passed through several queues it is the first stay's wait, in the queue queueId names; the journey (legs) carries every stay's own wait. */
             queueWaitSec: number;
             /** @description Seconds an agent had two-way media with the caller, measured from the bridges on the agent legs and unioned across them, so a call passed from one agent to another counts both stretches once. A leg that answered without a bridge — an auto-answer phone in front of nobody, a codec mismatch — contributes nothing. Hold counts as talk. */
             talkSec: number;
@@ -2821,7 +2825,7 @@ export interface components {
         QueueReport: {
             /**
              * Format: uuid
-             * @description Null aggregates the calls that never entered a queue.
+             * @description The queue these calls were counted under (CDR.queueId): a call that passed through several queues counts once, under the first queue it joined, and a call the bot handed to a queue the caller never joined counts under that queue. Calls with no queue have no row in this report; the overview counts them. Never null in practice.
              */
             queueId: string | null;
             totalCalls: number;

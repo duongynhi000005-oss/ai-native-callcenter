@@ -7794,7 +7794,7 @@
       },
       "QueueFacts": {
         "type": "object",
-        "description": "A call's passage through a queue.",
+        "description": "One passage through a queue, from joining it to leaving it.",
         "properties": {
           "name": {
             "type": "string"
@@ -7856,7 +7856,8 @@
             "additionalProperties": true
           },
           "queue": {
-            "$ref": "#/components/schemas/QueueFacts"
+            "$ref": "#/components/schemas/QueueFacts",
+            "description": "The caller's current queue stay: the one they are waiting in, or the last one they left. Joining another queue, or the same one again, replaces it with a fresh stay. The finished call's CDR journey lists every stay."
           },
           "createdAt": {
             "type": "string",
@@ -8973,7 +8974,8 @@
           },
           "queueId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The queue the call was counted under: the first queue the caller joined, so a call that passed through several queues counts once, under its first. A call the bot handed to a queue the caller never joined (they hung up before the queue took them in) is counted under that queue, with a queueWaitSec of 0. Absent when the call never reached a queue. The reports group by it. The journey (legs) lists every queue stay, each with its own wait."
           },
           "agentIds": {
             "type": "array",
@@ -8996,7 +8998,7 @@
           },
           "queueWaitSec": {
             "type": "integer",
-            "description": "Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it."
+            "description": "Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it. On a call that passed through several queues it is the first stay's wait, in the queue queueId names; the journey (legs) carries every stay's own wait."
           },
           "talkSec": {
             "type": "integer",
@@ -9733,7 +9735,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Null aggregates the calls that never entered a queue."
+            "description": "The queue these calls were counted under (CDR.queueId): a call that passed through several queues counts once, under the first queue it joined, and a call the bot handed to a queue the caller never joined counts under that queue. Calls with no queue have no row in this report; the overview counts them. Never null in practice."
           },
           "totalCalls": {
             "type": "integer"

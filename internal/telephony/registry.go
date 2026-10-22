@@ -493,22 +493,29 @@ func (a *actor) applySwitchEvent(ev SwitchEvent) {
 		}
 
 	// The queue's own view of the caller, recorded for the CDR's timings.
+	//
+	// One stay per join (#283). A single record per call let a second queue
+	// overwrite the first one's name and join time and keep its bridge and
+	// cause, so a caller answered in one queue and transferred to another
+	// left a CDR with one queue and a wait measured from the second join to
+	// the first bridge — negative.
+	//
+	// Which stay an event is about is decided in Call.JoinQueue and
+	// Call.QueueStay: member-queue-start carries no joined time and every
+	// later event carries it in whole seconds, so stays are matched at the
+	// switch's own granularity, never by an exact timestamp.
 	case KindQueueMemberJoined:
-		a.call.Queue.Name = ev.Queue
-		if !ev.JoinedAt.IsZero() {
-			a.call.Queue.JoinedAt = ev.JoinedAt
-		} else {
-			a.call.Queue.JoinedAt = ev.OccurredAt
-		}
+		a.call.JoinQueue(ev.Queue, ev.JoinedAt, ev.OccurredAt)
 	case KindQueueBridgeStart:
-		a.call.Queue.BridgedAt = ev.OccurredAt
+		a.call.QueueStay(ev.Queue, ev.JoinedAt).BridgedAt = ev.OccurredAt
 	case KindQueueMemberLeft:
-		a.call.Queue.Cause = ev.Cause
-		a.call.Queue.CancelReason = ev.CancelReason
+		stay := a.call.QueueStay(ev.Queue, ev.JoinedAt)
+		stay.Cause = ev.Cause
+		stay.CancelReason = ev.CancelReason
 		if !ev.LeftAt.IsZero() {
-			a.call.Queue.LeftAt = ev.LeftAt
+			stay.LeftAt = ev.LeftAt
 		} else {
-			a.call.Queue.LeftAt = ev.OccurredAt
+			stay.LeftAt = ev.OccurredAt
 		}
 	case KindDTMF:
 		a.publish(events.TypePartyDTMF, party, map[string]any{

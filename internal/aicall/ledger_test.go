@@ -467,7 +467,8 @@ func TestAToolResultIsRecordedWithoutItsHint(t *testing.T) {
 }
 
 // A call the time limit ended says so, and is never contained: the platform,
-// not the conversation, closed it (03-data: is_contained).
+// not the conversation, closed it (03-data: is_contained). This is the hangup
+// path; a transferred call's row is the human path's (#230).
 func TestACallEndedByTheTimeLimitIsNotContained(t *testing.T) {
 	ledger := newFakeLedger()
 	recorder := newCallRecorder(uuid.New(), time.Now(), nil)

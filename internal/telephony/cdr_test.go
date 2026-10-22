@@ -758,6 +758,286 @@ func TestAnAgentWhoHangsUpFirstHandedNothingOn(t *testing.T) {
 	}
 }
 
+// ms is a moment sec seconds and milli milliseconds into the call: a leg the
+// switch tears down because its partner hung up releases a few milliseconds
+// after it, and which one went first is the whole question.
+func ms(sec, milli int) *time.Time {
+	t := at(sec).Add(time.Duration(milli) * time.Millisecond)
+	return &t
+}
+
+// The hangup cause of a call its placer handed on is how the call ended, not
+// how the placer's leg did (#282). The shape is the live call of 2026-10-19
+// (01a15229): wei (1008) click-dials 18688886666, talks, and transfers at 26.
+// The transfer releases wei's leg with NORMAL_CLEARING whatever happens next,
+// and that was the row's cause every time.
+//
+// The causes differ between legs where the switch can make them differ, so
+// each case can tell which leg the answer came from: a carrier commonly
+// reports a mobile hanging up as NORMAL_UNSPECIFIED, and the leg torn down
+// behind it carries the switch's own NORMAL_CLEARING.
+func TestTheCauseOfAHandedOnCallIsTheLegThatEndedIt(t *testing.T) {
+	t.Parallel()
+	wei, test1, ben := uuid.New(), uuid.New(), uuid.New()
+
+	placer := PartySnapshot{Role: RoleOriginator, Number: "1008", AgentID: &wei, ExtensionNumber: "1008",
+		ChannelID: "wei", CreatedAt: at(0), AnsweredAt: atPtr(1), ReleasedAt: atPtr(26),
+		ReleaseCause: "NORMAL_CLEARING",
+		Bridges:      []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(6), EndedAt: at(26)}}}
+	customer := func(end *time.Time, cause string, after ...BridgeSpan) PartySnapshot {
+		return PartySnapshot{Role: RoleTarget, Number: "18688886666", ChannelID: "customer",
+			CreatedAt: at(1), AnsweredAt: atPtr(6), ReleasedAt: end, ReleaseCause: cause,
+			Bridges: append([]BridgeSpan{{OtherChannelID: "wei", StartedAt: at(6), EndedAt: at(26)}}, after...)}
+	}
+	colleague := func(answered bool, end *time.Time, cause string) PartySnapshot {
+		p := PartySnapshot{Role: RoleTarget, Number: "1020", AgentID: &test1, ExtensionNumber: "1020",
+			ChannelID: "test1", CreatedAt: at(26), ReleasedAt: end, ReleaseCause: cause}
+		if answered {
+			p.AnsweredAt = atPtr(27)
+			p.Bridges = []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(27), EndedAt: *end}}
+		}
+		return p
+	}
+
+	for _, tc := range []struct {
+		name string
+		snap Snapshot
+		want string
+	}{
+		{
+			name: "to a colleague who answered, the customer hangs up",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(49, 30),
+				Parties: []PartySnapshot{placer,
+					customer(atPtr(49), "NORMAL_UNSPECIFIED", BridgeSpan{OtherChannelID: "test1", StartedAt: at(27), EndedAt: at(49)}),
+					colleague(true, ms(49, 30), "NORMAL_CLEARING"),
+				},
+			},
+			want: "NORMAL_UNSPECIFIED",
+		},
+		{
+			// The customer gave up while 1020 rang; the switch cancelled the
+			// ring behind them.
+			name: "to a colleague, the customer hangs up while it rings",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(38, 20),
+				Parties: []PartySnapshot{placer,
+					customer(atPtr(38), "NORMAL_UNSPECIFIED"),
+					colleague(false, ms(38, 20), "ORIGINATOR_CANCEL"),
+				},
+			},
+			want: "NORMAL_UNSPECIFIED",
+		},
+		{
+			// The onward number refused and the customer, left with nobody,
+			// was hung up behind it.
+			name: "to an outside number that is busy",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(28, 45),
+				Parties: []PartySnapshot{placer,
+					customer(ms(28, 45), "NORMAL_CLEARING"),
+					{Role: RoleTarget, Number: "13900139000", ChannelID: "onward",
+						CreatedAt: at(26), ReleasedAt: atPtr(28), ReleaseCause: "USER_BUSY"},
+				},
+			},
+			want: "USER_BUSY",
+		},
+		{
+			name: "the colleague hangs up",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(49, 30),
+				Parties: []PartySnapshot{placer,
+					customer(ms(49, 30), "NORMAL_CLEARING", BridgeSpan{OtherChannelID: "test1", StartedAt: at(27), EndedAt: at(49)}),
+					colleague(true, atPtr(49), "NORMAL_CLEARING"),
+				},
+			},
+			want: "NORMAL_CLEARING",
+		},
+		{
+			// The colleague's browser phone lost its media; that ended the call,
+			// and the customer's leg torn down behind it says nothing about why.
+			name: "the colleague's phone drops",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(49, 30),
+				Parties: []PartySnapshot{placer,
+					customer(ms(49, 30), "NORMAL_CLEARING", BridgeSpan{OtherChannelID: "test1", StartedAt: at(27), EndedAt: at(49)}),
+					colleague(true, atPtr(49), "MEDIA_TIMEOUT"),
+				},
+			},
+			want: "MEDIA_TIMEOUT",
+		},
+		{
+			// Live 01a161a2: wei transferred straight to 1020, which declined
+			// it. The rejection ended the transfer, and the customer with it.
+			name: "to a colleague's extension that rejects the transfer",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(28, 45),
+				Parties: []PartySnapshot{placer,
+					customer(ms(28, 45), "NORMAL_CLEARING"),
+					colleague(false, atPtr(28), "CALL_REJECTED"),
+				},
+			},
+			want: "CALL_REJECTED",
+		},
+		{
+			// Handed to a queue: ben's phone was offered the call and rang
+			// out, and the customer gave up 400 ms later. An unanswered offer
+			// leaves the customer waiting in the queue; it releasing just
+			// before them is a coincidence, not what ended the call.
+			name: "to a queue, an offer rings out just before the customer gives up",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(50, 400),
+				QueueStays: []QueueFacts{{Name: "support-en", JoinedAt: at(26), LeftAt: at(50), Cause: "Cancel"}},
+				Parties: []PartySnapshot{placer,
+					customer(ms(50, 400), "NORMAL_UNSPECIFIED"),
+					{Role: RoleTarget, Number: "1002", AgentID: &ben, ExtensionNumber: "1002", ChannelID: "ben",
+						CreatedAt: at(30), ReleasedAt: atPtr(50), ReleaseCause: "NO_ANSWER"},
+				},
+			},
+			want: "NORMAL_UNSPECIFIED",
+		},
+		{
+			// A ring-all queue: 1020 answered, so the switch withdrew ben's
+			// offer (LOSE_RACE); the customer hung up on 1020 at once, and
+			// 1020's leg followed them down. Losing the race ended nothing.
+			name: "to a ring-all queue, the losing offer is not the cause",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: ms(40, 430),
+				QueueStays: []QueueFacts{{Name: "support-en", JoinedAt: at(26), BridgedAt: at(40), LeftAt: at(40), Cause: "Terminated"}},
+				Parties: []PartySnapshot{placer,
+					customer(ms(40, 400), "NORMAL_UNSPECIFIED", BridgeSpan{OtherChannelID: "test1", StartedAt: at(40), EndedAt: *ms(40, 400)}),
+					{Role: RoleTarget, Number: "1020", AgentID: &test1, ExtensionNumber: "1020", ChannelID: "test1",
+						CreatedAt: at(30), AnsweredAt: atPtr(40), ReleasedAt: ms(40, 430), ReleaseCause: "NORMAL_CLEARING",
+						Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(40), EndedAt: *ms(40, 430)}}},
+					{Role: RoleTarget, Number: "1002", AgentID: &ben, ExtensionNumber: "1002", ChannelID: "ben",
+						CreatedAt: at(30), ReleasedAt: ms(40, 10), ReleaseCause: "LOSE_RACE"},
+				},
+			},
+			want: "NORMAL_UNSPECIFIED",
+		},
+		{
+			// Handed to a queue: 1020 was offered the call and did not pick
+			// up, and the customer waited another twenty seconds before giving
+			// up. The missed offer is not what ended the call.
+			name: "to a queue, the customer gives up long after a missed offer",
+			snap: Snapshot{
+				CallType: events.CallTypeOutbound, CreatedAt: at(0), EndedAt: atPtr(70),
+				Queue: QueueFacts{Name: "support-en", JoinedAt: at(26), LeftAt: at(70), Cause: "Cancel"},
+				Parties: []PartySnapshot{placer,
+					customer(atPtr(70), "NORMAL_UNSPECIFIED"),
+					{Role: RoleTarget, Number: "1002", AgentID: &ben, ExtensionNumber: "1002", ChannelID: "ben",
+						CreatedAt: at(30), ReleasedAt: atPtr(50), ReleaseCause: "NO_ANSWER"},
+				},
+			},
+			want: "NORMAL_UNSPECIFIED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.snap.CallID = uuid.New()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tc.snap)
+			if cdr.HangupCause != tc.want {
+				t.Errorf("hangupCause = %q, want %q", cdr.HangupCause, tc.want)
+			}
+			// The customer talked to wei, so the call was answered however it
+			// ended; the cause must not move the status.
+			if cdr.Status != store.CDRStatusAnswered {
+				t.Errorf("status = %q, want ANSWERED", cdr.Status)
+			}
+		})
+	}
+
+	// A call wei stayed on to the end keeps wei's cause, even when the
+	// customer's leg is the last to go by a few milliseconds.
+	t.Run("no transfer, the agent hangs up first", func(t *testing.T) {
+		t.Parallel()
+		snap := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: ms(30, 40),
+			Parties: []PartySnapshot{
+				{Role: RoleOriginator, Number: "1008", AgentID: &wei, ExtensionNumber: "1008", ChannelID: "wei",
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(30), ReleaseCause: "NORMAL_CLEARING",
+					Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(8), EndedAt: at(30)}}},
+				{Role: RoleTarget, Number: "18688886669", ChannelID: "customer",
+					CreatedAt: at(2), AnsweredAt: atPtr(8), ReleasedAt: ms(30, 40), ReleaseCause: "NORMAL_UNSPECIFIED",
+					Bridges: []BridgeSpan{{OtherChannelID: "wei", StartedAt: at(8), EndedAt: at(30)}}},
+			},
+		}
+		cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+		if cdr.HangupCause != "NORMAL_CLEARING" {
+			t.Errorf("hangupCause = %q, want the agent's own NORMAL_CLEARING", cdr.HangupCause)
+		}
+	})
+}
+
+// A leg at one of our own phones is an agent's leg in the journey whether or
+// not anybody is signed in there (#284). It used to read TRUNK whenever no
+// agent was, so wei's transfer to an unattended 1020 drew 1020 as an outside
+// number. TRUNK stays for what went out through a carrier, including a number
+// that only looks like an extension: the leg's own ExtensionNumber is the
+// witness, never the digits.
+func TestALegAtOneOfOurPhonesIsAnAgentsLeg(t *testing.T) {
+	t.Parallel()
+	wei, test1 := uuid.New(), uuid.New()
+
+	placer := PartySnapshot{Role: RoleOriginator, Number: "1008", AgentID: &wei, ExtensionNumber: "1008",
+		ChannelID: "wei", CreatedAt: at(0), AnsweredAt: atPtr(1), ReleasedAt: atPtr(26),
+		ReleaseCause: "NORMAL_CLEARING",
+		Bridges:      []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(6), EndedAt: at(26)}}}
+	customer := PartySnapshot{Role: RoleTarget, Number: "18688886666", ChannelID: "customer",
+		CreatedAt: at(1), AnsweredAt: atPtr(6), ReleasedAt: atPtr(56), ReleaseCause: "NORMAL_CLEARING",
+		Bridges: []BridgeSpan{{OtherChannelID: "wei", StartedAt: at(6), EndedAt: at(26)}}}
+	// Rings out for thirty seconds after the transfer; the customer gives up.
+	target := func(p PartySnapshot) PartySnapshot {
+		p.Role, p.ChannelID = RoleTarget, "target"
+		p.CreatedAt, p.ReleasedAt, p.ReleaseCause = at(26), ms(56, 20), "ORIGINATOR_CANCEL"
+		return p
+	}
+
+	for _, tc := range []struct {
+		name   string
+		target PartySnapshot
+		want   string
+	}{
+		{
+			name:   "an extension with nobody signed in",
+			target: target(PartySnapshot{Number: "1020", ExtensionNumber: "1020"}),
+			want:   "AGENT:1020:did not answer",
+		},
+		{
+			name:   "an extension with an agent signed in",
+			target: target(PartySnapshot{Number: "1020", AgentID: &test1, ExtensionNumber: "1020"}),
+			want:   "AGENT:1020:did not answer",
+		},
+		{
+			name:   "an outside number",
+			target: target(PartySnapshot{Number: "13900139000"}),
+			want:   "TRUNK:13900139000:did not answer",
+		},
+		{
+			// A short carrier number with an extension's digits: nothing on
+			// the leg says it is one of our phones.
+			name:   "an outside number that resembles an extension",
+			target: target(PartySnapshot{Number: "1020"}),
+			want:   "TRUNK:1020:did not answer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			snap := Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeOutbound,
+				CreatedAt: at(0), EndedAt: ms(56, 20),
+				Parties: []PartySnapshot{placer, customer, tc.target},
+			}
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+			want := []string{"AGENT:1008:20", "TRUNK:18688886666:50", tc.want}
+			if got := journey(cdr.Legs); !slices.Equal(got, want) {
+				t.Errorf("legs = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // An inbound call passed between agents names the same legs it always did,
 // now in the order they joined. The two orders agree on the usual journey
 // (queue, then the agents it reached) and part where an agent who took the
