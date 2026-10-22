@@ -559,11 +559,15 @@ func (r *Realtime) stopRequestTimerLocked() {
 // carries as its override and whether that direction goes in the conversation
 // too (see askForLine for when). The caller holds mu.
 func (r *Realtime) lineRequestLocked(text string, isClosing bool) responseRequest {
+	direction := sayExactly(text, r.cfg.Language)
+	if r.profile.NeedsToolFreeLineDirection {
+		direction = sayExactlyWithoutTools(text, r.cfg.Language)
+	}
 	return responseRequest{
 		kind:      responseKindLine,
 		text:      text,
 		isClosing: isClosing,
-		direction: sayExactly(text, r.cfg.Language),
+		direction: direction,
 		isDirectionInConversation: r.profile.IgnoresOverrideOnceTalking ||
 			(isClosing && r.profile.NeedsDirectedLineInConversation),
 	}
@@ -645,6 +649,29 @@ func SayExactly(text, language string) string {
 
 // sayExactly is the name this client's call sites know it by.
 var sayExactly = SayExactly
+
+// sayExactlyWithoutTools is SayExactly for a line on a profile that needs the
+// direction itself to keep the turn from calling a tool
+// (NeedsToolFreeLineDirection): the same demand, plus a ban on any tool call
+// and the fact that whatever tool the line mentions is already running.
+//
+// The second half is what answers the platform's own rule. Every flow with a
+// tool carries flow's action-claim rule (#44): never say you are looking
+// something up unless you call the tool in the same reply, with "我帮您查询一下"
+// as its example. The default wait line, "请稍等，我查一下。", is that sentence, so
+// a model that obeys the rule calls the tool to be allowed to say it, or calls
+// it and says nothing (qwen-findings W-Q8).
+func sayExactlyWithoutTools(text, language string) string {
+	if strings.HasPrefix(strings.ToLower(language), "zh") {
+		return "这一轮只做一件事：一字不差地说出下面这句话，不要添加任何其它内容，也不要调用任何工具。" +
+			"这句话提到的工具已经在运行或已经运行过，结果会另外交给你，" +
+			"所以说这句话不违反关于工具调用的规则：\n" + text
+	}
+	return "This turn does one thing only: say the sentence below word for word, " +
+		"add nothing else, and call no tool. Any tool the sentence mentions is " +
+		"already running or has already run, and its result will reach you " +
+		"separately, so saying it breaks no rule about tool calls:\n" + text
+}
 
 // requestResponse asks the model for a turn and records that one is on its way
 // (claimFloorLocked). Between here and response.created there is nothing to

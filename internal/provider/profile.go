@@ -159,6 +159,25 @@ type Profile struct {
 	// rejects response.tool_choice and response.tools alike as "Unsupported
 	// parameter").
 	AcceptsResponseToolChoice bool
+
+	// NeedsToolFreeLineDirection means a line asked for mid-call (SpeakText)
+	// carries a direction that also bans any tool call in its turn and says
+	// that the tool the line mentions is already running
+	// (sayExactlyWithoutTools), in place of the plain SayExactly demand. The
+	// opening line and a tool result's hint keep SayExactly.
+	//
+	// Measured on qwen, the wait line on the session of the #286 live round
+	// (TestLiveQwenWaitLine, qwen-findings W-Q8): with SayExactly the line's
+	// turn called the running tool again and said nothing, 3 of 3 (2 of 5
+	// live calls silent, the rest late); with this direction the line was
+	// said and no tool was called, 6 of 6. The flow's action-claim rule is
+	// why: "我查一下" may only be said with a lookup tool's call.
+	//
+	// Not AcceptsResponseToolChoice: that bars tools on the wire, where an
+	// engine obeys it, and qwen does not. This is the bar in words, and it is
+	// set only where it was measured; a longer direction is a change to every
+	// line's wording on the engines where SayExactly was measured verbatim.
+	NeedsToolFreeLineDirection bool
 }
 
 // OpenAIProfile is the provider used outside mainland China.
@@ -241,6 +260,9 @@ func QwenProfile() Profile {
 		// the response are both accepted without an error and both ignored;
 		// the line's turn called the tool anyway.
 		AcceptsResponseToolChoice: false,
+		// Measured 2026-10-22 (qwen-findings W-Q8): the plain SayExactly line
+		// over a running tool was silent 3 of 3, this one said 6 of 6.
+		NeedsToolFreeLineDirection: true,
 	}
 }
 
@@ -305,8 +327,8 @@ func GatewayProfile() Profile {
 // It is therefore the one profile whose values do not all mean what they mean
 // above: everything the Realtime client alone reads — Style,
 // TranscribeModel, CancelsResponseItself, NeedsCueForFirstTurn,
-// NeedsDirectedLineInConversation, AcceptsResponseToolChoice — is left
-// at zero, because the client that answers for this name
+// NeedsDirectedLineInConversation, AcceptsResponseToolChoice,
+// NeedsToolFreeLineDirection — is left at zero, because the client that answers for this name
 // (internal/provider/doubao) reads none of them. What it does read is the name,
 // the endpoint, the credential, the voice and the two audio
 // formats.

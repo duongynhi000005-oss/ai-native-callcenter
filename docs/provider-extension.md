@@ -56,6 +56,7 @@ Every field of `provider.Profile` exists because a vendor forced it to
 | `Voice` | The profile's default voice, used only when the flow does not name one |
 | `AcceptsTemperature` | Whether `SessionConfig.Temperature` (the flow's `global.temperature`) is sent. Nil leaves the provider's default on every profile. True on qwen (`session.temperature`, documented range [0, 2), default per model and undocumented for ours). False on openai (the GA `session` object has no such field), grok (accepted and echoed for any number, but no effect on output was seen at 3 samples per value, grok-findings 5.3), gateway (none documented) and doubao (no sampling parameter in its session body). A profile without support ignores the field and logs that once per process, not once per call. Only the opening session configuration carries it: never a mid-call instruction update, and not the Realtime client's retry after a rejected `session.update`, which drops the optional fields. |
 | `AcceptsResponseToolChoice` | Whether a line's `response.create` carries `tool_choice: "none"` in its `response` object, so the turn that says a line (`SpeakText`: an announce, the wait line) does not call a tool. No other request carries it. True on openai (documented, not measured). False on qwen (accepted and ignored, as is `response.tools: []`: a line asked for over an unanswered call repeated the call; qwen-findings W-Q8), grok (undocumented, not measured) and gateway (refused as "Unsupported parameter", which would cost the line). Whatever the profile, the client never hands out a call made in a line's turn and deletes its item when the turn ends. |
+| `NeedsToolFreeLineDirection` | Whether a mid-call line's direction (`SpeakText`) also bans any tool call in its turn and says the tool the line mentions is already running, in place of the plain `SayExactly`. True on qwen only: with `SayExactly` the wait line over a running tool was silent 3 of 3 (the flow's action-claim rule makes "我查一下" need a lookup call), with this direction it was said 6 of 6 with no call (qwen-findings W-Q8). The opening line and a tool result's hint keep `SayExactly`. |
 | `AcceptsG711` | Whether telephone audio passes through untouched. True removes conversion from the hot path entirely. |
 | `LinearInput` / `LinearOutput` | The PCM formats used when it does not. Fixed by the vendor, not negotiated. |
 | `CancelsResponseItself` | Whether it stops generating when it hears the caller, or has to be told |
@@ -72,7 +73,8 @@ the call if it is wrong.
 A profile answered by a client other than the Realtime one fills in only what
 that client reads. `DoubaoProfile` leaves `Style`, `TranscribeModel`,
 `CancelsResponseItself`, `NeedsCueForFirstTurn`,
-`NeedsDirectedLineInConversation`, `AcceptsResponseToolChoice` at zero, and
+`NeedsDirectedLineInConversation`, `AcceptsResponseToolChoice`,
+`NeedsToolFreeLineDirection` at zero, and
 says so in its doc comment: a trait nothing reads is worse than an absent one,
 because the next person takes it for a statement about the vendor. `Model` is
 informational for the same reason — the version is a constant inside the

@@ -3,6 +3,7 @@
 package provider
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -189,4 +190,62 @@ func nextEvent(t *testing.T, session *Realtime) Event {
 		t.Fatal("no event arrived")
 	}
 	return Event{}
+}
+
+func TestOnlyQwenNeedsAToolFreeLineDirection(t *testing.T) {
+	for _, profile := range []Profile{OpenAIProfile(), QwenProfile(), GrokProfile(), GatewayProfile(), DoubaoProfile()} {
+		if want := profile.Name == NameQwen; profile.NeedsToolFreeLineDirection != want {
+			t.Errorf("%s: NeedsToolFreeLineDirection %v, want %v", profile.Name, profile.NeedsToolFreeLineDirection, want)
+		}
+	}
+}
+
+// A line on a profile that needs it carries the direction that bans tools,
+// in the override and in the conversation item where the line goes there
+// too; every other profile keeps SayExactly. The opening keeps SayExactly
+// everywhere.
+func TestALineCarriesTheToolFreeDirectionWhereTheProfileNeedsIt(t *testing.T) {
+	for _, profile := range []Profile{OpenAIProfile(), QwenProfile(), GrokProfile(), GatewayProfile()} {
+		t.Run(profile.Name, func(t *testing.T) {
+			want := SayExactly(waitLine, "en")
+			if profile.NeedsToolFreeLineDirection {
+				want = sayExactlyWithoutTools(waitLine, "en")
+			}
+			for _, isClosing := range []bool{false, true} {
+				cfg := basicConfig()
+				cfg.OpeningText = "Thanks for calling NovaNet."
+				f, session, _ := startUnansweredCall(t, profile, cfg, createOn())
+				if err := session.SpeakText(waitLine, isClosing); err != nil {
+					t.Fatalf("speak: %v", err)
+				}
+				requests := f.awaitMessages("response.create", 3)
+				opening, _ := nested(t, requests[0], "response", "instructions").(string)
+				if opening != SayExactly(cfg.OpeningText, "en") {
+					t.Errorf("the opening's direction changed: %q", opening)
+				}
+				for i, request := range requests[1:] {
+					if got, _ := nested(t, request, "response", "instructions").(string); got != want {
+						t.Errorf("closing=%v request %d: direction %q, want %q", isClosing, i+1, got, want)
+					}
+				}
+				for _, item := range f.messagesOfType("conversation.item.create") {
+					text, _ := nested(t, item, "item", "content").([]any)[0].(map[string]any)["text"].(string)
+					if strings.Contains(text, waitLine) && text != want {
+						t.Errorf("closing=%v: the line's item carries %q, want %q", isClosing, text, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTheToolFreeDirectionIsInTheSessionsLanguage(t *testing.T) {
+	zh := sayExactlyWithoutTools("请稍等，我查一下。", "zh")
+	if !strings.Contains(zh, "不要调用任何工具") || !strings.HasSuffix(zh, "\n请稍等，我查一下。") {
+		t.Errorf("zh direction: %q", zh)
+	}
+	en := sayExactlyWithoutTools(waitLine, "en")
+	if !strings.Contains(en, "call no tool") || !strings.HasSuffix(en, "\n"+waitLine) {
+		t.Errorf("en direction: %q", en)
+	}
 }

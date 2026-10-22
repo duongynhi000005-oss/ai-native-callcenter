@@ -1004,8 +1004,55 @@ Covered by `TestACallMadeInALinesTurnIsNeverHandedOut`,
 `TestALineRequestBarsToolsWhereTheProfileObeysIt` and
 `TestOnlyALineRequestBarsTools` (`internal/provider/line_tools_test.go`).
 
-**NOT MEASURED**: how often qwen makes the call (1 session per arm here, 4 of 4
-on the calls), a line's turn that makes only the call and says nothing (call 1's
-shape: the line is then lost, and nothing asks for it again), session-level
-`tool_choice` or a mid-call `session.update` with `tools: []`, and the openai
-and grok behaviour (the openai bar rests on its documentation).
+**The line said nothing (live call on 320b827, the guard alone).** Call
+01a1622a-950a-766a-af17-47812eae7178 (13:52:19): the wait line was asked for at
++1 s, the guard kept back the line's turn's call at 13:52:20.054, and the bot
+channel of the recording is silent from the question (17.2 s) to the answer
+(22.6 s). One backend hit, one answer, but no wait line: 2 of 5 live calls had no
+line audio at all, the others said it late or together with the call.
+
+**Why.** The two-sentence persona of the first test hides it: there qwen said the
+line and called the tool as well. The flow's session carries the platform's
+action-claim rule (`flow.Runtime.actionClaimRule`, #44): never say you are
+looking something up unless you call the tool in the same reply, with
+"我帮您查询一下" as its example. The default wait line, "请稍等，我查一下。", is that
+sentence. Asked to say it word for word, the model obeys the standing rule
+instead: it calls the tool, and often says nothing.
+
+**Measured, on that session.** `TestLiveQwenWaitLine`
+(`internal/provider/live_line_tools_test.go`) replays the call:
+`testdata/line_session_zh.json` is the mobile_support session the orchestrator
+built (instructions, the six tools, the opening line), `testdata/q_contract.pcm`
+is the call's question ("我的合约机想提前解约，要交多少违约金？", qwen3-tts-flash,
+voice Cherry), the wait line is asked for 1 s after the model's call and the
+result is sent 3 s after it, as on the call. One session per run:
+
+| Arm | Line said | Call made in the line's turn | Exactly one answer |
+|---|---|---|---|
+| `plain`: SayExactly, as on the call | **0 of 3** | 3 of 3 (kept back) | 3 of 3 |
+| `direction`, then `shipped`: the direction below | **6 of 6** (3 + 3), first audio 1.6–2.0 s after the call | **0 of 6** | 6 of 6 |
+
+The direction (`sayExactlyWithoutTools`): "这一轮只做一件事：一字不差地说出下面这句
+话，不要添加任何其它内容，也不要调用任何工具。这句话提到的工具已经在运行或已经运行
+过，结果会另外交给你，所以说这句话不违反关于工具调用的规则：" and the line; the
+English twin says the same. It is the bar in words, and the second sentence is
+what answers the action-claim rule. Arms B (a session-level `tools: []` around
+the line) and C (asking for the line again after a silent turn) were not needed
+and not measured.
+
+Two checks on the same direction: the first test's two-sentence persona said
+the line with no call at all (1 of 1, against a call in every earlier run), and
+a closing line ("感谢来电,再见。", `SpeakText(isClosing)`, which on qwen also goes
+into the conversation) after the answer was said as written with no call, 3 of
+3 (`TestLiveQwenClosingLine`).
+
+**What ships.** `Profile.NeedsToolFreeLineDirection`, true on qwen only: every
+mid-call line (`SpeakText`) carries that direction in place of SayExactly, in
+the override and in the conversation item where the line goes there too. The
+opening line and a tool result's hint keep SayExactly. The guard stays on every
+profile.
+
+**NOT MEASURED**: how often qwen makes the call with the new direction over many
+calls (6 sessions here), a phase announce mid-call with it, the English
+direction, and the openai, grok and gateway behaviour (the openai bar rests on
+its documentation; grok and the gateway keep SayExactly and the guard).
