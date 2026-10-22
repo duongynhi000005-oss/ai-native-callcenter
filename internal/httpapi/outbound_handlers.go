@@ -289,12 +289,13 @@ func writeDuplicate(w http.ResponseWriter, callID uuid.UUID) {
 	writeJSON(w, http.StatusOK, api.CreateCallResponse{CallID: callID, IsDuplicate: &isDuplicate})
 }
 
-// writeUnconfirmed answers a placement the switch has not confirmed (#221):
-// the originate reached it and its reply did not come back in time, so the
-// customer may still be called. Not an error, because it may not be one, and
-// never SWITCH_DOWN, which tells a client the call failed and invites a retry
-// under a new callId: a second call to the same person. 202 with the callId
-// says what is true: accepted, not confirmed, and the id to retry or look for.
+// writeUnconfirmed answers a placement the switch has not confirmed (#221,
+// #302): the originate reached it and its reply did not come back, in time or
+// before the link closed, so the customer may still be called. Not an error,
+// because it may not be one, and never SWITCH_DOWN, which tells a client the
+// call failed and invites a retry under a new callId: a second call to the
+// same person. 202 with the callId says what is true: accepted, not
+// confirmed, and the id to retry or look for.
 func writeUnconfirmed(w http.ResponseWriter, callID uuid.UUID) {
 	writeJSON(w, http.StatusAccepted, api.CreateCallResponse{CallID: callID})
 }
@@ -370,8 +371,9 @@ func writeOutboundError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, outbound.ErrFlowless):
 		writeError(w, http.StatusConflict, CodeConflict, "the DID has no published flow", nil)
 	case errors.Is(err, esl.ErrDown):
-		// The link to the switch is not up: the same answer every call
-		// operation gives for it.
+		// The link to the switch is not up and the originate was not sent: the
+		// same answer every call operation gives for it. An originate written
+		// before the link closed is unconfirmed instead (esl.ErrTimeout).
 		writeError(w, http.StatusServiceUnavailable, CodeSwitchDown, "the switch is unreachable", nil)
 	default:
 		// Logged, because the answer cannot say which of the many ways it

@@ -396,6 +396,17 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
 `esl.ErrDown`, and an originate that ends with it is an **unconfirmed placement**
 (`outbound.ErrPlacementUnconfirmed`, `internal/outbound/unconfirmed.go`). Decided 2026-10-21:
 
+- **What the ESL client reports (#302).** One deadline, the command timeout counted from the call,
+  bounds a command's turn to write, its write (`SetWriteDeadline`: a switch that stops reading fills
+  the socket buffers and blocks the write) and its reply, so no caller waits longer whatever the
+  switch does. `esl.ErrTimeout` is any command some of whose bytes reached the connection without a
+  reply: the reply timed out, the link closed after the write (a bgapi job the switch accepted runs
+  whatever happens to the socket), or the write was cut off. A cut-off or failed write closes the
+  link before the next command may write, since a half-written command leaves the stream unframed;
+  the `Link` reconnects. `esl.ErrDown` is only a command none of whose bytes were written: the link
+  was closed before its turn, it waited out its timeout for a turn, or the kernel took none of its
+  bytes. Only that answers `503 SWITCH_DOWN`.
+
 - **Nothing is undone.** The line, the business data and the continuation armed for the answer (the
   bridge to the bot, or click-to-dial's transfer to the destination) stay held, and the placement
   stays tracked under the leg id it minted, for the answer window plus the job margin
@@ -441,13 +452,10 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   (`ORIGINATE_FAILED` from the placement-failure row, or the real outcome), or `UNKNOWN` if no row
   could be written.
 
-Not covered, and follow-ups: an ESL write has no deadline, so a switch whose socket buffers are
-full blocks the command before its 10 s timer starts; a job result dispatched in the instant
+Not covered, and follow-ups: a job result dispatched in the instant
 between the originate's timeout and the placement being held as unconfirmed is not matched, and its
 cause is lost (the window then records `PLACEMENT_UNCONFIRMED`); the same treatment for the other commands whose timeout is still a
-plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an `esl.ErrDown` that
-arrives after the command was written (the link closed while waiting: also ambiguous, still
-answered `503 SWITCH_DOWN`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
+plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
 does not have: a client polls `GET /calls` or the event stream while the call is live and
 `GET /cdrs/{callId}` once it has ended.
 

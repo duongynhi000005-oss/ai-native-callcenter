@@ -34,6 +34,9 @@ type Link struct {
 	mu        sync.Mutex
 	onConnect []func(context.Context)
 	onLost    []func()
+
+	// timeout overrides each client's command timeout; tests shorten it.
+	timeout time.Duration
 }
 
 // NewLink builds a Link. Call Run to start connecting.
@@ -88,6 +91,7 @@ func (l *Link) Run(ctx context.Context) {
 			continue
 		}
 
+		client.timeout = l.timeout
 		if err := client.Subscribe(l.subscriptions...); err != nil {
 			slog.WarnContext(ctx, "esl subscribe failed", "error", err)
 			client.Close()

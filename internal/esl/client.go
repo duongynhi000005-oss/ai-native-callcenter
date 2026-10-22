@@ -18,33 +18,41 @@ import (
 
 // Errors returned by the client.
 var (
-	// ErrDown reports that the link is not currently usable.
+	// ErrDown reports that the link is not currently usable and that the
+	// command was not sent: none of its bytes reached the connection, so the
+	// switch cannot run it. It is safe to retry.
 	ErrDown = errors.New("esl link down")
 	// ErrAuthFailed reports a rejected password.
 	ErrAuthFailed = errors.New("esl authentication failed")
-	// ErrTimeout reports a command that was written to the switch whose reply
-	// did not arrive within the command timeout. Unlike ErrDown it does not
-	// mean the switch did not take the command: the bytes are on the
-	// connection, and a stalled switch executes them when it recovers. For a
-	// bgapi command the outcome is unknown, and the caller must treat it so.
+	// ErrTimeout reports a command whose bytes, all or some, reached the
+	// connection and whose reply did not arrive: not within the command
+	// timeout, or not before the link closed, or the write itself did not
+	// finish in time. Unlike ErrDown it does not mean the switch did not take
+	// the command: a stalled switch executes what it read when it recovers, and
+	// a bgapi job it accepted runs whatever happens to the socket. For a bgapi
+	// command the outcome is unknown, and the caller must treat it so.
 	ErrTimeout = errors.New("esl command timed out")
 )
 
-// commandTimeout bounds a single api/bgapi round trip. FreeSWITCH answers
-// these promptly; a longer wait means the switch is in trouble and callers
-// should fail fast rather than pile up.
+// commandTimeout bounds a single api/bgapi round trip, from the moment the
+// command is issued: its turn to write, the write and the reply. FreeSWITCH
+// answers these promptly; a longer wait means the switch is in trouble and
+// callers should fail fast rather than pile up.
 const commandTimeout = 10 * time.Second
 
 // Client is a single Event Socket connection in inbound mode.
 //
 // One goroutine owns the read side and demultiplexes replies from events;
-// commands are serialized by a write mutex and matched to replies in FIFO
+// commands are serialized by a write turn and matched to replies in FIFO
 // order, which is what the protocol guarantees.
 type Client struct {
 	conn   net.Conn
 	reader *textproto.Reader
 
-	writeMu sync.Mutex
+	// writeTurn is held (one token) by the command being written. It is a
+	// channel rather than a mutex so that waiting for it is bounded by the
+	// command's deadline like everything else.
+	writeTurn chan struct{}
 
 	// pending holds reply channels in command order.
 	pendingMu sync.Mutex
@@ -74,10 +82,11 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:   conn,
-		reader: textproto.NewReader(bufio.NewReaderSize(conn, 32<<10)),
-		events: make(chan *Event, 1024),
-		closed: make(chan struct{}),
+		conn:      conn,
+		reader:    textproto.NewReader(bufio.NewReaderSize(conn, 32<<10)),
+		writeTurn: make(chan struct{}, 1),
+		events:    make(chan *Event, 1024),
+		closed:    make(chan struct{}),
 	}
 
 	if deadline, ok := ctx.Deadline(); ok {
@@ -157,45 +166,103 @@ func (c *Client) Close() error {
 func (c *Client) Done() <-chan struct{} { return c.closed }
 
 // command writes cmd and waits for its reply in FIFO order.
+//
+// One deadline, counted from the call, bounds everything the caller waits on:
+// its turn to write (behind a writer the switch has stopped reading from), the
+// write itself (the kernel buffers are full when the switch stops reading) and
+// the reply. No caller waits longer than the command timeout, whatever the
+// switch does.
+//
+// The error says whether the switch can have the command. ErrDown: none of it
+// was written, so the switch cannot run it. ErrTimeout: some or all of it was
+// written and no reply came, so the switch may run it.
 func (c *Client) command(cmd string) (string, error) {
-	select {
-	case <-c.closed:
-		return "", ErrDown
-	default:
-	}
-
-	ch := make(chan reply, 1)
-
-	c.writeMu.Lock()
-	// Registering the waiter and writing must happen together, or a reply
-	// could be matched to the wrong command.
-	c.pendingMu.Lock()
-	c.pending = append(c.pending, ch)
-	c.pendingMu.Unlock()
-
-	_, err := fmt.Fprintf(c.conn, "%s\n\n", cmd)
-	c.writeMu.Unlock()
-
-	if err != nil {
-		return "", fmt.Errorf("write command: %w", err)
-	}
-
 	timeout := c.timeout
 	if timeout <= 0 {
 		timeout = commandTimeout
 	}
+	deadline := time.Now().Add(timeout)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+
+	select {
+	case c.writeTurn <- struct{}{}:
+	case <-c.closed:
+		return "", ErrDown
+	case <-timer.C:
+		// The writer ahead is held up by a switch that reads slowly or not at
+		// all; its own deadline bounds it, and a write it cannot finish closes
+		// the link. This command was never written.
+		return "", fmt.Errorf("%w: no turn to write within %s: %s", ErrDown, timeout, abbrev(cmd))
+	}
+	// The link may have closed while this caller waited for its turn: a writer
+	// ahead of it gave up and closed it. Nothing of this command is written.
+	select {
+	case <-c.closed:
+		<-c.writeTurn
+		return "", ErrDown
+	default:
+	}
+
+	// Registering the waiter and writing must happen together, under the
+	// turn, or a reply could be matched to the wrong command.
+	ch := make(chan reply, 1)
+	c.pendingMu.Lock()
+	c.pending = append(c.pending, ch)
+	c.pendingMu.Unlock()
+
+	_ = c.conn.SetWriteDeadline(deadline)
+	frame := cmd + "\n\n"
+	n, err := io.WriteString(c.conn, frame)
+	if err != nil {
+		// The link is closed before the turn is handed on, in every case. A
+		// command cut off mid-write leaves the stream unframed: the switch
+		// would read the next command as the rest of this one. And a write
+		// that could not place a single byte in a full kernel buffer for the
+		// whole timeout is a switch that has stopped reading. Closing also
+		// fails the waiter registered above (and every earlier one), so no
+		// later reply can be matched to a command that was never written;
+		// the Link reconnects.
+		c.Close()
+		<-c.writeTurn
+		if n == 0 {
+			// The kernel accepted none of the bytes, so none can reach the
+			// switch: provably not sent.
+			return "", fmt.Errorf("%w: write command: %v", ErrDown, err)
+		}
+		return "", fmt.Errorf("%w: write cut off after %d of %d bytes, the switch may have read the command: %v: %s",
+			ErrTimeout, n, len(frame), err, abbrev(cmd))
+	}
+	<-c.writeTurn
+
 	select {
 	case r := <-ch:
 		return r.body, r.err
 	case <-timer.C:
 		// The waiter stays queued: the late reply, if it comes, is matched to
 		// it and dropped, so the replies of later commands stay aligned.
-		return "", fmt.Errorf("%w: %s", ErrTimeout, cmd)
+		return "", fmt.Errorf("%w: %s", ErrTimeout, abbrev(cmd))
 	case <-c.closed:
-		return "", ErrDown
+		// A reply that arrived as the link closed still counts.
+		select {
+		case r := <-ch:
+			if r.err == nil {
+				return r.body, nil
+			}
+		default:
+		}
+		return "", fmt.Errorf("%w: the link closed after the command was written: %s", ErrTimeout, abbrev(cmd))
 	}
+}
+
+// abbrev is a command as an error quotes it: a command's variables can be
+// kilobytes long, and they do not help a log.
+func abbrev(cmd string) string {
+	const limit = 200
+	if len(cmd) > limit {
+		return cmd[:limit] + "…"
+	}
+	return cmd
 }
 
 // message is one framed protocol message.
@@ -238,7 +305,7 @@ func (c *Client) readLoop() {
 	for {
 		msg, err := c.readMessage()
 		if err != nil {
-			c.failPending(err)
+			c.failPending(fmt.Errorf("%w: the link closed before the reply: %v", ErrTimeout, err))
 			return
 		}
 
@@ -270,7 +337,7 @@ func (c *Client) readLoop() {
 			}
 
 		case "text/disconnect-notice":
-			c.failPending(ErrDown)
+			c.failPending(fmt.Errorf("%w: the switch disconnected before the reply", ErrTimeout))
 			return
 		}
 	}
@@ -287,6 +354,8 @@ func (c *Client) deliverReply(r reply) {
 	ch <- r
 }
 
+// failPending answers every waiter when the link ends. Each of them wrote its
+// command, so err wraps ErrTimeout: the switch may have read it.
 func (c *Client) failPending(err error) {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()

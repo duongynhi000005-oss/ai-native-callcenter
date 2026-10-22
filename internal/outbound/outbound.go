@@ -631,7 +631,7 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		// The agent's phone may still ring and answer by itself: arm what its
 		// answer does, keep everything held, and let the switch decide.
 		s.holdUnconfirmed(job, s.transferOnAnswer(callID, agentLeg.String(), destination))
-		s.log.Warn("click-to-dial unconfirmed: the switch did not answer the originate in time; tracking it",
+		s.log.Warn("click-to-dial unconfirmed: the switch did not confirm the originate; tracking it",
 			"callId", callID, "channelId", agentLeg, "agentExtension", agentExtension,
 			"destination", destination, "error", err)
 		return callID, unconfirmedError(err)
@@ -893,7 +893,7 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		// the line and the business data, and let the switch decide.
 		s.holdUnconfirmed(job, s.bridgeToBot(callID, customerLeg.String(), did.Number, language, req.To, did.IsRecordingEnabled,
 			campaignRef{campaignID: req.CampaignID, attemptID: req.AttemptID}))
-		s.log.Warn("ai outbound unconfirmed: the switch did not answer the originate in time; tracking it",
+		s.log.Warn("ai outbound unconfirmed: the switch did not confirm the originate; tracking it",
 			"callId", callID, "channelId", customerLeg, "to", req.To, "did", did.Number, "error", err)
 		return Placement{CallID: callID}, unconfirmedError(err)
 	}
