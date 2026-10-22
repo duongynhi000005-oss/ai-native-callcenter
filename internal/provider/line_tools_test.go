@@ -150,9 +150,21 @@ func TestACallMadeInALinesTurnIsNeverHandedOut(t *testing.T) {
 						t.Errorf("the line's turn handed out a call: %+v", event)
 					}
 				}
-				deletes := f.awaitMessages("conversation.item.delete", 1)
-				if deletes[0]["item_id"] != "item_dup" {
-					t.Errorf("deleted %v, want the line's call item_dup", deletes[0]["item_id"])
+				// A line's turn cut short before any of its audio arrived is
+				// unheard, so its words come out too (removeUnheardTurn).
+				want := map[string]bool{"item_dup": true}
+				if status == statusCancelled {
+					want["item_line"] = true
+				}
+				deletes := f.awaitMessages("conversation.item.delete", len(want))
+				for _, d := range deletes {
+					if !want[d["item_id"].(string)] {
+						t.Errorf("deleted %v, want %v", d["item_id"], want)
+					}
+					delete(want, d["item_id"].(string))
+				}
+				if len(want) != 0 {
+					t.Errorf("not deleted: %v", want)
 				}
 
 				if err := session.SendToolResult("fc_1", `{"ok":"1"}`); err != nil {
@@ -171,7 +183,7 @@ func TestACallMadeInALinesTurnIsNeverHandedOut(t *testing.T) {
 				f.send(map[string]any{"type": "response.done",
 					"response": map[string]any{"status": "completed"}})
 				awaitEvent(t, session, EventTypeResponseDone)
-				f.awaitMessages("conversation.item.delete", 1)
+				f.awaitMessages("conversation.item.delete", len(deletes))
 			})
 		}
 	}

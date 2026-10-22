@@ -198,6 +198,17 @@ type Realtime struct {
 	// onLineCall.
 	isLineResponse bool
 
+	// spokenItems are the items the response now open has begun to speak
+	// (output_item.added of a message), and unheardItems the ones the
+	// consumer has reported the caller heard none of (Interrupt with 0 ms)
+	// while that response was still open. hasResponseAudio says audio of the
+	// response now open has reached the consumer. They belong to one response:
+	// response.created clears them and response.done settles them. See
+	// removeUnheardTurn.
+	spokenItems      []string
+	unheardItems     []string
+	hasResponseAudio syncatomic.Bool
+
 	// deleteSentAt is when this client last asked the provider to delete an
 	// item, which is what lets a refusal of that be recognised; see
 	// isAnsweredDelete.
@@ -1090,10 +1101,23 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 	// earlier turn's tail and flushed before a frame reached the caller, so the
 	// whole item comes out of the history. The id is spent once truncated, so a
 	// second report for the same turn cannot overwrite the first.
+	//
+	// Zero is also taken further than a truncate: the item is deleted. qwen
+	// acknowledges a truncate and leaves the text the model reads back whole
+	// (qwen-findings, TestLiveQwenTruncate), so a turn flushed before a frame of
+	// it played stayed in its history as said; it honours a delete (W-Q5).
+	// The truncate still goes first for an engine that honours it and not the
+	// delete. An item is never deleted while its response is open, because
+	// the provider is still writing it: then it is deleted when that response
+	// ends (removeUnheardTurn).
 	if itemID != "" && playedMs >= 0 {
 		r.mu.Lock()
 		if r.responseItemID == itemID {
 			r.responseItemID = ""
+		}
+		isDeleteDeferred := playedMs == 0 && r.isResponseOpen.Load()
+		if isDeleteDeferred {
+			r.unheardItems = append(r.unheardItems, itemID)
 		}
 		r.mu.Unlock()
 		if err := r.sendEvent(map[string]any{
@@ -1103,6 +1127,9 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 			"audio_end_ms":  playedMs,
 		}); err != nil {
 			return err
+		}
+		if playedMs == 0 && !isDeleteDeferred {
+			return r.deleteUnheardItem(itemID, "")
 		}
 	}
 	return nil
@@ -1363,7 +1390,9 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.mu.Lock()
 		r.responseItemID = ""
 		r.callItems, r.finishedCalls = nil, nil
+		r.spokenItems, r.unheardItems = nil, nil
 		r.mu.Unlock()
+		r.hasResponseAudio.Store(false)
 		r.isResponseOpen.Store(true)
 		isLine := r.onResponseCreated()
 		r.signal(watchResponseStarted)
@@ -1378,6 +1407,7 @@ func (r *Realtime) handle(event *wireEvent) {
 		if event.Item != nil && event.Item.ID != "" && isSpokenItem(event.Item.Type) {
 			r.mu.Lock()
 			r.responseItemID = event.Item.ID
+			r.spokenItems = append(r.spokenItems, event.Item.ID)
 			r.mu.Unlock()
 		}
 		// A function call is open until its arguments are done; see
@@ -1399,6 +1429,9 @@ func (r *Realtime) handle(event *wireEvent) {
 			return
 		}
 		r.signal(watchAudioArrived)
+		if !r.hasResponseAudio.Load() {
+			r.hasResponseAudio.Store(true)
+		}
 		r.emit(Event{Type: EventTypeAudioDelta, Audio: audio})
 
 	case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
@@ -1469,8 +1502,10 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	cancelledFor := r.takeCancelReason()
 	r.signal(watchResponseEnded)
 	// Before anything asks for a turn, so that turn is made from a
-	// conversation without the calls this one left unfinished.
+	// conversation without the calls this one left unfinished, nor the words
+	// of this one that the caller never heard.
 	r.removeUnfinishedCalls(event.Response)
+	r.removeUnheardTurn(event.Response)
 	// The floor is free: a line that was waiting for it goes out before the
 	// turn is reported, so the next words are already being made while the
 	// consumer catches up.
@@ -1650,6 +1685,91 @@ func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
 		r.log.Debug("took a function call out of the conversation",
 			"itemId", id, "status", status, "isLine", isLine)
 	}
+}
+
+// removeUnheardTurn takes out of the conversation the words of a response the
+// caller heard none of, before anything asks for the next turn.
+//
+// Two shapes. A response cut short (any status but completed) before a single
+// frame of its audio reached the consumer: the provider wrote the words, and
+// often all of them, and nothing was played, so the consumer has nothing to
+// flush, counts nothing and reports nothing. And an item the consumer did
+// report as unheard (Interrupt with 0 ms) while its response was still open.
+//
+// The first is the #286 live call 01a16256-ddd5-…: a tool's answer was asked
+// for as the caller started to speak over the wait line, qwen's own turn
+// detection cancelled that response 200 ms later with its whole transcript
+// written and no audio sent, and its reply to the caller ("在的，请问还有什么可以
+// 帮您？") took the answer as given; the caller never heard it. Replayed live
+// (TestLiveQwenSpeechOverTheAnswer), the history without the unheard item is
+// answered with the result.
+//
+// A response some audio of which reached the consumer is the consumer's to
+// account for: it alone knows how much was played, and reports it through
+// Interrupt.
+func (r *Realtime) removeUnheardTurn(response *wireResponse) {
+	r.mu.Lock()
+	spoken, unheard := r.spokenItems, r.unheardItems
+	r.spokenItems, r.unheardItems = nil, nil
+	r.mu.Unlock()
+
+	status := ""
+	if response != nil {
+		status = response.Status
+	}
+	ids := make([]string, 0, len(spoken)+len(unheard))
+	seen := make(map[string]struct{}, cap(ids))
+	add := func(id string) {
+		if _, ok := seen[id]; ok || id == "" {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, id := range unheard {
+		add(id)
+	}
+	isCutShort := status != "" && status != statusCompleted
+	if isCutShort && !r.hasResponseAudio.Load() {
+		for _, id := range spoken {
+			add(id)
+		}
+		for _, item := range response.Output {
+			if isSpokenItem(item.Type) {
+				add(item.ID)
+			}
+		}
+	}
+	for _, id := range ids {
+		r.mu.Lock()
+		if r.responseItemID == id {
+			r.responseItemID = ""
+		}
+		r.mu.Unlock()
+		if err := r.deleteUnheardItem(id, status); err != nil {
+			r.log.Debug("could not take an unheard turn out of the conversation",
+				"itemId", id, "error", err)
+		}
+	}
+}
+
+// deleteUnheardItem takes one spoken item the caller heard none of out of the
+// conversation. Said at Info: an answer the model wrote and the caller never
+// heard is invisible in the call's transcript, which records what the model
+// wrote, and the log line is the trace that it was taken back.
+func (r *Realtime) deleteUnheardItem(itemID, status string) error {
+	r.mu.Lock()
+	r.deleteSentAt = time.Now()
+	r.mu.Unlock()
+	if err := r.sendEvent(map[string]any{
+		"type":    "conversation.item.delete",
+		"item_id": itemID,
+	}); err != nil {
+		return err
+	}
+	r.log.Info("took a turn the caller heard none of out of the conversation",
+		"itemId", itemID, "status", status)
+	return nil
 }
 
 // isAnsweredDelete reports whether an error is the provider refusing an item

@@ -108,10 +108,10 @@ Where the entry phase names its own opening line (`SessionConfig.OpeningText`, f
 
 | Step | OpenAI | Qwen | Normalized behavior in aicall |
 |---|---|---|---|
-| Detect | `input_audio_buffer.speech_started` (server auto-cancels response, emits `response.cancelled`) | `input_audio_buffer.speech_started` (client must act) | emit `SpeechStarted` |
+| Detect | `input_audio_buffer.speech_started` (server auto-cancels response, emits `response.cancelled`) | `input_audio_buffer.speech_started` (client must act; a response that has sent no audio yet is cancelled by the server, qwen-findings W-Q9) | emit `SpeechStarted` |
 | Cancel | already cancelled server-side; client sends `conversation.item.truncate{audio_end_ms=played}` for history accuracy | client sends `response.cancel`; `response.done{status:cancelled}` follows | provider adapter does its dialect; actor sees one `Interrupted` |
 | Flush local audio | — (client's job) | — (client's job) | **always ours**: `RTPSession.ClearTx()` drains the TX queue; ~2 frames remain in flight to FS → silence within ~40–60ms. Nothing needs sending to FreeSWITCH (we terminate RTP). Backstop: flush again on `Interrupted` even if `SpeechStarted` was missed (java-bot lesson). |
-| Played-time tracking | needed for `truncate` | needed for `truncate` (sent on every Realtime profile, after the cancel) | RTP send loop counts frames per response → `audio_end_ms`; a turn queued but wholly flushed unplayed reports `0` (truncated to 0), a turn that queued nothing reports nothing |
+| Played-time tracking | needed for `truncate` | needed for `truncate` (sent on every Realtime profile, after the cancel) | RTP send loop counts frames per response → `audio_end_ms`; a turn queued but wholly flushed unplayed reports `0` (truncated to 0 and deleted, since qwen ignores the truncate), a turn that queued nothing reports nothing; a response cut short before any of its audio arrived is deleted by the client itself (qwen-findings W-Q9) |
 
 **Line echo — the failure mode both references hit on real calls (M3, borrowed per owner directive: golang-bot first, java-bot second).** The bot's own voice returns through the caller's handset or speakerphone, the provider's detector calls it speech, and the bot interrupts itself mid-greeting. Two graded mitigations exist in the references:
 

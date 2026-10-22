@@ -1056,3 +1056,67 @@ profile.
 calls (6 sessions here), a phase announce mid-call with it, the English
 direction, and the openai, grok and gateway behaviour (the openai bar rests on
 its documentation; grok and the gateway keep SayExactly and the guard).
+
+## W-Q9: an answer cut before its audio stays in the history as said (2026-10-22)
+
+**W-Q9 — when the caller starts to speak just after a tool's answer was asked
+for, qwen cancels the answer's response itself, with its transcript written and
+none of its audio sent, and the model's next reply takes the answer as given.**
+Found in the live round of #286, call 01a16256-ddd5-73b7-9335-13322c315bfa
+(DID 95012, 14:40). The caller spoke over the end of the wait line ("哎喂你在吗？",
+onset about 43.4 s); the result came back at 43.600 and its turn was asked for;
+the transcript holds that turn's partial answer at 44.025
+("合约期内变更套餐需支付200元违约金，由"); the next reply was "在的，请问还有什么
+可以帮您？", and the 200 yuan was first heard 12 s later, in a dead-air prompt
+that said "刚才提到". The recording's bot channel is silent from the end of the
+line to the reply: none of the answer was played. The INFO log had no
+interruption line at all: no audio of the answer had been queued, so the
+session had nothing to flush or count and reported nothing, and the client
+sent no truncate (one would not have helped: qwen ignores it, see the
+measurement table above).
+
+**Measured.** `TestLiveQwenSpeechOverTheAnswer`
+(`internal/provider/live_unheard_test.go`) replays the call on the session of
+`TestLiveQwenWaitLine`, with the caller's words (`testdata/q_are_you_there.pcm`,
+"哎，喂，你在吗？", qwen3-tts-flash) starting 50 ms after the result. On the wire,
+every run: `response.created` for the answer, 180–630 ms later (runs with the fix)
+`input_audio_buffer.speech_started`, and in the same instant
+`response.audio_transcript.done` (the answer's text, whole or nearly) and
+`response.done` with `status: cancelled`, no audio delta in between. This
+client sent no `response.cancel`: on a response that has sent no audio qwen
+cancels on its own speech detection, although `CancelsResponseItself` stays
+false (that trait was measured on a response already speaking). A first probe
+with the caller's own audio cut from the call's recording reproduced the live
+reply word for word.
+
+| Client | Answer cut before audio | Reply gives the result |
+|---|---|---|
+| before the fix | 3 / 3 | 0 / 3 ("在的，请问有什么可以帮您？" every time) |
+| with the fix | 3 / 3 | 3 / 3 ("在的。合约期内变更套餐需支付200元违约金，由人工客服办理。") |
+
+**The fix (`provider.Realtime.removeUnheardTurn`).** A response that ends with
+any status but `completed` before a single audio delta of it reached the
+consumer was heard by nobody, so every spoken item it began
+(`response.output_item.added` of a message, or a message in the response's
+`output`) is deleted with `conversation.item.delete` when its `response.done`
+arrives, before the requests that `response.done` releases, as W-Q5 does for a
+half-made call. A response some audio of which reached the consumer stays the
+consumer's to account for: it alone knows how much was played. The same holds on
+every Realtime profile; the delete is the one W-Q5 sends everywhere, and a
+refusal of it is not an error. The deletion is logged at INFO ("took a turn the
+caller heard none of out of the conversation"), the trace this call lacked.
+
+The other shape of an unheard answer is covered with it, from the unit tests
+only: a turn whose audio was queued behind an earlier turn's tail and flushed
+before a frame of it played (the consumer reports `Interrupt(…, 0)`, #53).
+Its truncate to 0 is still sent, for an engine that honours it, and the item is
+now deleted as well, at once if its response has ended and when it ends if not,
+because qwen ignores the truncate. Covered by
+`TestAnAnswerCutShortBeforeAnyAudioIsTakenOutOfTheConversation`,
+`TestAnUnheardItemNamedOnlyInTheOutputIsTakenOut`,
+`TestTheUnheardTurnIsTakenOutBeforeTheNextTurnIsAskedFor`,
+`TestATurnWithAudioOrCompletedIsNotTakenOutHere` and
+`TestATurnReportedUnheardIsDeleted` (`internal/provider/unheard_test.go`).
+
+**NOT MEASURED**: the flushed-behind-a-tail shape on a live call; a turn heard in
+part (qwen still keeps its whole text, #53); openai, grok and the gateway live.
