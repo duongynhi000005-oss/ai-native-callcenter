@@ -72,7 +72,7 @@ const (
 // death, and a party is a channel, so it is born DIALING or RINGING and ends
 // in the terminal RELEASED. Two states were considered for the diagram and
 // withdrawn — QUEUED, because a caller waiting in a queue is a channel with
-// music playing and where the call is belongs to the call (call.Queue,
+// music playing and where the call is belongs to the call (call.QueueStays,
 // queue_events, queue_wait_sec) rather than to the leg; and a separate
 // abandon trigger, because abandoning is a hangup and the cause already says
 // which kind (cdrs.missed_reason reads it).
@@ -219,9 +219,10 @@ type Party struct {
 	AgentID     *uuid.UUID
 	// ExtensionNumber is the extension this leg is at, when it is at a phone
 	// this platform manages. Set from what the leg itself says — our own
-	// originate stamps aicc_extension, and the directory stamps it on a
-	// phone's own INVITE — so it is a fact about the phone and holds whether
-	// or not anybody is signed in there.
+	// originate stamps aicc_extension, the directory stamps it on a phone's
+	// own INVITE, and a leg the switch delivers to one of our directory users
+	// carries dialed_user (managedExtensionOf) — so it is a fact about the
+	// phone and holds whether or not anybody is signed in there.
 	//
 	// AgentID answers a different question: *whose* phone it is, which only
 	// presence can say. The two came apart the day a system could place a call
@@ -330,9 +331,13 @@ type Call struct {
 	// transfers and lands in the CDR. Switch facts never live here.
 	UserData map[string]any
 
-	// Queue is what happened between joining a queue and reaching a person,
-	// recorded as the callcenter events arrive.
-	Queue QueueFacts
+	// QueueStays is every passage through a queue, in the order the caller
+	// joined them, recorded as the callcenter events arrive (#283). A caller
+	// answered in one queue and transferred to another, or put back into the
+	// same one, has two stays: each starts empty, so the second never carries
+	// the first one's bridge, cause or agent. The last stay is the caller's
+	// current one (CurrentQueue), which is what a live snapshot shows.
+	QueueStays []QueueFacts
 	// Bot is the AI leg's share of the story, captured from the caller's
 	// channel when that leg hangs up.
 	Bot BotShare
@@ -345,7 +350,7 @@ type Call struct {
 	EndedAt   time.Time
 }
 
-// QueueFacts is a call's passage through a queue.
+// QueueFacts is one passage through a queue: from joining it to leaving it.
 type QueueFacts struct {
 	Name         string     `json:"name,omitempty"`
 	JoinedAt     time.Time  `json:"joinedAt,omitzero"`
@@ -354,6 +359,189 @@ type QueueFacts struct {
 	Cause        string     `json:"cause,omitempty"`
 	CancelReason string     `json:"cancelReason,omitempty"`
 	AgentID      *uuid.UUID `json:"agentId,omitempty"`
+}
+
+// CurrentQueue is the caller's latest queue stay: the one they are in, or the
+// last one they left. A call that never joined a queue has the zero value.
+func (c *Call) CurrentQueue() QueueFacts {
+	if len(c.QueueStays) == 0 {
+		return QueueFacts{}
+	}
+	return c.QueueStays[len(c.QueueStays)-1]
+}
+
+// A stay is identified by its queue and the second the caller joined it, and
+// the switch only lets that be compared loosely (#283). mod_callcenter's
+// member-queue-start carries no CC-Member-Joined-Time, so a stay opened from
+// it is stamped with the event's own microsecond clock. Every later event —
+// bridge-agent-start/-end/-fail, member-queue-end — carries the joined time in
+// whole seconds, and not always the same reading: member-queue-end raised by
+// the member's own thread reports the second the callcenter application
+// started (before it answered the caller), the agent thread's events report
+// the members row's joined_epoch (written just after member-queue-start).
+// Those readings fall within a second either side of the event's own clock,
+// so two joins are the same join when their seconds differ by at most one
+// (sameJoin). Two stays in one queue are never that close: the caller has to
+// be bridged and transferred back in between.
+const joinSlackSec = 1
+
+// sameJoin reports whether two joined times name the same join, at the
+// switch's one-second granularity with a second's slack either way.
+func sameJoin(a, b time.Time) bool {
+	d := a.Unix() - b.Unix()
+	return -joinSlackSec <= d && d <= joinSlackSec
+}
+
+// JoinQueue records a member-queue-start: the caller joined queue name.
+// switchJoined is the switch's own joined second when the event carries one
+// (member-queue-start does not; a resumed or replayed join may), announcedAt
+// is the event's clock and stamps a new stay when switchJoined is zero.
+//
+// A join is the stay it repeats, not a new one, when
+//   - it names the same join as a stay in that queue (sameJoin), or
+//   - the caller's latest stay in that queue is still waiting: neither
+//     bridged nor left. A caller still waiting in a queue cannot join it
+//     again, so that is the switch announcing the same join twice
+//     (TestAReannouncedMemberIsNotASecondCaller).
+//
+// Anything else is a new stay, starting empty, even in a queue the caller has
+// been in before: a caller put back into the queue that answered them waits
+// again, and that wait is not the first one's. Their first stay is bridged by
+// then, and its member-queue-end commonly arrives after the second join, so
+// "not left" alone cannot tell a repeat from a return.
+func (c *Call) JoinQueue(name string, switchJoined, announcedAt time.Time) {
+	if !switchJoined.IsZero() && c.stayIndex(name, switchJoined) >= 0 {
+		return
+	}
+	if i := c.latestStayIndex(name); i >= 0 {
+		if s := c.QueueStays[i]; s.BridgedAt.IsZero() && s.LeftAt.IsZero() {
+			return
+		}
+	}
+	joined := switchJoined
+	if joined.IsZero() {
+		joined = announcedAt
+	}
+	c.QueueStays = append(c.QueueStays, QueueFacts{Name: name, JoinedAt: joined})
+	sortQueueStays(c.QueueStays)
+}
+
+// QueueStay is the stay an event about queue name belongs to, given the
+// joined second the event carries.
+//
+//   - The stay that joined in that second (sameJoin) is the one, so a late
+//     member-queue-end for the first of two stays in one queue lands on the
+//     first even after the second has opened.
+//   - With no such stay, the stay in that queue whose join is nearest: a
+//     reading further out than the slack (the switch answering the caller
+//     slowly before stamping) still belongs to the one stay it can mean.
+//   - An event with no joined time belongs to the latest stay in that queue;
+//     an event naming no queue, to the latest stay of all.
+//   - An event about a queue the call has no stay in means its join was
+//     missed (the call was adopted mid-queue), and it opens the stay from
+//     what the event says.
+func (c *Call) QueueStay(name string, joinedAt time.Time) *QueueFacts {
+	if !joinedAt.IsZero() {
+		if i := c.stayIndex(name, joinedAt); i >= 0 {
+			return &c.QueueStays[i]
+		}
+		if i := c.nearestStayIndex(name, joinedAt); i >= 0 {
+			return &c.QueueStays[i]
+		}
+	} else if i := c.latestStayIndex(name); i >= 0 {
+		return &c.QueueStays[i]
+	}
+	c.QueueStays = append(c.QueueStays, QueueFacts{Name: name, JoinedAt: joinedAt})
+	sortQueueStays(c.QueueStays)
+	for i := range c.QueueStays {
+		if s := &c.QueueStays[i]; s.Name == name && s.JoinedAt.Equal(joinedAt) {
+			return s
+		}
+	}
+	return nil // unreachable: the stay was just added
+}
+
+// inQueue reports whether stay s is one of queue name's; an empty name is
+// every queue.
+func inQueue(s QueueFacts, name string) bool {
+	return name == "" || s.Name == name
+}
+
+// stayIndex is the stay in queue name that joined at joinedAt (sameJoin), the
+// latest if more than one would do; -1 when there is none.
+func (c *Call) stayIndex(name string, joinedAt time.Time) int {
+	for i := len(c.QueueStays) - 1; i >= 0; i-- {
+		if s := c.QueueStays[i]; inQueue(s, name) && sameJoin(s.JoinedAt, joinedAt) {
+			return i
+		}
+	}
+	return -1
+}
+
+// nearestStayIndex is the stay in queue name whose join is closest to
+// joinedAt, the later on a tie; -1 when the queue has no stay.
+func (c *Call) nearestStayIndex(name string, joinedAt time.Time) int {
+	best, bestGap := -1, time.Duration(0)
+	for i, s := range c.QueueStays {
+		if !inQueue(s, name) {
+			continue
+		}
+		gap := s.JoinedAt.Sub(joinedAt).Abs()
+		if best < 0 || gap <= bestGap {
+			best, bestGap = i, gap
+		}
+	}
+	return best
+}
+
+// latestStayIndex is the last stay in queue name; -1 when there is none.
+func (c *Call) latestStayIndex(name string) int {
+	for i := len(c.QueueStays) - 1; i >= 0; i-- {
+		if inQueue(c.QueueStays[i], name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// MergeQueueStays folds another call's stays into this one's (#283): both
+// halves of a merged call keep their passages. A stay present on both is one
+// stay — the same identity the events use: same queue, joined within the
+// slack (sameJoin) — and what either half learnt about it is kept; its
+// joined stamp is the kept half's.
+func (c *Call) MergeQueueStays(stays []QueueFacts) {
+	for _, in := range stays {
+		i := slices.IndexFunc(c.QueueStays, func(s QueueFacts) bool {
+			return s.Name == in.Name && sameJoin(s.JoinedAt, in.JoinedAt)
+		})
+		if i < 0 {
+			c.QueueStays = append(c.QueueStays, in)
+			continue
+		}
+		s := &c.QueueStays[i]
+		if s.BridgedAt.IsZero() {
+			s.BridgedAt = in.BridgedAt
+		}
+		if s.LeftAt.IsZero() {
+			s.LeftAt = in.LeftAt
+		}
+		if s.Cause == "" {
+			s.Cause = in.Cause
+		}
+		if s.CancelReason == "" {
+			s.CancelReason = in.CancelReason
+		}
+		if s.AgentID == nil {
+			s.AgentID = in.AgentID
+		}
+	}
+	sortQueueStays(c.QueueStays)
+}
+
+// sortQueueStays keeps stays in the order the caller joined them; stable, so
+// two stays stamped the same second keep the order they were recorded in.
+func sortQueueStays(stays []QueueFacts) {
+	slices.SortStableFunc(stays, func(a, b QueueFacts) int { return a.JoinedAt.Compare(b.JoinedAt) })
 }
 
 // NewCall creates a call in CREATED with its immutable type stamped.
@@ -626,8 +814,12 @@ type Snapshot struct {
 	QueueID  *uuid.UUID      `json:"queueId,omitempty"`
 	Parties  []PartySnapshot `json:"parties"`
 	UserData map[string]any  `json:"userData,omitempty"`
-	Queue    QueueFacts      `json:"queue,omitzero"`
-	Bot      BotShare        `json:"-"`
+	// Queue is the current (latest) queue stay, the one the contract's
+	// CallSnapshot.queue describes. QueueStays is every stay, oldest first;
+	// it is the CDR's, not the contract's (#283).
+	Queue      QueueFacts   `json:"queue,omitzero"`
+	QueueStays []QueueFacts `json:"-"`
+	Bot        BotShare     `json:"-"`
 	// IsBotAbandoned: see Call.IsBotAbandoned.
 	IsBotAbandoned bool       `json:"-"`
 	CreatedAt      time.Time  `json:"createdAt"`
@@ -674,7 +866,8 @@ func (c *Call) Snapshot() Snapshot {
 		Language:       c.Language,
 		QueueID:        c.QueueID,
 		UserData:       maps.Clone(c.UserData),
-		Queue:          c.Queue,
+		Queue:          c.CurrentQueue(),
+		QueueStays:     slices.Clone(c.QueueStays),
 		Bot:            c.Bot,
 		CreatedAt:      c.CreatedAt,
 		IsBotAbandoned: c.IsBotAbandoned,

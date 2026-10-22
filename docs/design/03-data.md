@@ -123,6 +123,13 @@ cdrs(call_id uuid pk, started_at, answered_at, ended_at,
                                        -- call behaviour and not is_contained. Reaches the human path's row
                                        -- through the aicc_bot_unbacked_claims channel variable.
      -- legs: [{"kind":"TRUNK"|"DIALING"|"BOT"|"QUEUE"|"AGENT","label":…,"durationSec":…,"note":…}]
+     -- queue_id / queue_wait_sec: the first queue the caller joined and that stay's wait (join →
+     -- bridge, or → leave if never bridged); owner decision on #283. A call that passed through
+     -- several queues is one row counted once, under its first queue, and the reports read these
+     -- columns; legs carries one QUEUE leg per stay, each with its own wait and cancel reason.
+     -- missed_reason on such a call is read from its last stay: how the call ended. A call the
+     -- bot handed to a queue the caller never joined (gone before the queue took them in) is
+     -- counted under that queue (BotShare.Queue), with queue_wait_sec 0.
      -- queue_id on a row the bot writes is the queue the caller was handed to, set when the transfer
      -- executes, not when transfer_to_agent accepts it (#44): an accepted transfer the caller never
      -- reached was otherwise counted as a queue call answered inside the SLA.
@@ -162,7 +169,10 @@ callbacks(id uuid pk, call_id, queue_id, phone_number text, message text,
                                    -- that asked" is the audit row's job, not this column's.
 queue_events(id bigserial, occurred_at, call_id, queue_id,
              event varchar check in ('JOINED','LEFT','OFFERED','BRIDGED','ABANDONED'),
-             agent_id uuid, wait_ms int)                          -- SL/abandon source
+             agent_id uuid, wait_ms int)                          -- the per-event trail of one call
+                                   -- through the queues, served by GET /calls/{callId}/queue-events.
+                                   -- The queue reports (service level, abandonment, waits) read
+                                   -- cdrs, not this table.
 audit_logs(id bigserial, occurred_at, actor_id, action varchar,   -- 'QUEUE_UPDATED','FLOW_PUBLISHED','AGENT_FORCE_LOGOUT',…
            target_kind text, target_id text, detail jsonb, ip inet,
            subject_kind varchar check in ('USER','API_KEY'), subject_id uuid,

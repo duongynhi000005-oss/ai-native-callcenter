@@ -1505,9 +1505,11 @@ type CDR struct {
 	// It describes one journey: an inbound caller who wanted a person. Every value is a place on that journey, so the field is deliberately absent on the calls that were never on it — an outbound call this platform placed, a call between two extensions, and an inbound call that never reached a queue or an agent (a number this deployment does not serve, or a caller who hung up on a direct extension before it was picked up). Those did not go unserved; they did not go. Why they ended is hangupCause, which says it exactly, and a NO_ANSWER row with no missedReason is that and not a gap. Counting missed calls therefore means counting this field, never counting NO_ANSWER.
 	MissedReason   *MissedReason       `json:"missedReason,omitempty"`
 	PrimaryAgentID *openapi_types.UUID `json:"primaryAgentId,omitempty"`
-	QueueID        *openapi_types.UUID `json:"queueId,omitempty"`
 
-	// QueueWaitSec Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it.
+	// QueueID The queue the call was counted under: the first queue the caller joined, so a call that passed through several queues counts once, under its first. A call the bot handed to a queue the caller never joined (they hung up before the queue took them in) is counted under that queue, with a queueWaitSec of 0. Absent when the call never reached a queue. The reports group by it. The journey (legs) lists every queue stay, each with its own wait.
+	QueueID *openapi_types.UUID `json:"queueId,omitempty"`
+
+	// QueueWaitSec Seconds the caller waited in queue, from joining to being bridged to an agent, or to leaving if they never were. Ringing happens inside this window, so ringSec is a sub-interval of it rather than an addition to it. On a call that passed through several queues it is the first stay's wait, in the queue queueId names; the journey (legs) carries every stay's own wait.
 	QueueWaitSec int `json:"queueWaitSec"`
 
 	// RingSec Seconds spent ringing. For a call a person answered, from the answering leg's creation to its bridge; for one nobody answered, from the first leg dialled to the last one released — a queue that re-offers dials a fresh leg each time, so no single leg holds the answer. For a call the bot answered and that never reached a person, the ringing before the bot answered: from startedAt to answeredAt.
@@ -1574,7 +1576,7 @@ type CallSnapshot struct {
 	Language  *string         `json:"language,omitempty"`
 	Parties   []PartySnapshot `json:"parties"`
 
-	// Queue A call's passage through a queue.
+	// Queue The caller's current queue stay: the one they are waiting in, or the last one they left. Joining another queue, or the same one again, replaces it with a fresh stay. The finished call's CDR journey lists every stay.
 	Queue   *QueueFacts         `json:"queue,omitempty"`
 	QueueID *openapi_types.UUID `json:"queueId,omitempty"`
 	State   CallState           `json:"state"`
@@ -2670,7 +2672,7 @@ type QueueEventList struct {
 // QueueEventName What happened to a caller in a queue. OFFERED repeats: one call can be offered to several agents, or to the same agent several times, before it is bridged or abandoned.
 type QueueEventName string
 
-// QueueFacts A call's passage through a queue.
+// QueueFacts One passage through a queue, from joining it to leaving it.
 type QueueFacts struct {
 	AgentID      *openapi_types.UUID `json:"agentId,omitempty"`
 	BridgedAt    *time.Time          `json:"bridgedAt,omitempty"`
@@ -2695,7 +2697,7 @@ type QueueReport struct {
 	AvgWaitSec        float32 `json:"avgWaitSec"`
 	MaxWaitSec        int     `json:"maxWaitSec"`
 
-	// QueueID Null aggregates the calls that never entered a queue.
+	// QueueID The queue these calls were counted under (CDR.queueId): a call that passed through several queues counts once, under the first queue it joined, and a call the bot handed to a queue the caller never joined counts under that queue. Calls with no queue have no row in this report; the overview counts them. Never null in practice.
 	QueueID    *openapi_types.UUID `json:"queueId"`
 	TotalCalls int                 `json:"totalCalls"`
 }
