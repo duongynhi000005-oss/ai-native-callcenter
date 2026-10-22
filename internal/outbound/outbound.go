@@ -187,6 +187,10 @@ type Service struct {
 	// timers, when set, replaces time.AfterFunc for the placement windows;
 	// tests only.
 	timers func(d time.Duration, f func()) stopper
+	// beforeHold, when set, runs when an originate has returned unconfirmed
+	// and before the placement is held, with the leg's id: a test dispatches
+	// a job result in that gap. Tests only.
+	beforeHold func(legID string)
 
 	// holds are the answered AI legs that took, or are waiting for, a bot slot,
 	// by channel id; guarded by mu. A hangup cancels the wait and releases the
@@ -637,11 +641,14 @@ func (s *Service) Dial(ctx context.Context, req AgentDialRequest) (uuid.UUID, er
 		return callID, unconfirmedError(err)
 	}
 	if err != nil {
-		s.abandonLeg(job)
+		// Nothing was sent. The line and the business data go before the
+		// claim does (abandonLeg): a retry with this callId may claim it the
+		// moment it is free, and must not have its own released under it.
 		s.lines.Release(callID)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
+		s.abandonLeg(job)
 		return uuid.Nil, err
 	}
 
@@ -898,11 +905,14 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		return Placement{CallID: callID}, unconfirmedError(err)
 	}
 	if err != nil {
-		s.abandonLeg(job)
+		// Nothing was sent. The line and the business data go before the
+		// claim does (abandonLeg): a retry with this callId may claim it the
+		// moment it is free, and must not have its own released under it.
 		s.lines.Release(callID)
 		if s.callData != nil {
 			s.callData.Drop(callID)
 		}
+		s.abandonLeg(job)
 		return Placement{}, err
 	}
 

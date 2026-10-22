@@ -427,7 +427,11 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
     comes from its events;
   - its job result arrives: the bgapi reply that named the Job-UUID never came, so the result is
     matched by the `origination_uuid` in the job's `Job-Command-Arg` (`SwitchEvent.JobChannelID`).
-    A failure before any channel is a placement failure with the switch's cause (§5.5);
+    A failure before any channel is a placement failure with the switch's cause (§5.5), written at
+    once. The leg is registered before the originate is sent, so a result is matched whenever it
+    arrives, also before the originate has returned or before the placement is held as
+    unconfirmed (#302): it is kept on the placement and applied as soon as the placement is held,
+    or, for an originate whose reply did arrive, when the reply's job is attached. It is applied once;
   - nothing within the window, and no result from the switch: the placement-failure CDR
     (`tech.isPlacementFailure`) with `hangupCause` `PLACEMENT_UNCONFIRMED`, a platform word, written
     when the window ends. The line and the business data are given back. Either placement-failure
@@ -452,9 +456,7 @@ then runs it. The timeout is therefore not "not taken": it is `esl.ErrTimeout`, 
   (`ORIGINATE_FAILED` from the placement-failure row, or the real outcome), or `UNKNOWN` if no row
   could be written.
 
-Not covered, and follow-ups: a job result dispatched in the instant
-between the originate's timeout and the placement being held as unconfirmed is not matched, and its
-cause is lost (the window then records `PLACEMENT_UNCONFIRMED`); the same treatment for the other commands whose timeout is still a
+Not covered, and follow-ups: the same treatment for the other commands whose timeout is still a
 plain error (`uuid_kill`, the transfers, the bot bridge's `uuid_transfer`); an HTTP access log; and a `GET /calls/{callId}`, which the contract
 does not have: a client polls `GET /calls` or the event stream while the call is live and
 `GET /cdrs/{callId}` once it has ended.

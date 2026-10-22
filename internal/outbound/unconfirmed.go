@@ -170,16 +170,39 @@ func (s *Service) IsPlacing(callID uuid.UUID) bool {
 // its channel may appear at any point of that window, and its own answer
 // window is counted from then (noteChannel). A placement that a job result
 // already finished is left alone.
+//
+// The job's result may have been dispatched before this runs, between the
+// originate's timeout and now (handleJob kept it on the job). It is applied
+// here, once the placement is held, as a later one would be: a failure
+// before any channel is recorded at once with the switch's cause, not as
+// PLACEMENT_UNCONFIRMED when the window ends.
 func (s *Service) holdUnconfirmed(job *trackedJob, onAnswer func()) {
+	if s.beforeHold != nil {
+		s.beforeHold(job.legID)
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.legJobs[job.legID] != job {
+		s.mu.Unlock()
 		return
 	}
+	job.hasReturned = true
 	window := s.cfg.AnswerWindow + s.margin()
 	s.pending[job.legID] = &pendingLeg{onAnswer: onAnswer, expiresAt: s.now().Add(window)}
 	job.isUnconfirmed = true
 	job.timer = s.afterFunc(window, func() { s.unconfirmedExpired(job) })
+	res := job.result
+	if res == nil {
+		s.mu.Unlock()
+		return
+	}
+	job.result = nil
+	job.jobID = res.jobID
+	hadChannel := job.hadChannel
+	s.forgetJobLocked(job)
+	s.mu.Unlock()
+	s.log.Info("unconfirmed placement's job result arrived before it was held; applying it",
+		"callId", job.callID, "channelId", job.legID, "jobId", res.jobID, "isOk", res.isOK, "cause", res.cause)
+	s.settleJob(job, hadChannel, res.isOK, res.cause)
 }
 
 // unconfirmedExpired ends the wait for an unconfirmed placement. If its channel
