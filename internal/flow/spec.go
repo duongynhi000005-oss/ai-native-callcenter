@@ -399,6 +399,14 @@ type Global struct {
 	// anything else must lie between MinDurationLimitSec and MaxDurationLimitSec.
 	// A pointer, because absent and 0 mean different things.
 	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
+	// ToolWaitLine replaces the words of the wait line: what the caller hears
+	// when an HTTP tool has not returned ToolWaitLineAfter after it started
+	// and nothing else is playing (#286). It is said as written, like a
+	// phase's announce, and may quote {slots.x}. It must be a statement: a
+	// filler phrased as a question gets answered, and the answer talks over
+	// the result (#53). A language left empty gets that language's default
+	// (DefaultToolWaitLine), not the other language's words.
+	ToolWaitLine Text `json:"toolWaitLine,omitempty"`
 	// AlwaysAllowedTools are available in every phase — asking for a person,
 	// or hanging up, should never be blocked by whatever phase the caller
 	// happens to be in.
@@ -409,6 +417,13 @@ type Global struct {
 	// Transitions apply in every non-terminal phase, after the node's own.
 	Transitions []Transition `json:"transitions,omitempty"`
 }
+
+// ToolWaitLineAfter is how long an HTTP tool may run before the caller hears
+// the wait line (Global.ToolWaitLine). Fixed, not a setting (#286).
+const ToolWaitLineAfter = time.Second
+
+// DefaultToolWaitLine is the wait line of a flow that names none.
+var DefaultToolWaitLine = Text{ZH: "请稍等，我查一下。", EN: "One moment, let me check that."}
 
 // MaxTemperatureExclusive is the first value Global.Temperature may not take.
 const MaxTemperatureExclusive = 2.0

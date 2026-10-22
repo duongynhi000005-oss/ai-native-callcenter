@@ -7,4 +7,4 @@
 {"type":"response.create"}
 {"item":{"call_id":"call-7","output":"{\"balance\":\"12.50\",\"hint\":\"Tell the caller the balance, then offer to close.\"}","type":"function_call_output"},"type":"conversation.item.create"}
 {"type":"response.create"}
-{"response":{"instructions":"Say exactly this, word for word, and add nothing else:\nThanks for calling NovaNet."},"type":"response.create"}
+{"response":{"instructions":"Say exactly this, word for word, and add nothing else:\nThanks for calling NovaNet.","tool_choice":"none"},"type":"response.create"}

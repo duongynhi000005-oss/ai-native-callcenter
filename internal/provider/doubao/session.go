@@ -28,6 +28,10 @@
 //	pacer        | Session      | Start, once up     | stopping closed          | queued frames discarded, never flushed
 //	watchdog     | Session      | Start, after dial  | conn.Done()              | disarms; emits nothing after Done
 //	keepalive    | wsconn.Conn  | wsconn.Dial        | conn.Done() / write fail | none
+//
+// One timer runs besides them, and only while tool results are held for a line
+// that has not started yet (SendToolResult): it fires once, after
+// lineStartTimeout, and Close stops it.
 package doubao
 
 import (
@@ -61,6 +65,11 @@ const (
 	// ttsTypeSpokenLine marks a turn that is speaking words this client handed
 	// the engine rather than words the model wrote.
 	ttsTypeSpokenLine = "chat_tts_text"
+	// lineStartTimeout bounds how long tool results wait for a committed line
+	// to start (SendToolResult). The engine speaks a commit promptly, cold and
+	// mid-call (doubao-findings §5); a line that has not started by then is
+	// taken as one the engine will not say, and the results go out.
+	lineStartTimeout = 3 * time.Second
 )
 
 // How a session ended, for the one line logged when it does. A call is
@@ -147,7 +156,18 @@ type Session struct {
 	turnAudioBytes int
 	// pendingSpeak is the line this client handed the engine and is waiting to
 	// hear it start. There is at most one: a second commit kills the first.
-	pendingSpeak string
+	// lineCommittedAt is when it was handed over.
+	pendingSpeak    string
+	lineCommittedAt time.Time
+	// isLineTurnOpen says the open turn is speaking a line this client
+	// committed (ttsTypeSpokenLine).
+	isLineTurnOpen bool
+	// heldResults is a complete set of tool results waiting for a line to
+	// finish (SendToolResult). heldGeneration retires the timer that bounds the
+	// wait for a line that has not started, and heldTimer is that timer.
+	heldResults    []toolResultItem
+	heldGeneration uint64
+	heldTimer      *time.Timer
 	// The set of calls the model is waiting on. It goes on only once every one
 	// of them has an answer, so they are held here until the set is complete.
 	toolOrder   []string
@@ -160,6 +180,11 @@ type Session struct {
 	firstAudioDeadline time.Duration
 	deltaStallDeadline time.Duration
 	closeWait          time.Duration
+	lineStartDeadline  time.Duration
+
+	// wireTap, set only by live tests before Start, sees every text frame
+	// written (isOutbound) and read, for a measurement's wire log.
+	wireTap func(isOutbound bool, data []byte)
 
 	pacer *pacer
 	// ticks is the pacer's cadence. Production fills it with a ticker in Start;
@@ -203,6 +228,7 @@ func newSession(profile provider.Profile, log *slog.Logger) (*Session, error) {
 		firstAudioDeadline: firstAudioTimeout,
 		deltaStallDeadline: deltaStallTimeout,
 		closeWait:          closeTimeout,
+		lineStartDeadline:  lineStartTimeout,
 	}, nil
 }
 
@@ -301,7 +327,7 @@ func (s *Session) Start(ctx context.Context, cfg provider.SessionConfig) error {
 			return fmt.Errorf("wait to greet: %w", err)
 		}
 		s.mu.Lock()
-		s.pendingSpeak = cfg.OpeningText
+		s.pendingSpeak, s.lineCommittedAt = cfg.OpeningText, time.Now()
 		s.mu.Unlock()
 		if err := s.sendEvent(speakEvent{
 			Type: "speech_text_buffer.commit", EventID: s.nextEventID(),
@@ -375,7 +401,7 @@ func (s *Session) SpeakText(text string, _ bool) error {
 		return nil
 	}
 	s.mu.Lock()
-	s.pendingSpeak = text
+	s.pendingSpeak, s.lineCommittedAt = text, time.Now()
 	s.mu.Unlock()
 
 	return s.sendEvent(speakEvent{
@@ -388,6 +414,16 @@ func (s *Session) SpeakText(text string, _ bool) error {
 // The model goes on only when every call it made has an answer, and this
 // protocol carries them in one message rather than one each. The engine is
 // answered in the order it asked, whatever order the results arrive in.
+//
+// A complete set waits while a line this client committed is being said, or
+// has been committed and not started yet: the model's answer would be a turn
+// of its own, and a turn the engine starts pre-empts the one in flight, so the
+// line (a wait line said while a slow tool runs, #286) would be cut off by the
+// very answer it was covering for. The set goes out when the line's turn ends,
+// however it ends — finished, cut short by the caller, replaced, abandoned —
+// so a caller who talks over the line still gets the answer. A line that has
+// not started within lineStartDeadline of its commit is taken as never coming,
+// and the set goes out then.
 func (s *Session) SendToolResult(toolCallID, output string) error {
 	s.mu.Lock()
 	if !s.toolPending[toolCallID] {
@@ -415,10 +451,96 @@ func (s *Session) SendToolResult(toolCallID, output string) error {
 	}
 	s.toolOrder = nil
 	s.toolResults = nil
+
+	startWait := s.lineStartWait()
+	isLineStarting := !s.isLineTurnOpen && s.pendingSpeak != "" &&
+		time.Since(s.lineCommittedAt) < startWait
+	if s.isLineTurnOpen || isLineStarting {
+		s.heldResults = items
+		if isLineStarting {
+			s.startHeldTimerLocked(startWait - time.Since(s.lineCommittedAt))
+		}
+		s.mu.Unlock()
+		s.log.Debug("a line is being said; the tool results wait for it to end",
+			"results", len(items), "isLineStarted", !isLineStarting)
+		return nil
+	}
 	s.mu.Unlock()
 
+	return s.sendToolResults(items)
+}
+
+// sendToolResults answers the model's calls with one complete set.
+func (s *Session) sendToolResults(items []toolResultItem) error {
 	return s.sendEvent(toolResultEvent{
 		Type: "conversation.item.create", EventID: s.nextEventID(), Items: items})
+}
+
+// lineStartWait is lineStartDeadline, or its default. The caller holds mu.
+func (s *Session) lineStartWait() time.Duration {
+	if s.lineStartDeadline > 0 {
+		return s.lineStartDeadline
+	}
+	return lineStartTimeout
+}
+
+// startHeldTimerLocked bounds the wait for a committed line to start. The
+// caller holds mu.
+func (s *Session) startHeldTimerLocked(after time.Duration) {
+	s.stopHeldTimerLocked()
+	generation := s.heldGeneration
+	s.heldTimer = time.AfterFunc(after, func() { s.onLineNeverStarted(generation) })
+}
+
+// stopHeldTimerLocked retires the timer, if one runs: a timer already firing
+// finds its generation stale. The caller holds mu.
+func (s *Session) stopHeldTimerLocked() {
+	s.heldGeneration++
+	if s.heldTimer != nil {
+		s.heldTimer.Stop()
+		s.heldTimer = nil
+	}
+}
+
+// onLineNeverStarted sends the results held for a line that never started.
+// The timer calls it on its own goroutine.
+func (s *Session) onLineNeverStarted(generation uint64) {
+	s.mu.Lock()
+	if generation != s.heldGeneration || s.isLineTurnOpen || len(s.heldResults) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	s.log.Warn("a committed line never started; sending the tool results that waited for it")
+	s.releaseHeldResults()
+}
+
+// releaseHeldResults sends the results held for a line, if there are any, now
+// that its turn has ended or will not come.
+func (s *Session) releaseHeldResults() {
+	s.mu.Lock()
+	items := s.heldResults
+	s.heldResults = nil
+	s.stopHeldTimerLocked()
+	s.mu.Unlock()
+	if len(items) == 0 {
+		return
+	}
+	s.log.Debug("the line has ended; sending the tool results that waited for it",
+		"results", len(items))
+	if err := s.sendToolResults(items); err != nil {
+		s.log.Warn("could not send the tool results that waited for a line", "error", err)
+	}
+}
+
+// endLineTurn records that the open turn, if it was a line, is over, and
+// reports whether it was.
+func (s *Session) endLineTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wasLine := s.isLineTurnOpen
+	s.isLineTurnOpen = false
+	return wasLine
 }
 
 // UpdateInstructions replaces the standing instructions.
@@ -480,6 +602,9 @@ func (s *Session) Interrupt(reason provider.InterruptReason, playedMs int) error
 func (s *Session) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.beginStop()
+		s.mu.Lock()
+		s.stopHeldTimerLocked()
+		s.mu.Unlock()
 		if s.conn == nil {
 			s.setOutcome(outcomeCleanClose)
 			return

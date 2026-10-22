@@ -207,6 +207,18 @@ func TestHowEachProfileDeliversAClosingLine(t *testing.T) {
 	}
 }
 
+// Only doubao drops a tool result sent after a line (doubao-findings W-D10), so
+// only doubao goes without the wait line. The Realtime profiles answer a result
+// after a line (the owed turn, #286) and keep it.
+func TestOnlyDoubaoDropsAToolResultSentAfterALine(t *testing.T) {
+	for _, profile := range []Profile{OpenAIProfile(), QwenProfile(), GrokProfile(), GatewayProfile(), DoubaoProfile()} {
+		want := profile.Name == NameDoubao
+		if got := profile.DropsToolResultAfterLine; got != want {
+			t.Errorf("%s: DropsToolResultAfterLine = %v, want %v", profile.Name, got, want)
+		}
+	}
+}
+
 // The flow's temperature reaches only the profiles whose session object has a
 // field for it. The GA dialect has none, so sending it there would risk a
 // rejected session.update; the retry after a rejection drops it with the other

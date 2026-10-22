@@ -844,7 +844,7 @@ func TestLiveGrokTerminalLine(t *testing.T) {
 				}
 				g.drain(300 * time.Millisecond)
 			}
-			_ = g.send(speakRequest(direction))
+			_ = g.send(speakRequest(direction, false))
 			tr, ok := g.reply(30 * time.Second)
 			sc := grokScore(tr.text, grokBye)
 			score[sc]++
@@ -869,7 +869,7 @@ func TestLiveGrokTerminalLine(t *testing.T) {
 				g.drain(300 * time.Millisecond)
 			}
 			_ = g.send(userTextItem(direction))
-			_ = g.send(speakRequest(direction))
+			_ = g.send(speakRequest(direction, false))
 			tr, ok := g.reply(30 * time.Second)
 			sc := grokScore(tr.text, grokBye)
 			score[sc]++
@@ -1062,8 +1062,8 @@ func TestLiveGrokResponseOverride(t *testing.T) {
 		history bool
 		send    func(g *grokConn)
 	}{
-		{"empty-conversation-override", false, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
-		{"after-turn-override", true, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
+		{"empty-conversation-override", false, func(g *grokConn) { _ = g.send(speakRequest(direction, false)) }},
+		{"after-turn-override", true, func(g *grokConn) { _ = g.send(speakRequest(direction, false)) }},
 		{"after-turn-override-modalities", true, func(g *grokConn) {
 			_ = g.send(map[string]any{"type": "response.create", "response": map[string]any{
 				"instructions": direction, "modalities": []string{"audio"}}})
@@ -1111,7 +1111,7 @@ func TestLiveGrokOverrideDisambiguation(t *testing.T) {
 			_ = g.send(map[string]any{"type": "response.create"})
 		}},
 		// (iii) the override after a long wait instead of 0.3 to 1 s.
-		{"override-after-3s", 3 * time.Second, func(g *grokConn) { _ = g.send(speakRequest(direction)) }},
+		{"override-after-3s", 3 * time.Second, func(g *grokConn) { _ = g.send(speakRequest(direction, false)) }},
 	}
 	for _, arm := range arms {
 		for n := 1; n <= 2; n++ {

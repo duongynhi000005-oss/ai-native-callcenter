@@ -192,6 +192,37 @@ type Realtime struct {
 	// removeUnfinishedCalls.
 	callItems     map[string]string
 	finishedCalls map[string]struct{}
+	// isLineResponse says the response now open is the one a line asked for
+	// (onResponseCreated). A function call it makes is never handed out, and
+	// it is taken out of the conversation when the response ends; see
+	// onLineCall.
+	isLineResponse bool
+
+	// spokenItems are the items the response now open has begun to speak
+	// (output_item.added of a message), and unheardItems the ones the
+	// consumer has reported the caller heard none of (Interrupt with 0 ms)
+	// while that response was still open. hasResponseAudio says audio of the
+	// response now open has reached the consumer. They belong to one response:
+	// response.created clears them and response.done settles them. See
+	// removeUnheardTurn.
+	spokenItems      []string
+	unheardItems     []string
+	hasResponseAudio syncatomic.Bool
+
+	// The fields that tell the model a tool's answer went unheard. See
+	// noteUnheardResult.
+	//
+	// isResultUnheard means a tool result is in the conversation and no turn
+	// made with it in view has yet run to its end with its audio handed to
+	// the consumer. isAnswerResponse says the response now open is such a
+	// turn (not a line's), and answerItemID is the spoken item of the latest
+	// one, which is what lets a later Interrupt with 0 ms recognise it.
+	// isUnheardNoted means the note has been put in the conversation for the
+	// results now waiting, so a second cut turn does not repeat it.
+	isResultUnheard  bool
+	isAnswerResponse bool
+	answerItemID     string
+	isUnheardNoted   bool
 
 	// deleteSentAt is when this client last asked the provider to delete an
 	// item, which is what lets a refusal of that be recognised; see
@@ -554,11 +585,15 @@ func (r *Realtime) stopRequestTimerLocked() {
 // carries as its override and whether that direction goes in the conversation
 // too (see askForLine for when). The caller holds mu.
 func (r *Realtime) lineRequestLocked(text string, isClosing bool) responseRequest {
+	direction := sayExactly(text, r.cfg.Language)
+	if r.profile.NeedsToolFreeLineDirection {
+		direction = sayExactlyWithoutTools(text, r.cfg.Language)
+	}
 	return responseRequest{
 		kind:      responseKindLine,
 		text:      text,
 		isClosing: isClosing,
-		direction: sayExactly(text, r.cfg.Language),
+		direction: direction,
 		isDirectionInConversation: r.profile.IgnoresOverrideOnceTalking ||
 			(isClosing && r.profile.NeedsDirectedLineInConversation),
 	}
@@ -591,7 +626,7 @@ func (r *Realtime) askForLine(request responseRequest) error {
 				return err
 			}
 		}
-		return r.sendEvent(speakRequest(request.direction))
+		return r.sendEvent(speakRequest(request.direction, r.profile.AcceptsResponseToolChoice))
 	}()
 	if err != nil {
 		r.mu.Lock()
@@ -608,11 +643,19 @@ func (r *Realtime) askForLine(request responseRequest) error {
 // carries has no counterpart on a response, and both name the per-response
 // override the same way, so there is nothing here for a dialect to disagree
 // about.
-func speakRequest(direction string) map[string]any {
-	return map[string]any{
-		"type":     "response.create",
-		"response": map[string]any{"instructions": direction},
+//
+// isToolBarred adds the per-response tool_choice "none", on a profile that
+// takes one (AcceptsResponseToolChoice). A line is words the flow chose, and
+// the turn that says them must not call a tool: asked for while a slow tool's
+// call was still unanswered (the wait line, #286), qwen answered the line's
+// request with a second, identical call to that tool, so the backend was hit
+// twice and the caller heard the answer twice (qwen-findings W-Q8).
+func speakRequest(direction string, isToolBarred bool) map[string]any {
+	response := map[string]any{"instructions": direction}
+	if isToolBarred {
+		response["tool_choice"] = "none"
 	}
+	return map[string]any{"type": "response.create", "response": response}
 }
 
 // SayExactly is how a model is asked for particular words rather than for a
@@ -632,6 +675,29 @@ func SayExactly(text, language string) string {
 
 // sayExactly is the name this client's call sites know it by.
 var sayExactly = SayExactly
+
+// sayExactlyWithoutTools is SayExactly for a line on a profile that needs the
+// direction itself to keep the turn from calling a tool
+// (NeedsToolFreeLineDirection): the same demand, plus a ban on any tool call
+// and the fact that whatever tool the line mentions is already running.
+//
+// The second half is what answers the platform's own rule. Every flow with a
+// tool carries flow's action-claim rule (#44): never say you are looking
+// something up unless you call the tool in the same reply, with "我帮您查询一下"
+// as its example. The default wait line, "请稍等，我查一下。", is that sentence, so
+// a model that obeys the rule calls the tool to be allowed to say it, or calls
+// it and says nothing (qwen-findings W-Q8).
+func sayExactlyWithoutTools(text, language string) string {
+	if strings.HasPrefix(strings.ToLower(language), "zh") {
+		return "这一轮只做一件事：一字不差地说出下面这句话，不要添加任何其它内容，也不要调用任何工具。" +
+			"这句话提到的工具已经在运行或已经运行过，结果会另外交给你，" +
+			"所以说这句话不违反关于工具调用的规则：\n" + text
+	}
+	return "This turn does one thing only: say the sentence below word for word, " +
+		"add nothing else, and call no tool. Any tool the sentence mentions is " +
+		"already running or has already run, and its result will reach you " +
+		"separately, so saying it breaks no rule about tool calls:\n" + text
+}
 
 // requestResponse asks the model for a turn and records that one is on its way
 // (claimFloorLocked). Between here and response.created there is nothing to
@@ -708,7 +774,16 @@ func (r *Realtime) onRequestExpired(gen uint64) {
 	case !expired.isRetry:
 		outcome = obs.ResponseUnansweredRetried
 		retry.isRetry = true
+		// A line's retry is the same line asked for again, and a turn owed
+		// past its first request (a result or a cue that arrived while it
+		// was on its way) is still owed past it: the line's turn answers
+		// neither. Any other retry is a bare request sent after the item and
+		// answers it, so the claim discharges it as usual.
+		isOwedPastLine := expired.kind == responseKindLine && r.isTurnOwed && r.isOwedPastCreate
 		r.claimFloorLocked(retry)
+		if isOwedPastLine {
+			r.isTurnOwed, r.isOwedPastCreate = true, true
+		}
 		r.recoverySentAt, r.recoveryLine = time.Now(), nil
 	default:
 		outcome = obs.ResponseUnansweredDropped
@@ -762,7 +837,7 @@ func (r *Realtime) sendRetry(expired responseRequest) error {
 			return err
 		}
 	}
-	return r.sendEvent(speakRequest(expired.direction))
+	return r.sendEvent(speakRequest(expired.direction, r.profile.AcceptsResponseToolChoice))
 }
 
 // onResponseCreated stops a turn that was superseded before it existed.
@@ -770,8 +845,14 @@ func (r *Realtime) sendRetry(expired responseRequest) error {
 // A line asked for while the previous request was still in flight could not be
 // cancelled then, because the provider had created nothing. This is the first
 // moment there is something to stop.
-func (r *Realtime) onResponseCreated() {
+//
+// It reports whether the response is the one a line asked for: the request in
+// flight when it was created was a line's.
+func (r *Realtime) onResponseCreated() (isLine bool) {
 	r.mu.Lock()
+	isLine = r.isResponseRequested && r.request.kind == responseKindLine
+	r.isLineResponse = isLine
+	r.isAnswerResponse = !isLine && r.isResultUnheard
 	r.settleRequestLocked()
 	r.isCallerSpeaking = false
 	// Whoever asked for this response — this client or the provider's own
@@ -797,6 +878,7 @@ func (r *Realtime) onResponseCreated() {
 			r.log.Warn("could not stop the turn a spoken line replaces", "error", err)
 		}
 	}
+	return isLine
 }
 
 // dispatchPendingSpeak asks for the line that was waiting, now that the turn
@@ -873,10 +955,22 @@ func (r *Realtime) SendToolResult(toolCallID, output string) error {
 	// can never be requested ahead of the output it is meant to answer. If
 	// the response ends in between, the floor is seen free here and the turn
 	// is asked for now.
+	//
+	// A line asked for and not yet created covers nothing: its turn says the
+	// line as written and answers no result. The result's turn is owed past
+	// that request, as a cue's is (SendUserText), and asked for when the
+	// line's turn ends. Without this a result that arrived while a wait line
+	// was on its way (#286) rode on the line and was never answered.
 	r.mu.Lock()
-	isOwed := r.isResponseOpen.Load() || r.isTurnOwed
+	r.isResultUnheard, r.isUnheardNoted = true, false
+	isOpen := r.isResponseOpen.Load()
+	isLineRequested := !isOpen && r.isResponseRequested && r.request.kind == responseKindLine
+	isOwed := isOpen || r.isTurnOwed || isLineRequested
 	if isOwed {
 		r.isTurnOwed = true
+		if isLineRequested {
+			r.isOwedPastCreate = true
+		}
 	}
 	isCovered := !isOwed && r.isResponseRequested
 	r.mu.Unlock()
@@ -1024,10 +1118,23 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 	// earlier turn's tail and flushed before a frame reached the caller, so the
 	// whole item comes out of the history. The id is spent once truncated, so a
 	// second report for the same turn cannot overwrite the first.
+	//
+	// Zero is also taken further than a truncate: the item is deleted. qwen
+	// acknowledges a truncate and leaves the text the model reads back whole
+	// (qwen-findings, TestLiveQwenTruncate), so a turn flushed before a frame of
+	// it played stayed in its history as said; it honours a delete (W-Q5).
+	// The truncate still goes first for an engine that honours it and not the
+	// delete. An item is never deleted while its response is open, because
+	// the provider is still writing it: then it is deleted when that response
+	// ends (removeUnheardTurn).
 	if itemID != "" && playedMs >= 0 {
 		r.mu.Lock()
 		if r.responseItemID == itemID {
 			r.responseItemID = ""
+		}
+		isDeleteDeferred := playedMs == 0 && r.isResponseOpen.Load()
+		if isDeleteDeferred {
+			r.unheardItems = append(r.unheardItems, itemID)
 		}
 		r.mu.Unlock()
 		if err := r.sendEvent(map[string]any{
@@ -1037,6 +1144,17 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 			"audio_end_ms":  playedMs,
 		}); err != nil {
 			return err
+		}
+		if playedMs == 0 && !isDeleteDeferred {
+			if err := r.deleteUnheardItem(itemID, ""); err != nil {
+				return err
+			}
+			r.mu.Lock()
+			isAnswer := itemID == r.answerItemID
+			r.mu.Unlock()
+			if isAnswer {
+				return r.noteUnheardResult()
+			}
 		}
 	}
 	return nil
@@ -1297,11 +1415,13 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.mu.Lock()
 		r.responseItemID = ""
 		r.callItems, r.finishedCalls = nil, nil
+		r.spokenItems, r.unheardItems = nil, nil
 		r.mu.Unlock()
+		r.hasResponseAudio.Store(false)
 		r.isResponseOpen.Store(true)
-		r.onResponseCreated()
+		isLine := r.onResponseCreated()
 		r.signal(watchResponseStarted)
-		r.emit(Event{Type: EventTypeResponseStarted})
+		r.emit(Event{Type: EventTypeResponseStarted, IsSpokenLine: isLine})
 
 	case "response.output_item.added":
 		// Only the item carrying speech can be truncated. A turn that says
@@ -1312,6 +1432,10 @@ func (r *Realtime) handle(event *wireEvent) {
 		if event.Item != nil && event.Item.ID != "" && isSpokenItem(event.Item.Type) {
 			r.mu.Lock()
 			r.responseItemID = event.Item.ID
+			r.spokenItems = append(r.spokenItems, event.Item.ID)
+			if r.isAnswerResponse {
+				r.answerItemID = event.Item.ID
+			}
 			r.mu.Unlock()
 		}
 		// A function call is open until its arguments are done; see
@@ -1333,6 +1457,9 @@ func (r *Realtime) handle(event *wireEvent) {
 			return
 		}
 		r.signal(watchAudioArrived)
+		if !r.hasResponseAudio.Load() {
+			r.hasResponseAudio.Store(true)
+		}
 		r.emit(Event{Type: EventTypeAudioDelta, Audio: audio})
 
 	case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
@@ -1365,6 +1492,9 @@ func (r *Realtime) handle(event *wireEvent) {
 		return
 
 	case "response.function_call_arguments.done":
+		if r.onLineCall(event) {
+			return
+		}
 		r.finishCall(event.ItemID, event.CallID)
 		arguments := event.Arguments
 		if arguments == "" {
@@ -1400,8 +1530,10 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	cancelledFor := r.takeCancelReason()
 	r.signal(watchResponseEnded)
 	// Before anything asks for a turn, so that turn is made from a
-	// conversation without the calls this one left unfinished.
+	// conversation without the calls this one left unfinished, nor the words
+	// of this one that the caller never heard.
 	r.removeUnfinishedCalls(event.Response)
+	r.removeUnheardTurn(event.Response)
 	// The floor is free: a line that was waiting for it goes out before the
 	// turn is reported, so the next words are already being made while the
 	// consumer catches up.
@@ -1484,8 +1616,35 @@ func (r *Realtime) finishCall(itemID, callID string) {
 	}
 }
 
+// onLineCall reports whether a finished function call belongs to a line's
+// turn, and if so keeps it from the consumer.
+//
+// A line is words the flow chose, and the turn asked for to say them must not
+// act. qwen ignores every way the request can say so (a response-level
+// tool_choice "none" and a response-level empty tools list, measured
+// 2026-10-22, qwen-findings W-Q8): asked for a wait line while a slow tool's
+// call was unanswered, it said the line and called the same tool again with
+// the same arguments. Handed out, that call hit the backend a second time and
+// its result made a second answer turn. So the call is not handed out, and it
+// is left open: removeUnfinishedCalls takes it out of the conversation when
+// the line's turn ends, as it does a call a cancelled turn left half made, so
+// that no later turn reads it as a call still waiting for its output. The
+// call the line was said over is the earlier turn's and is answered as usual.
+func (r *Realtime) onLineCall(event *wireEvent) bool {
+	r.mu.Lock()
+	isLine := r.isLineResponse
+	r.mu.Unlock()
+	if !isLine {
+		return false
+	}
+	r.log.Info("the turn asked for a line called a tool; the call is not handed out and is taken back when the turn ends",
+		"tool", event.Name, "callId", event.CallID, "itemId", event.ItemID)
+	return true
+}
+
 // removeUnfinishedCalls takes out of the conversation every function call a
-// response that did not complete left half made.
+// response that did not complete left half made, and every function call a
+// line's turn made (onLineCall), however that turn ended.
 //
 // A response cut off while it is writing a call's arguments (a keypress, a
 // barge-in, a preempting line) leaves the call item in the conversation, with
@@ -1509,18 +1668,27 @@ func (r *Realtime) finishCall(itemID, callID string) {
 // the event); see isAnsweredDelete.
 func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
 	r.mu.Lock()
-	open, finished := r.callItems, r.finishedCalls
-	r.callItems, r.finishedCalls = nil, nil
+	open, finished, isLine := r.callItems, r.finishedCalls, r.isLineResponse
+	r.callItems, r.finishedCalls, r.isLineResponse = nil, nil, false
 	r.mu.Unlock()
 
-	if response == nil || response.Status == "" || response.Status == statusCompleted {
+	isCutShort := response != nil && response.Status != "" && response.Status != statusCompleted
+	if !isCutShort && !isLine {
 		return
+	}
+	status := ""
+	if response != nil {
+		status = response.Status
 	}
 	ids := make(map[string]struct{}, len(open))
 	for id := range open {
 		ids[id] = struct{}{}
 	}
-	for _, item := range response.Output {
+	var output []wireItem
+	if response != nil {
+		output = response.Output
+	}
+	for _, item := range output {
 		if item.Type != "function_call" || item.ID == "" {
 			continue
 		}
@@ -1542,9 +1710,153 @@ func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
 				"itemId", id, "error", err)
 			continue
 		}
-		r.log.Debug("took the function call a cancelled response left unfinished out of the conversation",
-			"itemId", id, "status", response.Status)
+		r.log.Debug("took a function call out of the conversation",
+			"itemId", id, "status", status, "isLine", isLine)
 	}
+}
+
+// removeUnheardTurn takes out of the conversation the words of a response the
+// caller heard none of, before anything asks for the next turn.
+//
+// Two shapes. A response cut short (any status but completed) before a single
+// frame of its audio reached the consumer: the provider wrote the words, and
+// often all of them, and nothing was played, so the consumer has nothing to
+// flush, counts nothing and reports nothing. And an item the consumer did
+// report as unheard (Interrupt with 0 ms) while its response was still open.
+//
+// The first is the #286 live call 01a16256-ddd5-…: a tool's answer was asked
+// for as the caller started to speak over the wait line, qwen's own turn
+// detection cancelled that response 200 ms later with its whole transcript
+// written and no audio sent, and its reply to the caller ("在的，请问还有什么可以
+// 帮您？") took the answer as given; the caller never heard it. Replayed live
+// (TestLiveQwenSpeechOverTheAnswer), the history without the unheard item is
+// answered with the result.
+//
+// A response some audio of which reached the consumer is the consumer's to
+// account for: it alone knows how much was played, and reports it through
+// Interrupt.
+func (r *Realtime) removeUnheardTurn(response *wireResponse) {
+	r.mu.Lock()
+	spoken, unheard := r.spokenItems, r.unheardItems
+	r.spokenItems, r.unheardItems = nil, nil
+	isAnswer, isPreempted := r.isAnswerResponse, r.isPreemptedForSpeak
+	r.isAnswerResponse = false
+	r.mu.Unlock()
+
+	status := ""
+	if response != nil {
+		status = response.Status
+	}
+	// An answer that ran to its end with its audio handed out was delivered;
+	// whether it was heard is the consumer's to report (Interrupt).
+	if isAnswer && (status == "" || status == statusCompleted) && r.hasResponseAudio.Load() {
+		r.mu.Lock()
+		r.isResultUnheard, r.isUnheardNoted = false, false
+		r.mu.Unlock()
+	}
+	ids := make([]string, 0, len(spoken)+len(unheard))
+	seen := make(map[string]struct{}, cap(ids))
+	add := func(id string) {
+		if _, ok := seen[id]; ok || id == "" {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, id := range unheard {
+		add(id)
+	}
+	isCutShort := status != "" && status != statusCompleted
+	if isCutShort && !r.hasResponseAudio.Load() {
+		for _, id := range spoken {
+			add(id)
+		}
+		for _, item := range response.Output {
+			if isSpokenItem(item.Type) {
+				add(item.ID)
+			}
+		}
+	}
+	for _, id := range ids {
+		r.mu.Lock()
+		if r.responseItemID == id {
+			r.responseItemID = ""
+		}
+		r.mu.Unlock()
+		if err := r.deleteUnheardItem(id, status); err != nil {
+			r.log.Debug("could not take an unheard turn out of the conversation",
+				"itemId", id, "error", err)
+		}
+	}
+	// The turn that answered a tool result went unheard: the caller's next
+	// reply must give it. A turn stopped for a line is not: the line is the
+	// next turn, and it must say the line alone.
+	if isAnswer && len(ids) > 0 && !isPreempted {
+		if err := r.noteUnheardResult(); err != nil {
+			r.log.Debug("could not tell the model the result went unheard", "error", err)
+		}
+	}
+}
+
+// noteUnheardResult tells the model, as a note in the conversation, that the
+// caller has not heard the tool result it answered, so its next reply gives it.
+// Once per result: SendToolResult arms it again.
+//
+// Taking the unheard answer out (removeUnheardTurn) is not enough on its own.
+// On #286 live call 01a1627d-7eae-77c2-98f7-e997fca088da the answer was cut
+// before its audio and its item deleted, and the reply to the caller's "你在吗"
+// was still "在的，请问有什么可以帮您？", the reply qwen gives when the history
+// holds the answer as said. Measured on TestLiveQwenUnheardResultNote
+// (qwen-findings W-Q9): with the cut answer's words left in the history the
+// reply gave the result 1 of 8, with this note after them 9 of 9; with the
+// history clean it gave it 12 of 12 without the note and 4 of 4 with it, and a
+// follow-up question was answered alike either way. Why the live history was
+// not clean is not known; the note is what holds whatever is left in it.
+func (r *Realtime) noteUnheardResult() error {
+	r.mu.Lock()
+	if r.isUnheardNoted {
+		r.mu.Unlock()
+		return nil
+	}
+	r.isUnheardNoted = true
+	language := r.cfg.Language
+	r.mu.Unlock()
+	if err := r.sendEvent(userTextItem(unheardResultNote(language))); err != nil {
+		return err
+	}
+	r.log.Info("told the model the caller has not heard the tool's result")
+	return nil
+}
+
+// unheardResultNote is the note noteUnheardResult puts in the conversation, in
+// the session's language.
+func unheardResultNote(language string) string {
+	if strings.HasPrefix(strings.ToLower(language), "zh") {
+		return "（系统提示：刚才的查询结果还没有说给来电者听，来电者一个字也没有听到。" +
+			"下一次回复来电者时，先简短回应他，然后把查询结果告诉他。）"
+	}
+	return "(System note: the caller has not heard the result of the lookup yet, " +
+		"not a word of it. In your next reply to the caller, first respond briefly, " +
+		"then tell them the result.)"
+}
+
+// deleteUnheardItem takes one spoken item the caller heard none of out of the
+// conversation. Said at Info: an answer the model wrote and the caller never
+// heard is invisible in the call's transcript, which records what the model
+// wrote, and the log line is the trace that it was taken back.
+func (r *Realtime) deleteUnheardItem(itemID, status string) error {
+	r.mu.Lock()
+	r.deleteSentAt = time.Now()
+	r.mu.Unlock()
+	if err := r.sendEvent(map[string]any{
+		"type":    "conversation.item.delete",
+		"item_id": itemID,
+	}); err != nil {
+		return err
+	}
+	r.log.Info("took a turn the caller heard none of out of the conversation",
+		"itemId", itemID, "status", status)
+	return nil
 }
 
 // isAnsweredDelete reports whether an error is the provider refusing an item
@@ -1635,12 +1947,25 @@ func (r *Realtime) handleError(event *wireEvent) {
 	// A request for a turn that the provider refused for any reason but a
 	// response already running will never be created, so it must not go on
 	// covering the tool results that follow it (SendToolResult).
+	//
+	// A turn owed past that request (a result or a cue that arrived while a
+	// line was on its way) was waiting for the line's turn to end, and there
+	// will be none: it is asked for now. Claiming the floor discharges it, so
+	// a refusal of that request too cannot loop.
 	if !strings.Contains(err.Message, "another response is in progress") {
 		r.mu.Lock()
+		isSettled := !r.isResponseOpen.Load() && r.isResponseRequested
 		if !r.isResponseOpen.Load() {
 			r.settleRequestLocked()
 		}
+		isOwedStranded := isSettled && r.isTurnOwed && r.isOwedPastCreate
+		if isOwedStranded {
+			r.isOwedPastCreate = false
+		}
 		r.mu.Unlock()
+		if isOwedStranded {
+			r.releaseOwedTurn()
+		}
 	}
 
 	r.finishStart(err)

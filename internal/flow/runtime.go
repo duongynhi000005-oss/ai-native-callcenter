@@ -249,6 +249,22 @@ func (r *Runtime) ReturnTo(phase string) bool { return r.engine.ReturnTo(phase) 
 // writes from, and this is wording the flow is not asking anybody to rephrase.
 func (r *Runtime) Announce() string { return r.engine.Announce() }
 
+// ToolWaitLine is the line said while a slow HTTP tool runs
+// (Engine.ToolWaitLine).
+func (r *Runtime) ToolWaitLine() string { return r.engine.ToolWaitLine() }
+
+// IsHTTPTool reports whether Dispatch would run the named tool as a call to a
+// backend: a flow-declared HTTP tool the current phase allows. Built-ins,
+// record_lead, slot tools and refused tools answer at once, with lines of
+// their own where they have any.
+func (r *Runtime) IsHTTPTool(name string) bool {
+	if slices.Contains(BuiltinToolNames, name) || !r.IsToolAllowed(name) {
+		return false
+	}
+	tool, ok := r.engine.Spec().Tools[name]
+	return ok && tool.Kind != ToolKindSlot
+}
+
 // BeginToolBatch starts the tool calls of one model response: until
 // EndToolBatch, Dispatch judges each of them in the phase the response was
 // made in (Engine.BeginToolBatch).

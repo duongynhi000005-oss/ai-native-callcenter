@@ -947,3 +947,233 @@ value the model must recall verbatim (the marker is a style rule, the easiest
 kind of instruction to check), an update late in a long call when the provider
 trims its own history, and a phase paragraph that competes with a tool result's
 hint.
+
+## W-Q8: a line asked for over an unanswered call repeats the call (2026-10-22)
+
+**W-Q8 — a `response.create` asking for a line (`SpeakText`, a per-response
+`instructions` override) while a tool's call is still unanswered is answered
+with a second function call to the same tool with the same arguments, and
+nothing on the request stops it.** Found in the live round of #286 (the wait
+line), 4 calls on DID 95012, 2026-10-22 13:07–13:10, model
+`qwen-audio-3.1-realtime-plus`.
+
+**On the calls.** In every call the orchestrator said the wait line at the 1 s
+mark, and the transcript shows `TOOL_CALL kb_search_slow`, then straight after
+the line's request a second `TOOL_CALL kb_search_slow` with the same query. The
+second call was dispatched like the first: the backend was hit twice, the two
+results made two answer turns, and the answer was said twice. On the recordings:
+4.6 s of silence and no wait line (call 1); the wait line only ~5.4 s after the
+tool call, together with the answer (call 2); an apology after ~4 s instead of
+2 s for a tool with `timeoutMs` 2000 (calls 3 and 4).
+
+**Measured.** `TestLiveQwenLineCallsNoTool`
+(`internal/provider/live_line_tools_test.go`), through the product client:
+`lookup_order` declared at Start, the caller's order question (`q_order.pcm`),
+the model calls the tool, and with that call unanswered the test asks for
+"请稍等，我查一下。" with `SpeakText`. One session per arm:
+
+| Line request | Line's turn |
+|---|---|
+| `response.instructions` only (as shipped) | said the line, then called `lookup_order {"orderId": "12345"}` again |
+| plus `response.tool_choice: "none"` | the same: no error, the field ignored |
+| plus `response.tools: []` | the same: no error, the field ignored |
+
+The vendor's guide documents no field of `response.create`'s `response` at all
+(the `instructions` override included, which is obeyed), so neither result
+contradicts it. OpenAI documents a response-level `tool_choice` with `"none"`;
+xAI documents the `instructions` override alone; the Realtime gateway refuses
+`response.tool_choice` and `response.tools` as "Unsupported parameter"
+(cascade-realtime-gateway, `internal/protocol/decode.go`).
+
+**The fix (`provider.Realtime`).** A function call made in a line's turn
+(`onLineCall`: the response created for a `responseKindLine` request) is never
+handed out as a tool call, on any profile, and its item is deleted with
+`conversation.item.delete` when that turn ends, however it ends, through the
+same path that removes a cancelled turn's half-made call (W-Q5), so no later
+turn reads it as a call still waiting for its output. The call the line was said
+over belongs to the earlier turn and is answered as usual. On a profile that
+obeys a response-level bar (`AcceptsResponseToolChoice`, openai only, on its
+documentation), every line request also carries `tool_choice: "none"`, so the
+model says the line instead of spending the turn on a call; qwen, grok and the
+gateway do not get the field. With the fix the same session passed: the line was
+said (first audio 1.1 s after the request), the provider's second call
+(`call_bc1159eb…`) was kept back and its item deleted (`conversation.item.deleted`
+acknowledged), the result made exactly one answer turn
+(`您的订单已发货，预计明天送达。`), and nothing else started in the 6 s after it.
+Covered by `TestACallMadeInALinesTurnIsNeverHandedOut`,
+`TestALineRequestBarsToolsWhereTheProfileObeysIt` and
+`TestOnlyALineRequestBarsTools` (`internal/provider/line_tools_test.go`).
+
+**The line said nothing (live call on 320b827, the guard alone).** Call
+01a1622a-950a-766a-af17-47812eae7178 (13:52:19): the wait line was asked for at
++1 s, the guard kept back the line's turn's call at 13:52:20.054, and the bot
+channel of the recording is silent from the question (17.2 s) to the answer
+(22.6 s). One backend hit, one answer, but no wait line: 2 of 5 live calls had no
+line audio at all, the others said it late or together with the call.
+
+**Why.** The two-sentence persona of the first test hides it: there qwen said the
+line and called the tool as well. The flow's session carries the platform's
+action-claim rule (`flow.Runtime.actionClaimRule`, #44): never say you are
+looking something up unless you call the tool in the same reply, with
+"我帮您查询一下" as its example. The default wait line, "请稍等，我查一下。", is that
+sentence. Asked to say it word for word, the model obeys the standing rule
+instead: it calls the tool, and often says nothing.
+
+**Measured, on that session.** `TestLiveQwenWaitLine`
+(`internal/provider/live_line_tools_test.go`) replays the call:
+`testdata/line_session_zh.json` is the mobile_support session the orchestrator
+built (instructions, the six tools, the opening line), `testdata/q_contract.pcm`
+is the call's question ("我的合约机想提前解约，要交多少违约金？", qwen3-tts-flash,
+voice Cherry), the wait line is asked for 1 s after the model's call and the
+result is sent 3 s after it, as on the call. One session per run:
+
+| Arm | Line said | Call made in the line's turn | Exactly one answer |
+|---|---|---|---|
+| `plain`: SayExactly, as on the call | **0 of 3** | 3 of 3 (kept back) | 3 of 3 |
+| `direction`, then `shipped`: the direction below | **6 of 6** (3 + 3), first audio 1.6–2.0 s after the call | **0 of 6** | 6 of 6 |
+
+The direction (`sayExactlyWithoutTools`): "这一轮只做一件事：一字不差地说出下面这句
+话，不要添加任何其它内容，也不要调用任何工具。这句话提到的工具已经在运行或已经运行
+过，结果会另外交给你，所以说这句话不违反关于工具调用的规则：" and the line; the
+English twin says the same. It is the bar in words, and the second sentence is
+what answers the action-claim rule. Arms B (a session-level `tools: []` around
+the line) and C (asking for the line again after a silent turn) were not needed
+and not measured.
+
+Two checks on the same direction: the first test's two-sentence persona said
+the line with no call at all (1 of 1, against a call in every earlier run), and
+a closing line ("感谢来电,再见。", `SpeakText(isClosing)`, which on qwen also goes
+into the conversation) after the answer was said as written with no call, 3 of
+3 (`TestLiveQwenClosingLine`).
+
+**What ships.** `Profile.NeedsToolFreeLineDirection`, true on qwen only: every
+mid-call line (`SpeakText`) carries that direction in place of SayExactly, in
+the override and in the conversation item where the line goes there too. The
+opening line and a tool result's hint keep SayExactly. The guard stays on every
+profile.
+
+**NOT MEASURED**: how often qwen makes the call with the new direction over many
+calls (6 sessions here), a phase announce mid-call with it, the English
+direction, and the openai, grok and gateway behaviour (the openai bar rests on
+its documentation; grok and the gateway keep SayExactly and the guard).
+
+## W-Q9: an answer cut before its audio stays in the history as said (2026-10-22)
+
+**W-Q9 — when the caller starts to speak just after a tool's answer was asked
+for, qwen cancels the answer's response itself, with its transcript written and
+none of its audio sent, and the model's next reply takes the answer as given.**
+Found in the live round of #286, call 01a16256-ddd5-73b7-9335-13322c315bfa
+(DID 95012, 14:40). The caller spoke over the end of the wait line ("哎喂你在吗？",
+onset about 43.4 s); the result came back at 43.600 and its turn was asked for;
+the transcript holds that turn's partial answer at 44.025
+("合约期内变更套餐需支付200元违约金，由"); the next reply was "在的，请问还有什么
+可以帮您？", and the 200 yuan was first heard 12 s later, in a dead-air prompt
+that said "刚才提到". The recording's bot channel is silent from the end of the
+line to the reply: none of the answer was played. The INFO log had no
+interruption line at all: no audio of the answer had been queued, so the
+session had nothing to flush or count and reported nothing, and the client
+sent no truncate (one would not have helped: qwen ignores it, see the
+measurement table above).
+
+**Measured.** `TestLiveQwenSpeechOverTheAnswer`
+(`internal/provider/live_unheard_test.go`) replays the call on the session of
+`TestLiveQwenWaitLine`, with the caller's words (`testdata/q_are_you_there.pcm`,
+"哎，喂，你在吗？", qwen3-tts-flash) starting 50 ms after the result. On the wire,
+every run: `response.created` for the answer, 180–630 ms later (runs with the fix)
+`input_audio_buffer.speech_started`, and in the same instant
+`response.audio_transcript.done` (the answer's text, whole or nearly) and
+`response.done` with `status: cancelled`, no audio delta in between. This
+client sent no `response.cancel`: on a response that has sent no audio qwen
+cancels on its own speech detection, although `CancelsResponseItself` stays
+false (that trait was measured on a response already speaking). A first probe
+with the caller's own audio cut from the call's recording reproduced the live
+reply word for word.
+
+| Client | Answer cut before audio | Reply gives the result |
+|---|---|---|
+| before the fix | 3 / 3 | 0 / 3 ("在的，请问有什么可以帮您？" every time) |
+| with the fix | 3 / 3 | 3 / 3 ("在的。合约期内变更套餐需支付200元违约金，由人工客服办理。") |
+
+**The fix (`provider.Realtime.removeUnheardTurn`).** A response that ends with
+any status but `completed` before a single audio delta of it reached the
+consumer was heard by nobody, so every spoken item it began
+(`response.output_item.added` of a message, or a message in the response's
+`output`) is deleted with `conversation.item.delete` when its `response.done`
+arrives, before the requests that `response.done` releases, as W-Q5 does for a
+half-made call. A response some audio of which reached the consumer stays the
+consumer's to account for: it alone knows how much was played. The same holds on
+every Realtime profile; the delete is the one W-Q5 sends everywhere, and a
+refusal of it is not an error. The deletion is logged at INFO ("took a turn the
+caller heard none of out of the conversation"), the trace this call lacked.
+
+The other shape of an unheard answer is covered with it, from the unit tests
+only: a turn whose audio was queued behind an earlier turn's tail and flushed
+before a frame of it played (the consumer reports `Interrupt(…, 0)`, #53).
+Its truncate to 0 is still sent, for an engine that honours it, and the item is
+now deleted as well, at once if its response has ended and when it ends if not,
+because qwen ignores the truncate. Covered by
+`TestAnAnswerCutShortBeforeAnyAudioIsTakenOutOfTheConversation`,
+`TestAnUnheardItemNamedOnlyInTheOutputIsTakenOut`,
+`TestTheUnheardTurnIsTakenOutBeforeTheNextTurnIsAskedFor`,
+`TestATurnWithAudioOrCompletedIsNotTakenOutHere` and
+`TestATurnReportedUnheardIsDeleted` (`internal/provider/unheard_test.go`).
+
+**NOT MEASURED**: the flushed-behind-a-tail shape on a live call; a turn heard in
+part (qwen still keeps its whole text, #53); openai, grok and the gateway live.
+
+**Deletion alone was not enough on a live call.** On 06b465d, call
+01a1627d-7eae-77c2-98f7-e997fca088da (15:22): the caller spoke over the wait
+line's tail about 450 ms before the result ("余伟你在吗？"), the session's
+barge-in flushed the line's tail (`playedMs=1300`), the answer was asked for,
+cut by qwen before its audio and deleted (the INFO line fired, status
+`cancelled`), and the reply was still "在的，请问有什么可以帮您？"; the result came
+12 s later in the dead-air prompt. The deleted item was the answer's: the line's
+response had completed with audio, so it is never deleted on this path, and
+`Interrupt(SPEECH, 1300)` aims at the client's latest spoken item, which from the
+answer's `response.created` on is the answer's or none, and on qwen a truncate
+changes nothing anyway. The INFO log cannot show whether qwen honoured the
+delete or what else the history held.
+
+**Measured, outside timing.** `TestLiveQwenUnheardResultNote` builds the history
+directly (the model's call, the wait line, the result with no request for its
+turn), then the caller's words, answered by qwen's own turn detection. Counts
+are runs where the reply gave the result; "real" is the caller's audio cut from
+the call's recording (not in the repository), "tts" is `q_are_you_there.pcm`:
+
+| History after the result | real | tts |
+|---|---|---|
+| the cut answer's words kept (assistant item "合约期内变更套餐需支付200元违约金，由") | 0 / 4 | 1 / 4 |
+| kept, plus the note | 5 / 5 | 4 / 4 |
+| clean (no answer item) | 6 / 6 | 6 / 6 |
+| clean, plus the note | 4 / 4 | — |
+
+A follow-up question after the reply ("好的，那还有别的费用吗？") restated the
+200 yuan in 2 of 4 with the note and 3 of 4 without: the note does not make the
+result be said again. So the live reply is the one a history still holding the
+answer's words draws, and the note overrides it.
+
+**The shape, replayed.** `TestLiveQwenSpeechOverTheLineTail`: the caller's words
+start 2550 ms after the model's call, over the line's tail, and the first
+`speech_started` after the line gets the session's `Interrupt(SPEECH, 1300)`.
+Without `removeUnheardTurn`: the answer cut before its audio 4 of 4, the result
+given in the reply 3 of 4 (the miss was the run whose cut answer had written its
+whole text). With it and the note: cut 3 of 4, given 3 of 3; the fourth run's
+answer was not cut and was heard in full.
+
+**The note (`provider.Realtime.noteUnheardResult`).** When the turn that answers
+a tool result is deleted unheard (cut short before its audio, or reported
+flushed with 0 ms played), the client puts one caller-side note in the
+conversation, after the delete and before any request: "（系统提示：刚才的查询结果
+还没有说给来电者听，来电者一个字也没有听到。下一次回复来电者时，先简短回应他，然后
+把查询结果告诉他。）" (English for an English session). An answer turn is any
+turn other than a line's made while a result waits that no turn has yet
+delivered (run to its end with its audio handed out). Once per result: a
+second unheard turn does not repeat it, a new result arms it again. Not for a
+turn stopped to make room for a line, whose turn must say the line alone.
+Covered by `TestAnUnheardAnswerIsNotedOnceForTheReply`,
+`TestOnlyAnUnheardAnswerIsNoted`, `TestAnAnswerStoppedForALineIsNotNoted`,
+`TestADeliveredAnswerIsNotNotedAndANewResultIs` and
+`TestAnAnswerFlushedUnplayedIsNoted`.
+
+**NOT MEASURED**: the note on a live call; the English note; openai, grok and
+the gateway.

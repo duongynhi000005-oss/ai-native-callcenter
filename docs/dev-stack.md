@@ -128,6 +128,36 @@ walkthrough wants.
 The address comes only from `AICC_BOT_BACKEND_BASE`. A flow's `apiBaseEnv`
 field does not take effect.
 
+One endpoint stands in for a second backend with a credential and a slow
+answer, for per-tool `baseUrl`, secret headers, `timeoutMs` and the wait line
+(`docs/flow-authoring.md` 2.4.1 and 2.4.2). `POST /api/kb/secure-search` takes
+the knowledge-base body (`{"query": ..., "lang": ...}`) and answers like
+`/api/kb/search`, but only to `Authorization: Bearer <token>`, and only after
+the `delayMs` query parameter's milliseconds (0 to 15000, absent is 0). The
+token is `-kb-token`, or the `AICC_MOCKBACKEND_KB_TOKEN` environment variable.
+With neither, every request is refused. A wrong or missing token is a 401 that
+repeats no token. The app sends the same token through a tool secret:
+
+```sh
+AICC_MOCKBACKEND_KB_TOKEN=dev-kb-token go run ./cmd/aicc-mockbackend -addr 127.0.0.1:8770
+# in the app's .env: AICC_TOOL_SECRET_KB=dev-kb-token
+```
+
+```json
+"http": {
+  "baseUrl": "http://127.0.0.1:8770",
+  "path": "/api/kb/secure-search",
+  "query": { "delayMs": "3000" },
+  "headers": { "Authorization": "Bearer {secrets.KB}" },
+  "timeoutMs": 8000,
+  "body": { "query": "{args.query}", "lang": "{slots.lang}" },
+  "successWhen": { "path": "retCode", "equals": "000000" },
+  "result": { "found": "data.found", "answer": "data.answer" }
+}
+```
+
+A `delayMs` over the tool's `timeoutMs` walks the timeout path.
+
 **A failing tool is not a broken bot.** `connection refused` on
 `127.0.0.1:8770` means this process is not running; the bot handling it
 gracefully and offering something else is the flow design working, not a defect

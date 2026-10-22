@@ -3,6 +3,7 @@
 package flow
 
 import (
+	"cmp"
 	"log/slog"
 	"maps"
 	"regexp"
@@ -162,6 +163,18 @@ func (e *Engine) toolPhase() Node {
 // substituted in.
 func (e *Engine) Instruction() string {
 	return e.render(e.current.Instruction.For(e.lang))
+}
+
+// ToolWaitLine is the line said while a slow HTTP tool runs: the flow's
+// global.toolWaitLine in the call's language, or that language's default, with
+// collected slots rendered in.
+func (e *Engine) ToolWaitLine() string {
+	line := e.spec.Global.ToolWaitLine.ZH
+	fallback := DefaultToolWaitLine.ZH
+	if e.lang != LangZH {
+		line, fallback = e.spec.Global.ToolWaitLine.EN, DefaultToolWaitLine.EN
+	}
+	return e.render(cmp.Or(line, fallback))
 }
 
 // Announce is the line this phase speaks on being entered, with collected

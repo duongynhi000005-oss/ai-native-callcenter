@@ -93,6 +93,12 @@ type Event struct {
 	// can count on having been said.
 	IsInterrupted bool
 
+	// IsAside marks the BOT_SAID, TURN_DONE and PLAYBACK_DONE of a turn that
+	// said an aside (SpeakAside): words the application put in while it
+	// worked, not a reply of the model's. It is no closing line and no reply
+	// to the caller.
+	IsAside bool
+
 	Err error
 }
 
@@ -249,6 +255,11 @@ type Session struct {
 	idleGeneration  uint64
 	// turnSeq numbers model turns, so events can say which turn they belong to.
 	turnSeq int
+	// isAsideOwed says SpeakAside asked for a line and no turn has started
+	// since; asideTurn is the turn that said the latest aside, zero for none.
+	// See SpeakAside.
+	isAsideOwed bool
+	asideTurn   int
 	// playbackDone is signalled when a turn's audio has finished generating and
 	// the queue should be watched until it drains.
 	playbackDone chan playbackMarker
@@ -563,6 +574,51 @@ func (s *Session) Speak(text string, isClosing bool) error {
 	return s.model.SpeakText(text, isClosing)
 }
 
+// SpeakAside says a line the application puts in while it works — the wait
+// line of a slow tool (#286) — through the same SpeakText a phase's line takes.
+// It is not a closing line, and it is not a reply: the events of the turn that
+// says it carry IsAside, so whatever counts the model's replies, judges its
+// claims or waits for a closing line can leave it out.
+//
+// That turn is the first to start after this call, provided the provider says
+// it is a spoken line (provider.Event.IsSpokenLine). A turn of any other kind
+// starting first means the line did not come first (a reply to the caller won
+// the floor, or the engine dropped the line), and nothing is marked: a reply
+// mistaken for an aside would be left out of everything that counts replies.
+func (s *Session) SpeakAside(text string) error {
+	s.mu.Lock()
+	s.isAsideOwed = true
+	s.mu.Unlock()
+	if err := s.model.SpeakText(text, false); err != nil {
+		s.mu.Lock()
+		s.isAsideOwed = false
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// isQuiet reports whether nothing is going on that the caller hears or is
+// about to hear: no turn being made, none asked for and not yet started, no
+// audio queued for the caller (whichever turn it belongs to), and no aside
+// asked for. It is the "nothing is playing" a wait line is said in (#286):
+// a turn ending is not its audio ending, and a model that spoke its own filler
+// in the tool-call turn is still being heard after the turn is over.
+func (s *Session) isQuiet() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.isResponding && !s.isBotSpeaking && !s.isAsideOwed &&
+		(s.turnOwedUntil.IsZero() || !time.Now().Before(s.turnOwedUntil)) &&
+		s.leg.Pending() == 0
+}
+
+// turnState is the turn in progress and whether it is an aside.
+func (s *Session) turnState() (turn int, isAside bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnSeq, s.turnSeq != 0 && s.turnSeq == s.asideTurn
+}
+
 //
 // Audio.
 //
@@ -738,14 +794,16 @@ func (s *Session) handleModelEvent(event provider.Event) {
 				"reason", string(event.InterruptedBy), "playedMs", playedMs)
 			s.tellTheModelWhatWasHeard(event.InterruptedBy, playedMs)
 		}
-		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn(), IsInterrupted: true})
+		turn, isAside := s.turnState()
+		s.emit(Event{Type: EventTypeTurnDone, Turn: turn, IsInterrupted: true, IsAside: isAside})
 
 	case provider.EventTypeResponseStarted:
-		s.beginTurn()
+		s.beginTurn(event.IsSpokenLine)
 
 	case provider.EventTypeResponseDone:
 		hasAudio := s.endTurn()
-		s.emit(Event{Type: EventTypeTurnDone, Turn: s.currentTurn(), HasAudio: hasAudio})
+		turn, isAside := s.turnState()
+		s.emit(Event{Type: EventTypeTurnDone, Turn: turn, HasAudio: hasAudio, IsAside: isAside})
 
 	case provider.EventTypeInputTranscript:
 		s.emit(Event{Type: EventTypeCustomerSaid, Text: event.Text, IsFinal: event.IsFinal})
@@ -753,8 +811,9 @@ func (s *Session) handleModelEvent(event provider.Event) {
 	case provider.EventTypeOutputTranscript:
 		// The turn rides along so the line can be judged with the tool calls
 		// of its own response (claimWatch).
+		turn, isAside := s.turnState()
 		s.emit(Event{Type: EventTypeBotSaid, Text: event.Text, IsFinal: event.IsFinal,
-			Turn: s.currentTurn()})
+			Turn: turn, IsAside: isAside})
 
 	case provider.EventTypeToolCall:
 		s.emit(Event{
@@ -925,10 +984,19 @@ func (s *Session) endInterruptedTurn() bool {
 	return s.openTurns == 0
 }
 
-func (s *Session) beginTurn() {
+// beginTurn starts a turn. isSpokenLine is the provider's word that the turn
+// says a line (provider.Event.IsSpokenLine); it decides, with an aside owed,
+// whether this turn is the aside (SpeakAside).
+func (s *Session) beginTurn(isSpokenLine bool) {
 	s.mu.Lock()
 	s.framesQueued = 0
 	s.turnSeq++
+	if s.isAsideOwed {
+		s.isAsideOwed = false
+		if isSpokenLine {
+			s.asideTurn = s.turnSeq
+		}
+	}
 	s.isResponding = true
 	s.turnOwedUntil = time.Time{}
 	s.openTurns = min(s.openTurns+1, 2)
@@ -1000,7 +1068,8 @@ func (s *Session) endTurn() (hasAudio bool) {
 		s.audioTurns++
 		s.lastAudioTurn = s.turnSeq
 	}
-	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq, hasAudio: hasAudio}
+	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq, hasAudio: hasAudio,
+		isAside: s.asideTurn != 0 && s.turnSeq == s.asideTurn}
 	s.mu.Unlock()
 
 	select {
@@ -1017,6 +1086,8 @@ type playbackMarker struct {
 	turn       int
 	// hasAudio says the turn queued audio for the caller.
 	hasAudio bool
+	// isAside says the turn said an aside (SpeakAside).
+	isAside bool
 }
 
 //
@@ -1052,7 +1123,8 @@ func (s *Session) watchPlayback() {
 		if !drained {
 			continue
 		}
-		s.emit(Event{Type: EventTypePlaybackDone, Turn: marker.turn, HasAudio: marker.hasAudio})
+		s.emit(Event{Type: EventTypePlaybackDone, Turn: marker.turn, HasAudio: marker.hasAudio,
+			IsAside: marker.isAside})
 		if s.afterPlaybackDone != nil {
 			s.afterPlaybackDone()
 		}

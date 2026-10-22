@@ -271,6 +271,9 @@ func (s *Session) sendEvent(payload any) error {
 	if err != nil {
 		return fmt.Errorf("encode outbound event: %w", err)
 	}
+	if s.wireTap != nil {
+		s.wireTap(true, data)
+	}
 	return s.sendFrame(data)
 }
 
@@ -282,6 +285,9 @@ func (s *Session) receive() (*wireEvent, []byte, error) {
 	}
 	if messageType != websocket.TextMessage {
 		return nil, data, nil
+	}
+	if s.wireTap != nil {
+		s.wireTap(false, data)
 	}
 
 	var event wireEvent

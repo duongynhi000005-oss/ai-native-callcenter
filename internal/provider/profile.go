@@ -137,6 +137,62 @@ type Profile struct {
 	// no sampling parameter at all. Sending it anyway risks a rejected
 	// session.update, which costs the whole session.
 	AcceptsTemperature bool
+
+	// AcceptsResponseToolChoice means a response.create may carry tool_choice
+	// in its response object and the engine obeys it, and this client sends
+	// "none" on every request for a line (SpeakText: a phase's announce, the
+	// wait line), so the turn that says the line does not call a tool. Other
+	// requests carry none: the turn that answers a tool result or a caller must
+	// still be able to call one.
+	//
+	// A line asked for while a tool's call is unanswered was answered with a
+	// second, identical call to the same tool on qwen: 4 calls of 4 in the
+	// #286 live round, and 3 of 3 sessions of TestLiveQwenLineCallsNoTool, one
+	// without the field, one with tool_choice "none", one with an empty tools
+	// list (qwen-findings W-Q8). Whatever the profile, the client never hands
+	// such a call out and takes it back out of the conversation (onLineCall);
+	// this field is what lets an engine that obeys it say the line instead of
+	// spending the turn on a call.
+	//
+	// Where it is false the field is not sent: an engine that ignores it gains
+	// nothing, and one that refuses it costs the line (the Realtime gateway
+	// rejects response.tool_choice and response.tools alike as "Unsupported
+	// parameter").
+	AcceptsResponseToolChoice bool
+
+	// NeedsToolFreeLineDirection means a line asked for mid-call (SpeakText)
+	// carries a direction that also bans any tool call in its turn and says
+	// that the tool the line mentions is already running
+	// (sayExactlyWithoutTools), in place of the plain SayExactly demand. The
+	// opening line and a tool result's hint keep SayExactly.
+	//
+	// Measured on qwen, the wait line on the session of the #286 live round
+	// (TestLiveQwenWaitLine, qwen-findings W-Q8): with SayExactly the line's
+	// turn called the running tool again and said nothing, 3 of 3 (2 of 5
+	// live calls silent, the rest late); with this direction the line was
+	// said and no tool was called, 6 of 6. The flow's action-claim rule is
+	// why: "我查一下" may only be said with a lookup tool's call.
+	//
+	// Not AcceptsResponseToolChoice: that bars tools on the wire, where an
+	// engine obeys it, and qwen does not. This is the bar in words, and it is
+	// set only where it was measured; a longer direction is a change to every
+	// line's wording on the engines where SayExactly was measured verbatim.
+	NeedsToolFreeLineDirection bool
+
+	// DropsToolResultAfterLine means a line spoken while a tool call is
+	// still owed (SpeakText between the call and its result) ends the turn
+	// that call belongs to: the result sent afterwards is dropped without an
+	// error and the model never answers it. The orchestrator then never says
+	// a slow tool's wait line (#286), because the caller would hear the line
+	// and then nothing.
+	//
+	// Measured on doubao (doubao-findings W-D10): three live calls on
+	// 2026-10-22 and TestLiveDoubaoWaitLine, where a result with no line
+	// before it was answered 1 of 1 and after a line 0 of 3, whether the line
+	// went out as SayHello or ChatTTSText and whether a turn was then forced
+	// with an audio commit. Unlike the traits above it is read by the
+	// orchestrator, not by a client, so it is set on doubao's profile.
+	DropsToolResultAfterLine bool
 }
 
 // OpenAIProfile is the provider used outside mainland China.
@@ -163,6 +219,10 @@ func OpenAIProfile() Profile {
 		LinearInput:           media.PCM16Format(media.RateProviderOut),
 		LinearOutput:          media.PCM16Format(media.RateProviderOut),
 		CancelsResponseItself: true,
+		// Documented: the GA response object takes tool_choice ("none",
+		// "auto", "required" or a forced function), read 2026-10-22. Not
+		// measured live here.
+		AcceptsResponseToolChoice: true,
 	}
 }
 
@@ -209,6 +269,15 @@ func QwenProfile() Profile {
 		// the conversation already there (W-Q1, and a dead-air goodbye on live
 		// call 01a0cbb9-…); the opening turn, told both ways, did not.
 		NeedsDirectedLineInConversation: true,
+		// Undocumented (the vendor's response.create lists no fields at all,
+		// the instructions override included), and measured 2026-10-22
+		// (qwen-findings W-Q8): tool_choice "none" and an empty tools list on
+		// the response are both accepted without an error and both ignored;
+		// the line's turn called the tool anyway.
+		AcceptsResponseToolChoice: false,
+		// Measured 2026-10-22 (qwen-findings W-Q8): the plain SayExactly line
+		// over a running tool was silent 3 of 3, this one said 6 of 6.
+		NeedsToolFreeLineDirection: true,
 	}
 }
 
@@ -259,6 +328,11 @@ func GatewayProfile() Profile {
 		// accepts — the refusal that forces a cue on Qwen's own realtime
 		// dialect does not exist here.
 		NeedsCueForFirstTurn: false,
+		// Its response.create rejects response.tool_choice and response.tools
+		// as "Unsupported parameter: ... Cascade does not implement it."
+		// (cascade-realtime-gateway, internal/protocol/decode.go,
+		// decodeResponseCreate). Sending the bar would cost every line.
+		AcceptsResponseToolChoice: false,
 	}
 }
 
@@ -268,20 +342,27 @@ func GatewayProfile() Profile {
 // It is therefore the one profile whose values do not all mean what they mean
 // above: everything the Realtime client alone reads — Style,
 // TranscribeModel, CancelsResponseItself, NeedsCueForFirstTurn,
-// NeedsDirectedLineInConversation — is left
-// at zero, because the client that answers for this name
+// NeedsDirectedLineInConversation, AcceptsResponseToolChoice,
+// NeedsToolFreeLineDirection — is left at zero, because the client that answers for this name
 // (internal/provider/doubao) reads none of them. What it does read is the name,
 // the endpoint, the credential, the voice and the two audio
 // formats.
 // Model is informational for the same reason: that protocol's version is a
 // constant inside its client and AICC_PROVIDER_MODEL cannot move it.
 //
-// RequiresTerminalAnnounce is the one capability that had to be said out loud.
-// This engine answers audio and nothing else — no text this client sends makes
-// it take a turn — so a phase the call never leaves has to carry its own words
-// or the caller hears silence, and a flow without them is refused at publish.
-// The words a phase does carry are given to the engine as text to synthesise,
-// not as a direction to a model, so they keep their own SpeakText.
+// Two capabilities had to be said out loud, because the orchestrator reads
+// them, not the client.
+//
+// RequiresTerminalAnnounce: this engine answers audio and nothing else — no
+// text this client sends makes it take a turn — so a phase the call never
+// leaves has to carry its own words or the caller hears silence, and a flow
+// without them is refused at publish. The words a phase does carry are given
+// to the engine as text to synthesise, not as a direction to a model, so they
+// keep their own SpeakText.
+//
+// DropsToolResultAfterLine: a line committed while a tool call is owed starts
+// a new round, and the call's result is dropped (doubao-findings W-D10), so a
+// slow tool gets no wait line.
 func DoubaoProfile() Profile {
 	return Profile{
 		Name:     NameDoubao,
@@ -303,6 +384,7 @@ func DoubaoProfile() Profile {
 		// (speech_text_buffer.commit), so it is said as written; a tool result
 		// keeps the phase's instruction and the line keeps SpeakText.
 		RequiresTerminalAnnounce: true,
+		DropsToolResultAfterLine: true,
 		// No TranscribeModel, and as on qwen that is the finding rather than an
 		// omission: this engine transcribes the caller unprompted, and its
 		// session payload has no field to ask for it in.
@@ -355,6 +437,10 @@ func GrokProfile() Profile {
 		// Measured (grok-findings 5.3): any number is accepted and echoed, but
 		// no effect on output was seen at 3 samples per value; off until one is.
 		AcceptsTemperature: false,
+		// Undocumented: xAI's response.create documents the instructions
+		// override alone. Not measured, so not sent; a line's tool call is
+		// still never handed out (onLineCall).
+		AcceptsResponseToolChoice: false,
 	}
 }
 

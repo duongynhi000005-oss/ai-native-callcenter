@@ -55,6 +55,7 @@ The loader (`flow.Load`, `internal/flow/load.go`) rejects a flow that cannot run
 | `closingTarget` | The flow's own goodbye: a **terminal** phase the engine moves to by itself (5.3). |
 | `maxTurnsWithoutTool` | Bound on tool-less replies in one phase (5.3). Requires `closingTarget`. |
 | `maxDurationSec` | The call's wall clock (5.4). Absent means 900, `0` is off, otherwise 60 to 3600. |
+| `toolWaitLine` | The words of the wait line said while a slow HTTP tool runs (2.4.2). Optional, bilingual, said as written, `{slots.x}` allowed; must be a statement. A language left empty keeps that language's default. |
 | `alwaysAllowedTools` | Tools allowed in every phase, so a request for a person is never blocked by the phase. |
 | `transitions` | Rules that apply in every non-terminal phase, after the phase's own. |
 | `apiBaseEnv` | Parsed but has no effect. The backend address is `AICC_BOT_BACKEND_BASE` (`docs/dev-stack.md`), or a tool's own `http.baseUrl` (2.4.1). |
@@ -95,6 +96,7 @@ A declarative tool is by default an HTTP call to your backend (a second kind, th
 
 Runtime behaviour worth designing around (`internal/flow/httptool.go`):
 
+- A call that has not returned **1 second** after it started is covered by the wait line, once per batch of tool calls and only if the caller is not already hearing the bot (2.4.2).
 - A call is bounded by `http.timeoutMs`, **5 seconds** unless the tool says otherwise and never more than 10. A timeout, a connection failure, a connection the host policy refuses (2.4.1), a redirect (3xx, never followed), a status of 400 or above, or a body that is not a JSON object is a tool failure: the model is told the operation could not be completed and, per the built-in hint, to offer a person if it fails again.
 - A path value that cannot be a path segment (empty, `.`, `..`) or any path or query value that is an object or a list is refused before a request is made, as `ok: "0"` naming the reference (`{args.id}`) and not the value, with no recovery hint: the model can call again with a proper value.
 - A `successWhen` that does not hold is a **refusal**, not a failure: the result is `ok: "0"` with the `errorFrom` message. No `result` field is mapped on a refusal.
@@ -150,6 +152,22 @@ The value never appears in the stored flow, an API response (`GET /flows/{flowId
 - Redirects are never followed; a 3xx is a tool failure.
 
 A refusal is a tool failure, decided before any connection is opened, and the log line `http tool connection refused by the outbound host policy` names the host, the resolved address and the rule (`PUBLIC_NOT_LISTED`, `LINK_LOCAL`, `CLOUD_METADATA`, `UNSPECIFIED`, `MULTICAST`, `NON_CANONICAL_ADDRESS`). The simulator (8) always calls its mock backend, whatever a tool's `baseUrl` says, and sends a placeholder for every secret; with `-backend URL` it applies `AICC_TOOL_ALLOWED_HOSTS` and reads secrets from its environment, like a call.
+
+#### 2.4.2 The wait line
+
+A caller must not sit in silence while a backend works. When an HTTP tool has not returned **1 second** after it started, the bot says a short wait line: by default "One moment, let me check that." in English and "请稍等，我查一下。" in Chinese. The threshold is fixed, not a setting. The rules:
+
+- **Once per batch.** One model response can call several tools; two slow ones in it get one line.
+- **Only into silence.** If the caller is still hearing the bot at the 1-second mark, nothing is added. That includes a turn still being generated, a turn asked for and not started yet, and audio still playing after its turn has finished. The model often says its own filler ("let me look that up") in the turn that calls the tool. No line is said over an armed transfer or hangup either.
+- **A statement, never a question.** A filler phrased as a question gets answered, and the answer talks over the result. The loader refuses a `global.toolWaitLine` with a `?` or `？` in it.
+- **The result is never lost.** A result that arrives while the line is playing is answered after the line, in a turn of its own. A caller who talks over the line still gets the result. The model answers them with the result in view.
+- **Not a reply and not a closing line.** The line's turn does not count towards `maxTurnsWithoutTool`, is not checked for unbacked claims, and never ends a call whose ending is armed. The call still waits for the turn after it.
+- **Built-in tools, slot tools and `record_lead`** answer at once and never get it.
+- **Not on doubao.** On that engine a line spoken while a tool call is still owed ends the round the call belongs to, and the result sent afterwards is never answered: the caller would hear the line and then silence (`docs/design/doubao-findings.md` W-D10). A doubao deployment therefore says no wait line, and `global.toolWaitLine` has no effect there. A caller waits through a slow tool in silence, as before, so keep tools on doubao well under their `timeoutMs`.
+
+`global.toolWaitLine` replaces the wording, per language: `{"en": "Bear with me a second.", "zh": "稍等片刻，马上就好。"}`. Like an `announce`, the line goes through `VoiceSession.SpeakText`, best effort on the Realtime engines (5.2). A phase's `announce` that the slow tool's result leads into pre-empts the wait line if it is still playing, as an announce pre-empts anything. The transcript records the line as the bot's words. The log has one line for each slow tool, naming the tool and never its arguments: `a tool is running long; said the wait line`, or why it was not said (`no wait line, the caller is hearing the bot`, `no wait line over an armed ending`).
+
+The mock backend's `POST /api/kb/secure-search` is a slow, authenticated backend to try this against (`docs/dev-stack.md`).
 
 ### 2.5 Transitions and conditions
 
@@ -291,6 +309,7 @@ Do not spend flow text on these.
 - **Standing platform rules.** Every flow gets two rules ahead of its persona (`Runtime.Instructions`): the model keeps its instructions private, and it must not say it is transferring, looking something up, saving a message or ending the call unless it calls the matching tool in the same reply. Do not repeat them in `rules`.
 - **Hint steering.** When a transition fires, the tool result the model receives carries the new phase's instruction as `hint`, which replaces anything the tool would have said. The model reads it as something it just learned.
 - **Queue names.** `transfer_to_agent`'s `queue` argument is an enum of real queues, so the model cannot invent one. A phase instruction may still tell it which queue fits (`novanet_support` names `support-en` and `support-zh`).
+- **A slow tool.** The wait line (2.4.2) is said when an HTTP tool runs past a second.
 - **Dead air and loops.** Section 5.
 
 ## 4. Patterns for a business that is not simple
@@ -403,7 +422,7 @@ An HTTP tool is bounded by its `timeoutMs` (5 seconds by default, 10 at most) an
 
 2. **Call back.** When the work cannot finish during the call, tell the caller they will be called back and use `take_message`, which records an open callback an agent works later. Say so in the phase instruction, and offer the same when a tool fails twice.
 
-Do not rely on the caller waiting through silence. `NO_INPUT` fires after the dead-air timeout (`AICC_BOT_NO_INPUT_TIMEOUT`, 8 seconds by default), and `maxDurationSec` (5.4) still runs.
+The wait line (2.4.2) covers a tool that runs past a second; it is a bridge over a few seconds, not a reason to write a slow tool. Do not rely on the caller waiting through silence. `NO_INPUT` fires after the dead-air timeout (`AICC_BOT_NO_INPUT_TIMEOUT`, 8 seconds by default), and `maxDurationSec` (5.4) still runs.
 
 ### 4.4 Risky operations
 

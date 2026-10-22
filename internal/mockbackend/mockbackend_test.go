@@ -4,10 +4,13 @@ package mockbackend
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 // post calls one endpoint and returns the envelope.
@@ -144,5 +147,104 @@ func TestKBSearchFindsAndMisses(t *testing.T) {
 	_, _, zh := post(t, h, "/api/kb/search", map[string]any{"query": "installation", "lang": "zh"})
 	if en["answer"] == zh["answer"] {
 		t.Error("the answer does not follow lang")
+	}
+}
+
+// secureSearch calls /api/kb/secure-search on h with an Authorization header
+// (empty sends none) and a raw query string.
+func secureSearch(t *testing.T, h http.Handler, authorization, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]any{"query": "安装费多少", "lang": "zh"})
+	req := httptest.NewRequest(http.MethodPost, "/api/kb/secure-search?"+query, bytes.NewReader(raw))
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// The second backend answers a bearer token it was given and nothing else, and
+// a refusal never repeats a token, sent or expected.
+func TestSecureSearchChecksTheBearerToken(t *testing.T) {
+	t.Parallel()
+	const token = "kb-Tok3n-for-tests"
+	h := NewWith(Options{KBToken: token})
+	for _, tc := range []struct {
+		name, authorization string
+		status              int
+	}{
+		{"the token", "Bearer " + token, http.StatusOK},
+		{"no header", "", http.StatusUnauthorized},
+		{"a wrong token", "Bearer kb-wrong-token", http.StatusUnauthorized},
+		{"the token without Bearer", token, http.StatusUnauthorized},
+		{"the token's prefix", "Bearer " + token[:5], http.StatusUnauthorized},
+		{"another scheme", "Basic " + token, http.StatusUnauthorized},
+	} {
+		rec := secureSearch(t, h, tc.authorization, "")
+		if rec.Code != tc.status {
+			t.Errorf("%s: status %d, want %d", tc.name, rec.Code, tc.status)
+		}
+		body := rec.Body.String()
+		if tc.status != http.StatusOK && (bytes.Contains(rec.Body.Bytes(), []byte(token)) ||
+			bytes.Contains(rec.Body.Bytes(), []byte("kb-wrong-token"))) {
+			t.Errorf("%s: the refusal echoes a token: %s", tc.name, body)
+		}
+	}
+
+	var out struct {
+		RetCode string         `json:"retCode"`
+		Data    map[string]any `json:"data"`
+	}
+	rec := secureSearch(t, h, "Bearer "+token, "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad envelope %q: %v", rec.Body.String(), err)
+	}
+	if out.RetCode != codeOK || out.Data["found"] != "1" || out.Data["answer"] == "" {
+		t.Errorf("the answer is %+v, want the knowledge base's answer a flow can speak", out)
+	}
+
+	// Started without a token, it accepts none, an empty bearer included.
+	for _, authorization := range []string{"", "Bearer ", "Bearer " + token} {
+		if rec := secureSearch(t, New(nil), authorization, ""); rec.Code != http.StatusUnauthorized {
+			t.Errorf("no token configured, %q: status %d, want 401", authorization, rec.Code)
+		}
+	}
+}
+
+// The delay is the request's own, bounded, and ends when the caller gives up.
+func TestSecureSearchAnswersAfterTheRequestedDelay(t *testing.T) {
+	t.Parallel()
+	const token = "kb-token"
+	h := NewWith(Options{KBToken: token})
+
+	for _, query := range []string{"delayMs=-1", "delayMs=15001", "delayMs=abc", "delayMs=1.5"} {
+		if rec := secureSearch(t, h, "Bearer "+token, query); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", query, rec.Code)
+		}
+	}
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+	call := func(ctx context.Context, delayMs int) (time.Duration, error) {
+		raw, _ := json.Marshal(map[string]any{"query": "installation", "lang": "en"})
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+			server.URL+"/api/kb/secure-search?delayMs="+strconv.Itoa(delayMs), bytes.NewReader(raw))
+		req.Header.Set("Authorization", "Bearer "+token)
+		began := time.Now()
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return time.Since(began), err
+	}
+
+	if took, err := call(context.Background(), 150); err != nil || took < 150*time.Millisecond {
+		t.Errorf("a 150 ms delay answered after %s (error %v)", took, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if took, err := call(ctx, 15000); err == nil || took > 5*time.Second {
+		t.Errorf("a caller that gave up after 100 ms waited %s (error %v)", took, err)
 	}
 }
