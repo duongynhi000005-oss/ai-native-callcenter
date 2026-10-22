@@ -688,3 +688,68 @@ fact), whether an update interacts with the provider's own history truncation
 late in a long call, and a phase paragraph that competes with a tool result's
 hint. The test measures obedience of a style directive, which is the easiest
 kind to check and not proof that every instruction is followed.
+
+**W-D10 — a line spoken while a tool call is owed loses the call's result
+(#286). MEASURED, 2026-10-22.** The wait line said over a slow HTTP tool is a
+`SpeakText`, which this client sends as `speech_text_buffer.commit` (SayHello),
+and it goes out while the engine is waiting for the call's result. The engine
+speaks the line and then drops the result: no reply, no error, no ack.
+
+Three live calls to 95012 on the dev stack (mobile_support, zh), log
+`logs/aicc-20261022-162958.log`:
+
+- `01a162bc-02e7-7922-b328-50e54c75cd55`: `kb_search_slow` called at 31:08.321,
+  the wait line said at 31:09.322 and heard whole ("请稍等，我查一下。", about
+  1.3 s), the result at 31:11.326. Then silence: three 8 s dead airs (this
+  engine takes no text cue) and the flow's closing target at 31:35.
+- `01a162bd-bb96-7c85-b2f5-e4999f9faead`: `kb_search_too_slow` (timeoutMs 2000),
+  the line at 33:00.643, the tool failed at 33:01.644, and no apology turn
+  followed. The call sat in silence for 24 s and was closed.
+- `01a162bd-034e-7215-9ca4-44ce5524aef9`: the line, then the result at 32:14.079.
+  The caller asked "喂，你在吗？" and the reply was "您好，我在的，请问您有什么手机
+  售后或者使用方面的问题吗？": the result was never given.
+
+`TestLiveDoubaoWaitLine` reproduces it with the order question of W-D9
+(`testdata/q_order.pcm`), the `lookup_order` tool and the wire logged. One
+session per arm, a minute apart:
+
+| Arm | What follows the call | Result answered |
+|---|---|---|
+| control | the result after 2.5 s, no line | **1 of 1** ("您好，您的订单12345已经发货，预计明天就能送达了。") |
+| line | after 1 s the line by `speech_text_buffer.commit`; the result once the line's turn ended | **0 of 1** |
+| replacement | after 1 s the line by `speech_text_buffer.replacement.append` + `.commit` (ChatTTSText); then the result | **0 of 1** |
+| line-commit | as line, then `input_audio_buffer.commit` after the result | **0 of 1** (only `input_audio_buffer.committed` came back) |
+
+Logids: control `202610221636387E9AD8FABD255663EAD9`, line
+`20261022163755780AF50DE259500B2989`, replacement
+`20261022163950DF2F375099BE2F72D707`, line-commit
+`20261022164119D08F008DAA222BD33B82`.
+
+The wire shows why. In the control arm the answer's
+`response.output_audio.started` carries the `question_id` of the caller's
+question (the `item_id` of its transcription), the round the call belongs to.
+In the line arm the SayHello line opens a **new** `question_id`
+(`59367462439257090`, where the caller's was `59253475487011842`). The
+`conversation.item.create` with the call's `call_id`, sent 1.5 s after the line
+ended, gets nothing back: no `conversation.item.added`, no error, no turn. The
+ChatTTSText line stays in the caller's round (same `question_id`), but it is
+that round's reply, and the result after it is dropped all the same. Forcing a
+turn with an audio commit does not bring the result back.
+
+The client was not at fault. The result went out (`conversation.item.create`,
+the right `call_id`) whether it arrived after the line, as in all three calls,
+or during it, when the client holds it until the line's turn ends.
+
+**Consequence.** `Profile.DropsToolResultAfterLine` is true on doubao, and the
+orchestrator says no wait line where it is set. On doubao a caller waits through
+a slow tool in silence, as before #286, and gets the answer. The client's hold
+stays: a result set that completes while any committed line is in flight still
+goes out after the line's turn.
+
+**NOT MEASURED**: a line committed *before* the tool call (in the turn that
+calls it), a result sent while the line is still being spoken without the
+client's hold, the model's own filler before a call (the tool turn carries no
+audio here, §11), and whether a re-sent call or a context item
+(`conversation.item.create` with a user/assistant pair) could carry the result
+into the new round. One session per arm: the three live calls are the
+replication.

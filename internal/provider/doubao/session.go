@@ -182,6 +182,10 @@ type Session struct {
 	closeWait          time.Duration
 	lineStartDeadline  time.Duration
 
+	// wireTap, set only by live tests before Start, sees every text frame
+	// written (isOutbound) and read, for a measurement's wire log.
+	wireTap func(isOutbound bool, data []byte)
+
 	pacer *pacer
 	// ticks is the pacer's cadence. Production fills it with a ticker in Start;
 	// a test sets it beforehand and drives the pacer a tick at a time.

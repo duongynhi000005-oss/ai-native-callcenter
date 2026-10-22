@@ -178,6 +178,21 @@ type Profile struct {
 	// set only where it was measured; a longer direction is a change to every
 	// line's wording on the engines where SayExactly was measured verbatim.
 	NeedsToolFreeLineDirection bool
+
+	// DropsToolResultAfterLine means a line spoken while a tool call is
+	// still owed (SpeakText between the call and its result) ends the turn
+	// that call belongs to: the result sent afterwards is dropped without an
+	// error and the model never answers it. The orchestrator then never says
+	// a slow tool's wait line (#286), because the caller would hear the line
+	// and then nothing.
+	//
+	// Measured on doubao (doubao-findings W-D10): three live calls on
+	// 2026-10-22 and TestLiveDoubaoWaitLine, where a result with no line
+	// before it was answered 1 of 1 and after a line 0 of 3, whether the line
+	// went out as SayHello or ChatTTSText and whether a turn was then forced
+	// with an audio commit. Unlike the traits above it is read by the
+	// orchestrator, not by a client, so it is set on doubao's profile.
+	DropsToolResultAfterLine bool
 }
 
 // OpenAIProfile is the provider used outside mainland China.
@@ -335,12 +350,19 @@ func GatewayProfile() Profile {
 // Model is informational for the same reason: that protocol's version is a
 // constant inside its client and AICC_PROVIDER_MODEL cannot move it.
 //
-// RequiresTerminalAnnounce is the one capability that had to be said out loud.
-// This engine answers audio and nothing else — no text this client sends makes
-// it take a turn — so a phase the call never leaves has to carry its own words
-// or the caller hears silence, and a flow without them is refused at publish.
-// The words a phase does carry are given to the engine as text to synthesise,
-// not as a direction to a model, so they keep their own SpeakText.
+// Two capabilities had to be said out loud, because the orchestrator reads
+// them, not the client.
+//
+// RequiresTerminalAnnounce: this engine answers audio and nothing else — no
+// text this client sends makes it take a turn — so a phase the call never
+// leaves has to carry its own words or the caller hears silence, and a flow
+// without them is refused at publish. The words a phase does carry are given
+// to the engine as text to synthesise, not as a direction to a model, so they
+// keep their own SpeakText.
+//
+// DropsToolResultAfterLine: a line committed while a tool call is owed starts
+// a new round, and the call's result is dropped (doubao-findings W-D10), so a
+// slow tool gets no wait line.
 func DoubaoProfile() Profile {
 	return Profile{
 		Name:     NameDoubao,
@@ -362,6 +384,7 @@ func DoubaoProfile() Profile {
 		// (speech_text_buffer.commit), so it is said as written; a tool result
 		// keeps the phase's instruction and the line keeps SpeakText.
 		RequiresTerminalAnnounce: true,
+		DropsToolResultAfterLine: true,
 		// No TranscribeModel, and as on qwen that is the finding rather than an
 		// omission: this engine transcribes the caller unprompted, and its
 		// session payload has no field to ask for it in.

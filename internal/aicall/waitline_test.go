@@ -383,6 +383,32 @@ func TestTwoSlowToolsInOneBatchGetOneWaitLine(t *testing.T) {
 	})
 }
 
+// On doubao a tool result sent after a line is dropped and never answered
+// (doubao-findings W-D10), so a slow tool there gets no wait line: no clock is
+// started, nothing is said, and the result is answered as it always was.
+func TestNoWaitLineOnAProviderThatDropsTheResultAfterALine(t *testing.T) {
+	forEachLanguage(t, func(t *testing.T, lang string) {
+		h := startWaitLinePath(t, provider.DoubaoProfile(), lang, waitLineFlow(""))
+		h.callInATurn([3]string{"fc_1", "search_kb", `{"q":"refund"}`})
+		h.backend.awaitRequest(t, "/kb")
+		h.awaitQuiet(t)
+		// A clock started now would be the wait line's; give it the moment a
+		// wrongly started one needs to show.
+		time.Sleep(100 * time.Millisecond)
+		if n := h.clock.started(); n != 0 {
+			t.Fatalf("%d wait clocks started on a provider that drops the result after a line", n)
+		}
+		h.backend.answer()
+		results := h.awaitAnswers(t, 1)
+		if !strings.Contains(results[0].output, "seven days") {
+			t.Errorf("the answer lost the result: %s", results[0].output)
+		}
+		if lines := h.model.spokenLines(); len(lines) != 0 {
+			t.Errorf("lines said: %q", lines)
+		}
+	})
+}
+
 // A flow's own wording replaces the default.
 func TestTheFlowsWaitLineReplacesTheDefault(t *testing.T) {
 	wording := map[string]string{"en": "Bear with me a second.", "zh": "稍等片刻，马上就好。"}

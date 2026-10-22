@@ -839,12 +839,15 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 // exactly as they did when the tool ran on this goroutine.
 //
 // Once a batch has said its wait line, the rest of it runs here: a second line
-// would only repeat the first.
+// would only repeat the first. So does every tool on a provider that drops a
+// tool result sent after a line (Profile.DropsToolResultAfterLine, doubao):
+// there the caller would hear the line and then nothing.
 func (o *Orchestrator) dispatch(ctx context.Context, event Event, batch *toolBatch,
 	session *Session, runtime *flow.Runtime, actions *callActions,
 	log *slog.Logger) (output, moved string) {
 
-	if batch.isWaitLineSaid || !runtime.IsHTTPTool(event.ToolName) {
+	if batch.isWaitLineSaid || o.cfg.Profile.DropsToolResultAfterLine ||
+		!runtime.IsHTTPTool(event.ToolName) {
 		return runtime.Dispatch(ctx, event.ToolName, event.ToolArgs)
 	}
 	line := runtime.ToolWaitLine()
@@ -892,10 +895,9 @@ func (o *Orchestrator) startToolWait() (<-chan time.Time, func()) {
 // give it to a caller who talks over the line all the same.
 //
 // Unlike a phase's line (closeToolBatch), this one cannot wait for the batch:
-// it is said precisely because a call of the batch is still owed. On doubao,
-// which goes on only once every call is answered, the line is committed with
-// that call outstanding; what the engine makes of that has not been measured
-// live (#286).
+// it is said precisely because a call of the batch is still owed. An engine
+// that drops the owed call's result once a line has been spoken (doubao,
+// doubao-findings W-D10) never gets here: dispatch keeps its tools synchronous.
 func (o *Orchestrator) sayWaitLine(line, tool string, batch *toolBatch, session *Session,
 	actions *callActions, log *slog.Logger) {
 
