@@ -80,6 +80,13 @@ func (s *Spec) validate() error {
 		report("global.maxDurationSec is %d; it is a number of seconds from %d to %d, 0 to turn the limit off", *d, MinDurationLimitSec, MaxDurationLimitSec)
 	}
 
+	for _, line := range []string{s.Global.ToolWaitLine.ZH, s.Global.ToolWaitLine.EN} {
+		if strings.ContainsAny(line, "?？") {
+			report("global.toolWaitLine %q is a question; it must be a statement, because a caller answers a question and the answer talks over the result", line)
+			break
+		}
+	}
+
 	if t := s.Global.Temperature; t != nil && (math.IsNaN(*t) || *t < 0 || *t >= MaxTemperatureExclusive) {
 		report("global.temperature is %v; it is a sampling temperature from 0 up to but not including %v", *t, MaxTemperatureExclusive)
 	}
@@ -150,6 +157,7 @@ func (s *Spec) validate() error {
 		checkTemplate(declared, "phase "+id+" announce", node.Announce, report)
 		checkConditions(declared, "phase "+id, node.Transitions, report)
 	}
+	checkTemplate(declared, "global.toolWaitLine", s.Global.ToolWaitLine, report)
 	checkConditions(declared, "global", s.Global.Transitions, report)
 	for name, tool := range s.Tools {
 		if tool.HTTP != nil {

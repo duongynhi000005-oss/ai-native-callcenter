@@ -1622,9 +1622,11 @@ func startToolPathBackend(t *testing.T, profile provider.Profile, lang, flowJSON
 }
 
 // startToolPathFull is startToolPathBackend with the engine's starting slots
-// and a sink for the call's log.
+// and a sink for the call's log. configure, if given, adjusts the orchestrator
+// before the call is driven.
 func startToolPathFull(t *testing.T, profile provider.Profile, lang, flowJSON,
-	backendURL string, slots map[string]any, logSink io.Writer) *toolPath {
+	backendURL string, slots map[string]any, logSink io.Writer,
+	configure ...func(*Orchestrator)) *toolPath {
 	t.Helper()
 	// The session asks the actions whether the ending is armed, as the
 	// orchestrator wires it; the actions exist only after the session does.
@@ -1640,6 +1642,9 @@ func startToolPathFull(t *testing.T, profile provider.Profile, lang, flowJSON,
 
 	o := testOrchestrator(t, &fakeSwitch{})
 	o.cfg.Profile = profile
+	for _, apply := range configure {
+		apply(o)
+	}
 	log := slog.New(slog.NewTextHandler(logSink, nil))
 	spec, err := flow.Load([]byte(flowJSON))
 	if err != nil {

@@ -147,6 +147,14 @@ export interface FlowGlobal {
    * Unset (or null) is DEFAULT_MAX_DURATION_SEC, 0 is off, anything else 60–3600.
    */
   maxDurationSec?: number
+  /**
+   * The words of the wait line a caller hears when an HTTP tool has not
+   * returned a second after it started and nothing else is playing. Said as
+   * written; must be a statement, never a question. A language left empty
+   * keeps that language's default ("One moment, let me check that." /
+   * "请稍等，我查一下。").
+   */
+  toolWaitLine?: FlowText
   alwaysAllowedTools?: string[]
   apiBaseEnv?: string
   transitions?: FlowTransition[]

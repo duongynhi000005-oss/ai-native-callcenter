@@ -138,24 +138,35 @@ func (s *Session) onTurnStarted(event *wireEvent) {
 
 	if s.isTurnOpen.Load() {
 		s.closeTurn()
+		wasLine := s.endLineTurn()
 		s.emit(provider.Event{
 			Type: provider.EventTypeInterrupted, InterruptedBy: provider.InterruptReasonSystem})
+		// A line replaced before it finished is over all the same: the results
+		// held for it go out (SendToolResult).
+		if wasLine && event.TTSType != ttsTypeSpokenLine {
+			s.releaseHeldResults()
+		}
 	}
 
+	isLine := event.TTSType == ttsTypeSpokenLine
 	s.mu.Lock()
 	s.isFenced = false
 	s.isCancelledByUs = false
 	s.turnAudioBytes = 0
 	spoken := ""
-	if event.TTSType == ttsTypeSpokenLine {
+	if isLine {
 		spoken = s.pendingSpeak
 		s.pendingSpeak = ""
+		s.isLineTurnOpen = true
+		// The line exists; results held for it wait for its end, not for a
+		// start that has happened.
+		s.stopHeldTimerLocked()
 	}
 	s.mu.Unlock()
 
 	s.isTurnOpen.Store(true)
 	s.dog.Signal(provider.WatchResponseStarted)
-	s.emit(provider.Event{Type: provider.EventTypeResponseStarted})
+	s.emit(provider.Event{Type: provider.EventTypeResponseStarted, IsSpokenLine: isLine})
 
 	// The words of a line this client handed the engine are this client's to
 	// report: the provider sends no text events for one.
@@ -218,12 +229,18 @@ func (s *Session) onTurnFinished() {
 		s.log.Debug("a turn finished that was already closed")
 		return
 	}
+	wasLine := s.endLineTurn()
 	if audioBytes == 0 {
 		reason := "the provider produced no audio; check the voice name"
 		s.log.Error("turn carried no audio", "reason", reason)
 		s.emit(provider.Event{Type: provider.EventTypeError,
 			Err: errors.New(reason), Text: reason, IsFatal: true})
 		return
+	}
+	// The line has been made; the answer it was covering for goes on now and
+	// plays after it.
+	if wasLine {
+		s.releaseHeldResults()
 	}
 	s.emit(provider.Event{Type: provider.EventTypeResponseDone})
 }
@@ -260,6 +277,10 @@ func (s *Session) onWireResponseDone(event *wireEvent) {
 	s.mu.Unlock()
 
 	s.closeTurn()
+	// A caller who talked over a line still gets the answer it covered for.
+	if s.endLineTurn() {
+		s.releaseHeldResults()
+	}
 	s.emit(provider.Event{Type: provider.EventTypeInterrupted, InterruptedBy: by})
 }
 
@@ -372,6 +393,9 @@ func (s *Session) onTurnStalled(hasAudioArrived bool) {
 	}
 	s.isTurnOpen.Store(false)
 	s.log.Warn("turn abandoned", "reason", reason, "hasAudioArrived", hasAudioArrived)
+	if s.endLineTurn() {
+		s.releaseHeldResults()
+	}
 
 	// Not fatal: the session is still usable and the caller heard whatever did
 	// arrive. The flow decides what to say next.

@@ -251,6 +251,13 @@ type Event struct {
 	// InterruptedBy says what cut a response short (EventTypeInterrupted).
 	InterruptedBy InterruptReason
 
+	// IsSpokenLine says, on EventTypeResponseStarted, that the turn is a line
+	// SpeakText asked for rather than one the model writes on its own: the
+	// response this client requested for the line (Realtime), or the engine
+	// speaking the committed text (doubao). It is this client's belief, as
+	// sure as its knowledge of which request a response answers.
+	IsSpokenLine bool
+
 	// Err is set on EventTypeError. IsFatal means the session cannot continue:
 	// provider state is unrecoverable, so the call must be routed elsewhere
 	// rather than retried.

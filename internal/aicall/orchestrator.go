@@ -187,6 +187,11 @@ type Orchestrator struct {
 	// budgetAfter replaces time.After for the clocks drive keeps (the time
 	// budget and its re-looks). Tests only.
 	budgetAfter func(time.Duration) <-chan time.Time
+
+	// toolWaitDue starts the clock a slow HTTP tool's wait line is said on
+	// (flow.ToolWaitLineAfter) and returns its channel and its stop. Nil is
+	// the real clock; tests put their own here.
+	toolWaitDue func() (<-chan time.Time, func())
 }
 
 type activeCall struct {
@@ -583,7 +588,11 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			case EventTypeBotSaid:
 				if event.IsFinal {
 					recorder.say(store.SpeakerBot, event.Text)
-					reportClaims(event.Turn, claims.onBotSaid(event.Turn, event.Text))
+					// A wait line is the application's words, not a claim
+					// of the model's ("let me check" is what it says).
+					if !event.IsAside {
+						reportClaims(event.Turn, claims.onBotSaid(event.Turn, event.Text))
+					}
 				}
 
 			case EventTypeDigit:
@@ -613,6 +622,15 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				claims.consumeFarewell()
 
 			case EventTypeTurnDone:
+				if isApplicationAside(event, &wall) {
+					// The wait line said while a tool ran (sayWaitLine). It
+					// is not a reply to the caller (the wall), not a turn
+					// whose words a tool must back (claims), and not the
+					// closing line an armed ending waits for (actions); the
+					// tool batch it was said in was closed by its own
+					// response's TURN_DONE, which came first.
+					continue
+				}
 				reportClaims(event.Turn, claims.onTurnDone(event.Turn,
 					event.Turn == wall.toolCallTurn, actions.isArmed()))
 				if event.IsInterrupted {
@@ -646,6 +664,11 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 					log.Info("call reached its time limit while an ending was armed; the armed action ends it")
 					isLimitWaiting = false
 					limitDue = nil
+				}
+				// The caller having heard the wait line runs nothing: it is
+				// neither a closing line nor a reply (see TURN_DONE).
+				if isApplicationAside(event, &wall) {
+					continue
 				}
 				o.handlePlaybackDone(event.Turn, event.HasAudio, &wall, session, runtime, actions, log)
 
@@ -745,7 +768,7 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 	log *slog.Logger) {
 
 	recorder.toolCall(event.ToolName, event.ToolArgs)
-	output, moved := runtime.Dispatch(ctx, event.ToolName, event.ToolArgs)
+	output, moved := o.dispatch(ctx, event, batch, session, runtime, actions, log)
 
 	if !o.isLineTheToolAnswer(moved, runtime) {
 		recorder.toolResult(event.ToolName, output, moved)
@@ -798,6 +821,109 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *t
 	if err := session.AnswerTool(event.ToolCallID, output); err != nil {
 		log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
 	}
+}
+
+// dispatch runs the tool a call asked for and returns what Runtime.Dispatch
+// does. A built-in, a slot tool or record_lead runs here and answers at once.
+//
+// An HTTP tool can take up to its timeoutMs (10 s at most), and a caller must
+// not sit through that in silence (#286): when it has not returned
+// flow.ToolWaitLineAfter after it started, sayWaitLine decides whether the
+// caller hears the wait line. So the tool runs on a goroutine of its own and
+// this one waits for it, for the clock, and then for it again. Nothing else
+// happens on the call's goroutine meanwhile, so the runtime and the engine are
+// the tool's alone while it runs and the call's again once the result has
+// been received: the single-owner rule holds, handed over twice through the
+// result channel. What the wait touches — the session, the armed ending, the
+// log — is safe from any goroutine. The model's own events queue up behind it
+// exactly as they did when the tool ran on this goroutine.
+//
+// Once a batch has said its wait line, the rest of it runs here: a second line
+// would only repeat the first.
+func (o *Orchestrator) dispatch(ctx context.Context, event Event, batch *toolBatch,
+	session *Session, runtime *flow.Runtime, actions *callActions,
+	log *slog.Logger) (output, moved string) {
+
+	if batch.isWaitLineSaid || !runtime.IsHTTPTool(event.ToolName) {
+		return runtime.Dispatch(ctx, event.ToolName, event.ToolArgs)
+	}
+	line := runtime.ToolWaitLine()
+	type result struct{ output, moved string }
+	done := make(chan result, 1)
+	go func() {
+		output, moved := runtime.Dispatch(ctx, event.ToolName, event.ToolArgs)
+		done <- result{output, moved}
+	}()
+
+	due, stop := o.startToolWait()
+	defer stop()
+	select {
+	case r := <-done:
+		return r.output, r.moved
+	case <-due:
+	}
+	o.sayWaitLine(line, event.ToolName, batch, session, actions, log)
+	r := <-done
+	return r.output, r.moved
+}
+
+// startToolWait starts the wait line's clock (toolWaitDue).
+func (o *Orchestrator) startToolWait() (<-chan time.Time, func()) {
+	if o.toolWaitDue != nil {
+		return o.toolWaitDue()
+	}
+	timer := time.NewTimer(flow.ToolWaitLineAfter)
+	return timer.C, func() { timer.Stop() }
+}
+
+// sayWaitLine says the wait line for a tool still running at
+// flow.ToolWaitLineAfter, if the caller would hear nothing else.
+//
+// Only when nothing is playing (Session.isQuiet): the model often speaks its
+// own filler in the turn it calls the tool from, and that turn may have
+// finished generating long before the caller has finished hearing it. Not
+// over an armed ending either: the caller is about to be handed on or let go,
+// and what they hear next is the closing line.
+//
+// The line goes out through SpeakAside, which is SpeakText with its turn
+// marked (Event.IsAside), and the result is answered whenever it comes: the
+// providers keep the answer's turn behind the line's (Realtime owes it past
+// the line's request; doubao holds the result until the line's turn ends) and
+// give it to a caller who talks over the line all the same.
+//
+// Unlike a phase's line (closeToolBatch), this one cannot wait for the batch:
+// it is said precisely because a call of the batch is still owed. On doubao,
+// which goes on only once every call is answered, the line is committed with
+// that call outstanding; what the engine makes of that has not been measured
+// live (#286).
+func (o *Orchestrator) sayWaitLine(line, tool string, batch *toolBatch, session *Session,
+	actions *callActions, log *slog.Logger) {
+
+	switch {
+	case line == "":
+		return
+	case actions.isArmed():
+		log.Info("a tool is running long; no wait line over an armed ending", "tool", tool)
+		return
+	case !session.isQuiet():
+		log.Info("a tool is running long; no wait line, the caller is hearing the bot", "tool", tool)
+		return
+	}
+	if err := session.SpeakAside(line); err != nil {
+		log.Warn("could not say the wait line", "tool", tool, "error", err)
+		return
+	}
+	batch.isWaitLineSaid = true
+	log.Info("a tool is running long; said the wait line", "tool", tool,
+		"afterMs", flow.ToolWaitLineAfter.Milliseconds())
+}
+
+// isApplicationAside reports whether a TURN_DONE or PLAYBACK_DONE belongs to a
+// turn that only said a wait line. A turn marked as one that made a tool call
+// after all (a model that answered the line's request with a call) is the
+// model's turn, and is counted as such.
+func isApplicationAside(event Event, wall *turnsWithoutToolWatch) bool {
+	return event.IsAside && event.Turn != wall.toolCallTurn
 }
 
 // isLineTheToolAnswer reports whether a tool result that moved the call to
@@ -857,6 +983,9 @@ func (o *Orchestrator) sayPhaseLine(session *Session, runtime *flow.Runtime,
 // they arrive and closed by the response's TURN_DONE (Engine.BeginToolBatch).
 type toolBatch struct {
 	isOpen bool
+	// isWaitLineSaid says a tool of this batch ran long enough for the wait
+	// line and it was said (sayWaitLine): one line covers the whole batch.
+	isWaitLineSaid bool
 	// lineOwedIn is the phase the batch's last move went to, when that phase
 	// has a line of its own that waits for the batch to close
 	// (answerToolCall). Empty is no line owed.

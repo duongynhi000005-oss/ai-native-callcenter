@@ -22,14 +22,25 @@
 //	go run ./cmd/aicc-mockbackend -addr 127.0.0.1:8770
 //	AICC_BOT_BACKEND_BASE=http://127.0.0.1:8770 /tmp/aicc
 //
+// One endpoint stands in for a second backend that wants a credential and
+// takes its time (#286): POST /api/kb/secure-search answers like
+// /api/kb/search, but only to "Authorization: Bearer <token>" with the token
+// the process was started with (Options.KBToken), and only after the delay the
+// request asks for in its delayMs query parameter. A flow reaches it with a
+// per-tool baseUrl, a {secrets.NAME} header and a timeoutMs, which is how the
+// wait line and a backend slower than its timeout are walked on the dev stack.
+//
 // State lives in memory and only where a flow needs to observe its own writes
 // (an appointment booked, then rescheduled, then confirmed). Restarting resets
 // it, which is what a walkthrough wants: every run starts from the same facts.
 package mockbackend
 
 import (
+	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -88,9 +99,28 @@ func newStore() *store {
 	}
 }
 
+// Options configure the mock backend.
+type Options struct {
+	// Logf receives one line per exchange; nil discards them.
+	Logf func(format string, args ...any)
+	// KBToken is the bearer token /api/kb/secure-search accepts. Empty
+	// accepts none: every request to it is refused.
+	KBToken string
+}
+
+// The bounds of /api/kb/secure-search's delayMs: past the longest timeoutMs a
+// tool may have (10 s), so a tool that gives up first can be walked too.
+const maxKBDelayMs = 15000
+
 // New returns the mock backend. logf receives one line per exchange; nil
-// discards them.
+// discards them. Its /api/kb/secure-search accepts no token (NewWith).
 func New(logf func(format string, args ...any)) http.Handler {
+	return NewWith(Options{Logf: logf})
+}
+
+// NewWith returns the mock backend configured by opts.
+func NewWith(opts Options) http.Handler {
+	logf := opts.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -116,7 +146,64 @@ func New(logf func(format string, args ...any)) http.Handler {
 	} {
 		mux.HandleFunc(path, serve(path, s.logf, handler))
 	}
+	mux.HandleFunc(secureKBPath, secureKB(opts.KBToken, s.logf,
+		serve(secureKBPath, s.logf, s.kbSearch)))
 	return mux
+}
+
+const secureKBPath = "/api/kb/secure-search"
+
+// secureKB guards next with the bearer token and holds the answer for the
+// request's delayMs. A missing or wrong token is a 401 that names neither the
+// token sent nor the one expected; a malformed delay is a 400. The delay ends
+// early, with no answer, when the caller gives up (its timeoutMs).
+func secureKB(token string, logf func(string, ...any), next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		got, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" || !hasBearer ||
+			subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			logf("%s refused: missing or wrong bearer token", secureKBPath)
+			writeEnvelope(w, http.StatusUnauthorized,
+				map[string]any{"retCode": "401000", "retMsg": "unauthorized"})
+			return
+		}
+		delayMs := 0
+		if raw := r.URL.Query().Get("delayMs"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 0 || n > maxKBDelayMs {
+				writeEnvelope(w, http.StatusBadRequest, map[string]any{"retCode": "400000",
+					"retMsg": fmt.Sprintf("delayMs must be a whole number from 0 to %d", maxKBDelayMs)})
+				return
+			}
+			delayMs = n
+		}
+		if delayMs > 0 {
+			// The body is read first: until it has been, the server does not
+			// watch the connection, and a caller that gave up would not end
+			// the wait.
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+			if err != nil {
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			timer := time.NewTimer(time.Duration(delayMs) * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+				logf("%s: the caller gave up before the %d ms delay ended", secureKBPath, delayMs)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// writeEnvelope writes an envelope with a status other than 200.
+func writeEnvelope(w http.ResponseWriter, status int, body map[string]any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // serve reads the request body, logs the exchange and writes the envelope.

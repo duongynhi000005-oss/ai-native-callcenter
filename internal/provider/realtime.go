@@ -708,7 +708,16 @@ func (r *Realtime) onRequestExpired(gen uint64) {
 	case !expired.isRetry:
 		outcome = obs.ResponseUnansweredRetried
 		retry.isRetry = true
+		// A line's retry is the same line asked for again, and a turn owed
+		// past its first request (a result or a cue that arrived while it
+		// was on its way) is still owed past it: the line's turn answers
+		// neither. Any other retry is a bare request sent after the item and
+		// answers it, so the claim discharges it as usual.
+		isOwedPastLine := expired.kind == responseKindLine && r.isTurnOwed && r.isOwedPastCreate
 		r.claimFloorLocked(retry)
+		if isOwedPastLine {
+			r.isTurnOwed, r.isOwedPastCreate = true, true
+		}
 		r.recoverySentAt, r.recoveryLine = time.Now(), nil
 	default:
 		outcome = obs.ResponseUnansweredDropped
@@ -770,8 +779,12 @@ func (r *Realtime) sendRetry(expired responseRequest) error {
 // A line asked for while the previous request was still in flight could not be
 // cancelled then, because the provider had created nothing. This is the first
 // moment there is something to stop.
-func (r *Realtime) onResponseCreated() {
+//
+// It reports whether the response is the one a line asked for: the request in
+// flight when it was created was a line's.
+func (r *Realtime) onResponseCreated() (isLine bool) {
 	r.mu.Lock()
+	isLine = r.isResponseRequested && r.request.kind == responseKindLine
 	r.settleRequestLocked()
 	r.isCallerSpeaking = false
 	// Whoever asked for this response — this client or the provider's own
@@ -797,6 +810,7 @@ func (r *Realtime) onResponseCreated() {
 			r.log.Warn("could not stop the turn a spoken line replaces", "error", err)
 		}
 	}
+	return isLine
 }
 
 // dispatchPendingSpeak asks for the line that was waiting, now that the turn
@@ -873,10 +887,21 @@ func (r *Realtime) SendToolResult(toolCallID, output string) error {
 	// can never be requested ahead of the output it is meant to answer. If
 	// the response ends in between, the floor is seen free here and the turn
 	// is asked for now.
+	//
+	// A line asked for and not yet created covers nothing: its turn says the
+	// line as written and answers no result. The result's turn is owed past
+	// that request, as a cue's is (SendUserText), and asked for when the
+	// line's turn ends. Without this a result that arrived while a wait line
+	// was on its way (#286) rode on the line and was never answered.
 	r.mu.Lock()
-	isOwed := r.isResponseOpen.Load() || r.isTurnOwed
+	isOpen := r.isResponseOpen.Load()
+	isLineRequested := !isOpen && r.isResponseRequested && r.request.kind == responseKindLine
+	isOwed := isOpen || r.isTurnOwed || isLineRequested
 	if isOwed {
 		r.isTurnOwed = true
+		if isLineRequested {
+			r.isOwedPastCreate = true
+		}
 	}
 	isCovered := !isOwed && r.isResponseRequested
 	r.mu.Unlock()
@@ -1299,9 +1324,9 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.callItems, r.finishedCalls = nil, nil
 		r.mu.Unlock()
 		r.isResponseOpen.Store(true)
-		r.onResponseCreated()
+		isLine := r.onResponseCreated()
 		r.signal(watchResponseStarted)
-		r.emit(Event{Type: EventTypeResponseStarted})
+		r.emit(Event{Type: EventTypeResponseStarted, IsSpokenLine: isLine})
 
 	case "response.output_item.added":
 		// Only the item carrying speech can be truncated. A turn that says
@@ -1635,12 +1660,25 @@ func (r *Realtime) handleError(event *wireEvent) {
 	// A request for a turn that the provider refused for any reason but a
 	// response already running will never be created, so it must not go on
 	// covering the tool results that follow it (SendToolResult).
+	//
+	// A turn owed past that request (a result or a cue that arrived while a
+	// line was on its way) was waiting for the line's turn to end, and there
+	// will be none: it is asked for now. Claiming the floor discharges it, so
+	// a refusal of that request too cannot loop.
 	if !strings.Contains(err.Message, "another response is in progress") {
 		r.mu.Lock()
+		isSettled := !r.isResponseOpen.Load() && r.isResponseRequested
 		if !r.isResponseOpen.Load() {
 			r.settleRequestLocked()
 		}
+		isOwedStranded := isSettled && r.isTurnOwed && r.isOwedPastCreate
+		if isOwedStranded {
+			r.isOwedPastCreate = false
+		}
 		r.mu.Unlock()
+		if isOwedStranded {
+			r.releaseOwedTurn()
+		}
 	}
 
 	r.finishStart(err)
