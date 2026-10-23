@@ -437,15 +437,11 @@ func (d *dialog) hangUp() {
 	if addr, err := net.ResolveUDPAddr("udp", hostPortOf(contact)); err == nil && contact != "" {
 		target = addr
 	}
-	// The route set of a UAS is the Record-Route set in the order received;
-	// BuildBye reverses what it is given, so hand it the reverse.
+	// A UAS's route set is the INVITE's Record-Route values in the order
+	// received (RFC 3261 §12.1.1), which is what BuildBye emits.
 	records := d.invite.RecordRoutes()
-	reversed := make([]string, len(records))
-	for i, r := range records {
-		reversed[len(records)-1-i] = r
-	}
 	packet := voice.BuildBye(d.rec.CallID, d.invite.From(), d.invite.To(), d.toTag,
-		d.localIP, d.s.Addr().Port, reversed, contact)
+		d.localIP, d.s.Addr().Port, records, contact)
 	d.rec.End = &EndRecord{Method: EndedWithBye, By: EndedByCallee, At: time.Now().UTC()}
 	d.s.send(target, packet)
 	d.mu.Unlock()

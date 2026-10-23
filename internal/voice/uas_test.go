@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,12 +94,16 @@ func (p *peer) offer() string {
 		"a=rtpmap:101 telephone-event/8000\r\na=ptime:20\r\na=sendrecv\r\n"
 }
 
-func (p *peer) request(method, body string) {
+func (p *peer) request(method, body string, headers ...string) {
 	p.t.Helper()
 
 	contentType := ""
 	if body != "" {
 		contentType = "Content-Type: application/sdp\r\n"
+	}
+	extra := contentType
+	if len(headers) > 0 {
+		extra = strings.Join(headers, "\r\n") + "\r\n" + contentType
 	}
 	msg := fmt.Sprintf(
 		"%s sip:aicc@127.0.0.1 SIP/2.0\r\n"+
@@ -113,7 +118,7 @@ func (p *peer) request(method, body string) {
 			"Content-Length: %d\r\n\r\n%s",
 		method, p.sip.LocalAddr().(*net.UDPAddr).Port, method, p.cseq,
 		p.callID, p.cseq, method, p.sip.LocalAddr().(*net.UDPAddr).Port,
-		contentType, len(body), body)
+		extra, len(body), body)
 
 	if _, err := p.sip.WriteToUDP([]byte(msg), p.uasAddr); err != nil {
 		p.t.Fatalf("send %s: %v", method, err)
@@ -158,10 +163,12 @@ func (p *peer) awaitStatus(code int, timeout time.Duration) *sipMessage {
 }
 
 // connect drives a full INVITE / 200 / ACK exchange and returns the answer.
-func (p *peer) connect(hooks *callHooks) (*sipMessage, *Dialog) {
+// Extra headers ride the INVITE, which is how a test puts a route set in front
+// of the dialog.
+func (p *peer) connect(hooks *callHooks, headers ...string) (*sipMessage, *Dialog) {
 	p.t.Helper()
 
-	p.request("INVITE", p.offer())
+	p.request("INVITE", p.offer(), headers...)
 	answer := p.awaitStatus(200, 2*time.Second)
 	p.request("ACK", "")
 
@@ -437,20 +444,48 @@ func TestHangingUpSendsBye(t *testing.T) {
 
 	dialog.Stop()
 
-	deadline := time.Now().Add(2 * time.Second)
+	bye := p.awaitBye(2 * time.Second)
+	if bye.callID() != p.callID {
+		t.Errorf("BYE carries Call-ID %q, want %q", bye.callID(), p.callID)
+	}
+}
+
+// awaitBye reads until the BYE this side sent arrives. Anything else on the
+// signalling socket is skipped: a retransmission or a crossed response.
+func (p *peer) awaitBye(timeout time.Duration) *sipMessage {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		msg, err := p.read(time.Until(deadline))
 		if err != nil {
 			break
 		}
 		if msg.method == methodBye {
-			if msg.callID() != p.callID {
-				t.Errorf("BYE carries Call-ID %q, want %q", msg.callID(), p.callID)
-			}
-			return
+			return msg
 		}
 	}
-	t.Error("no BYE was sent when the call was ended locally")
+	p.t.Fatal("no BYE was sent when the call was ended locally")
+	return nil
+}
+
+// The dialog's route set is the INVITE's Record-Route values in the order they
+// arrived (RFC 3261 §12.1.1), however the INVITE grouped them. Reversing it
+// walks a path with two proxies backwards and the far end never sees the BYE,
+// so this drives the whole path that fills the set in, not only the rendering
+// buildBye's own test covers.
+func TestHangingUpKeepsTheRouteSetInTheOrderTheInviteCarriedIt(t *testing.T) {
+	_, hooks, p := startUAS(t, nil)
+	_, dialog := p.connect(hooks,
+		"Record-Route: <sip:10.0.0.7;lr>, <sip:10.0.0.8;lr>",
+		"Record-Route: <sip:10.0.0.9;lr>")
+
+	dialog.Stop()
+
+	bye := p.awaitBye(2 * time.Second)
+	want := []string{"<sip:10.0.0.7;lr>", "<sip:10.0.0.8;lr>", "<sip:10.0.0.9;lr>"}
+	if got := bye.multi["route"]; !slices.Equal(got, want) {
+		t.Errorf("Route headers = %v, want the INVITE's order %v", got, want)
+	}
 }
 
 func TestCapacityLimitIsEnforced(t *testing.T) {

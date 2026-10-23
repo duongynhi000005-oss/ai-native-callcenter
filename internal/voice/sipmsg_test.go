@@ -3,6 +3,7 @@
 package voice
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -152,7 +153,7 @@ func Test487CarriesTheInviteCSeq(t *testing.T) {
 	}
 }
 
-func TestByeReversesTheRouteSetAndTargetsTheContact(t *testing.T) {
+func TestByeKeepsTheRouteSetInTheOrderReceived(t *testing.T) {
 	t.Parallel()
 	msg, _ := parseSIP([]byte(inviteFromSwitch))
 	bye := string(buildBye(msg.callID(), msg.fromHeader(), msg.toHeader(), "aicc-4",
@@ -161,14 +162,10 @@ func TestByeReversesTheRouteSetAndTargetsTheContact(t *testing.T) {
 	if !strings.HasPrefix(bye, "BYE sip:10.0.0.8:5060 SIP/2.0") {
 		t.Errorf("BYE is not addressed to the peer's Contact:\n%s", bye)
 	}
-	// The route set is applied in reverse for a request in the other direction.
-	first := strings.Index(bye, "Route: <sip:10.0.0.8;lr>")
-	second := strings.Index(bye, "Route: <sip:10.0.0.9;lr>")
-	if first < 0 || second < 0 {
-		t.Fatalf("Route headers missing:\n%s", bye)
-	}
-	if first > second {
-		t.Error("the route set was not reversed")
+	// A UAS's route set is the Record-Route set in the order it appeared in
+	// the request (RFC 3261 §12.1.1); reversing it is the UAC's job (§12.1.2).
+	if got, want := routeLines(bye), []string{"<sip:10.0.0.9;lr>", "<sip:10.0.0.8;lr>"}; !slices.Equal(got, want) {
+		t.Errorf("Route headers = %v, want the INVITE's order %v:\n%s", got, want, bye)
 	}
 	// From and To swap relative to the INVITE, and our tag goes on the new From.
 	if !strings.Contains(bye, "From: <sip:aicc@10.0.0.5>;tag=aicc-4") {
@@ -181,6 +178,67 @@ func TestByeReversesTheRouteSetAndTargetsTheContact(t *testing.T) {
 	// explain: the conversation ended the way conversations end.
 	if strings.Contains(bye, "Reason:") {
 		t.Errorf("a plain BYE carries a Reason it has no reason for:\n%s", bye)
+	}
+}
+
+// routeLines returns the Route header values a message carries, one per header
+// line, in the order they appear.
+func routeLines(request string) []string {
+	var routes []string
+	for line := range strings.SplitSeq(request, "\r\n") {
+		if value, ok := strings.CutPrefix(line, "Route: "); ok {
+			routes = append(routes, value)
+		}
+	}
+	return routes
+}
+
+// However the INVITE grouped its Record-Route values — three separate headers,
+// one comma-joined header, or a mix — the route set is the same list and the
+// BYE carries one Route header per entry, in that order. A path with two
+// proxies is exactly where reversing them sends the BYE away from the far end.
+func TestByeEmitsEachRouteAsItsOwnHeaderInOrder(t *testing.T) {
+	t.Parallel()
+	const (
+		near = "<sip:10.0.0.9;lr>"
+		mid  = "<sip:10.0.0.8:5060;lr>"
+		// A strict-routed entry is still a member of the set and keeps its
+		// place; only its Request-URI promotion (RFC 3261 §12.2.1.1) is not
+		// done here, because no peer on this path record-routes strictly.
+		strict = "<sip:10.0.0.7>"
+	)
+	tests := []struct{ name, routing string }{
+		{"separate headers", "Record-Route: " + near + "\r\n" +
+			"Record-Route: " + mid + "\r\n" +
+			"Record-Route: " + strict + "\r\n"},
+		{"one comma-joined header", "Record-Route: " + near + ", " + mid + ", " + strict + "\r\n"},
+		{"separate and joined mixed", "Record-Route: " + near + ", " + mid + "\r\n" +
+			"Record-Route: " + strict + "\r\n"},
+		{"no route set", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw := strings.Replace(inviteFromSwitch,
+				"Record-Route: <sip:10.0.0.9;lr>\r\nRecord-Route: <sip:10.0.0.8;lr>\r\n", tt.routing, 1)
+			msg, err := parseSIP([]byte(raw))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			bye := string(buildBye(msg.callID(), msg.fromHeader(), msg.toHeader(), "aicc-4",
+				"10.0.0.5", 6060, msg.recordRoutes(), msg.contact(), byeReason{}))
+
+			got := routeLines(bye)
+			if tt.routing == "" {
+				if len(got) != 0 {
+					t.Fatalf("a dialog with no route set got Route headers %v:\n%s", got, bye)
+				}
+				return
+			}
+			if want := []string{near, mid, strict}; !slices.Equal(got, want) {
+				t.Errorf("Route headers = %v, want %v:\n%s", got, want, bye)
+			}
+		})
 	}
 }
 

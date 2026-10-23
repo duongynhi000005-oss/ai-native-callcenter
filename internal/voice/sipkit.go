@@ -82,6 +82,8 @@ func BuildSDPAnswer(localIP string, localPort int, sessionID uint32,
 }
 
 // BuildBye renders a BYE for a dialog this side accepted, with no Reason.
+// recordRoutes is the Record-Route set as the INVITE carried it, in order
+// (RFC 3261 §12.1.1); the BYE's Route headers keep that order.
 func BuildBye(callID, fromHeader, toHeader, localTag, localIP string,
 	localPort int, recordRoutes []string, remoteContact string) []byte {
 	return buildBye(callID, fromHeader, toHeader, localTag, localIP, localPort,
