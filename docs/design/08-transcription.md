@@ -2483,6 +2483,24 @@ rather than a fact: if no stream dials back within `connectGrace`, it publishes
 `ERROR / STREAM_NEVER_CONNECTED` and logs it. Without that the panel sits at "Connecting…"
 for the life of the call, which is indistinguishable from a call nobody is transcribing.
 
+**`[MEASURED 2026-10-20, 2026-10-22]` The command's reply and the dial-back race each other
+in both directions, and the expectation is per attachment.** On a short leg the module
+dialled back *before* the `+OK` reached us: the expectation was armed after the arrival, so
+a stream that was live and transcribing ended inside the grace and was reported as
+`STREAM_NEVER_CONNECTED` (#287). On a stalled switch the `start` timed out after 10 s and
+was treated as failed, while the switch ran it 41 s later: the attachment was forgotten, so
+no detach could stop the stream, no state was published for it, and nothing owned it (#312).
+`[FACT]` Both are the same defect — a reply is not evidence about the stream, in either
+direction. The ingest records an arrival that beats its expectation and consumes it, and a
+timed-out command is *sent, not confirmed*: the attachment and its expectation are kept, a
+detach revokes that attach's token so a late `start` cannot join a later one, and the grace
+decides whether the stream ever arrived. The expectation, arrival and revocation are keyed
+by the attachment's token, never by the channel, because a re-attach on the same channel is
+a different stream. So is a graceful close: it retires only the attachment whose token it
+carries. A grace that gives up reports and keeps the attachment, so a late stream is still
+owned and moves the state from `ERROR` to `LIVE`; a re-attach of the same leg after that
+replaces it, revoking its token, rather than finding the channel already tapped.
+
 **The starvation edge was reproduced independently**, by accident, which is the best kind of
 confirmation: a `stereo` tap on a `&park()`ed leg gave `+OK`, a completed websocket
 handshake, a healthy connection and **0 frames, 0 bytes** until the capture timed out, with
