@@ -1034,10 +1034,16 @@ func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, par
 		// The call is theirs from its first moment: they placed it.
 		hops = append(hops, hop{placerLeg(originator, end), snap.CreatedAt})
 	}
-	if botSec > 0 || snap.Bot.FlowID != nil {
+	if botSec > 0 || botLeg(snap) != nil || snap.Bot.HandedOver() {
 		// Labelled with the flow, as the bot labels the row it writes itself.
 		// Unlabelled, the same flow read one way on a contained call and
 		// another on a transferred one.
+		//
+		// A flow the call was placed for is not a hop: the outbound originator
+		// stamps the DID's flow on the customer leg from its first moment, so
+		// reading the flow alone as "a bot was here" would give an answered
+		// call that never reached one a BOT hop of 0 s and no trunk. What says
+		// the bot joined is its leg, its own stamp, or its time.
 		joined := snap.CreatedAt
 		if bot := botLeg(snap); bot != nil {
 			joined = joinedAt(snap, bot)
@@ -1090,9 +1096,45 @@ func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, par
 		legs = append(legs, h.leg)
 	}
 	if legs == nil && originator != nil {
-		legs = append(legs, store.Leg{Kind: "DIALING", Label: originator.Number})
+		legs = append(legs, unreachedJourney(originator, end)...)
 	}
 	return legs
+}
+
+// unreachedJourney is the journey of a call none of the hops above can
+// describe: nobody on this side joined it.
+//
+// DIALING is the number being rung and nobody answering. It is not a state an
+// answered call can be in, and writing it on one produced a row that
+// contradicted the answered_at and bill_sec beside it: an AI outbound call the
+// customer answered, whose bridge to the bot never ran, read as still dialling
+// the number it had been billed thirty seconds for (2026-10-22).
+//
+// An answered call's one hop is the leg it was answered on, for as long as it
+// lasted: the trunk facing the carrier — the originator of a call this platform
+// placed — or one of our own phones. Its duration is the same window bill_sec
+// measures.
+//
+// A bot that was meant to take the call and never joined is not a hop, because
+// it did not happen: BOT means the journey reached the bot, and the reader is
+// told what was intended instead by flow_id, which the outbound originator
+// stamps on the customer leg from its first moment, and why the call ended by
+// hangupCause (BOT_BRIDGE_UNCONFIRMED, OVERFLOW). A 0 s BOT hop would have said
+// the bot was there for no time at all (#313).
+func unreachedJourney(originator *PartySnapshot, end time.Time) []store.Leg {
+	if originator.AnsweredAt == nil {
+		return []store.Leg{{Kind: "DIALING", Label: originator.Number}}
+	}
+	kind, label := "TRUNK", originator.Number
+	if originator.ExtensionNumber != "" {
+		// One of our own phones placed it, and is the only leg there is.
+		kind, label = "AGENT", originator.ExtensionNumber
+	}
+	return []store.Leg{{
+		Kind:        kind,
+		Label:       label,
+		DurationSec: max(0, int(end.Sub(*originator.AnsweredAt).Seconds())),
+	}}
 }
 
 // causeUserBusy is the switch's release cause for a callee whose line is in

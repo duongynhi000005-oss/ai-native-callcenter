@@ -123,6 +123,14 @@ cdrs(call_id uuid pk, started_at, answered_at, ended_at,
                                        -- call behaviour and not is_contained. Reaches the human path's row
                                        -- through the aicc_bot_unbacked_claims channel variable.
      -- legs: [{"kind":"TRUNK"|"DIALING"|"BOT"|"QUEUE"|"AGENT","label":…,"durationSec":…,"note":…}]
+     -- One hop per stretch of the call, in the order joined: TRUNK a leg to the carrier (the
+     -- customer's own, or the one a person dialled out on), BOT the AI flow that served it, QUEUE
+     -- one per queue stay, AGENT one of our phones. DIALING is what is left when nobody answered:
+     -- the number the call was ringing when it ended, with no duration of its own. An answered
+     -- call is never DIALING, even when nothing joined it afterwards — its journey is the leg it
+     -- was answered on, from answered to ended, which is bill_sec's window (#313). A bot that was
+     -- meant to take the call and never joined is not a BOT hop, because BOT means the journey
+     -- reached it: flow_id names what the call was placed for, and hangup_cause how it ended.
      -- queue_id / queue_wait_sec: the first queue the caller joined and that stay's wait (join →
      -- bridge, or → leave if never bridged); owner decision on #283. A call that passed through
      -- several queues is one row counted once, under its first queue, and the reports read these

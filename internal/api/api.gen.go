@@ -1489,10 +1489,12 @@ type CDR struct {
 	CallType CallType `json:"callType"`
 
 	// CampaignID The campaign this call was placed for. Absent for every other call. Set when the call's record is written (and again when a fuller record replaces it), from the campaign attempt that carries the call's id.
-	CampaignID   *openapi_types.UUID `json:"campaignId,omitempty"`
-	DID          *string             `json:"did,omitempty"`
-	Disposition  *string             `json:"disposition,omitempty"`
-	EndedAt      time.Time           `json:"endedAt"`
+	CampaignID  *openapi_types.UUID `json:"campaignId,omitempty"`
+	DID         *string             `json:"did,omitempty"`
+	Disposition *string             `json:"disposition,omitempty"`
+	EndedAt     time.Time           `json:"endedAt"`
+
+	// FlowID The conversation the call was for: the DID's flow, recorded on an AI outbound call when it is placed and by the bot when it answers, whether or not the bot was ever reached. Absent on a call no flow was meant to serve (one a person dialled out) and on one placed before this was recorded.
 	FlowID       *openapi_types.UUID `json:"flowId,omitempty"`
 	FromNumber   string              `json:"fromNumber"`
 	HangupCause  *string             `json:"hangupCause,omitempty"`
@@ -2417,13 +2419,17 @@ type Identity struct {
 
 // Leg One hop of the call's journey, for the journey summary.
 type Leg struct {
-	DurationSec int     `json:"durationSec"`
-	Kind        LegKind `json:"kind"`
-	Label       string  `json:"label"`
-	Note        *string `json:"note,omitempty"`
+	DurationSec int `json:"durationSec"`
+
+	// Kind What a hop of the journey was: TRUNK a leg to the carrier (the customer's own, or the one a person dialled out on), DIALING the number a call was ringing when it ended with nobody answered — never an answered call, whatever failed to join it afterwards — BOT the AI flow that served the call, QUEUE a stay in a queue, AGENT one of this deployment's phones.
+	Kind  LegKind `json:"kind"`
+	Label string  `json:"label"`
+
+	// Note What became of the hop, when its duration does not say it: a phone nobody picked up ("did not answer"), or how a queue stay ended (its cancel reason).
+	Note *string `json:"note,omitempty"`
 }
 
-// LegKind defines model for LegKind.
+// LegKind What a hop of the journey was: TRUNK a leg to the carrier (the customer's own, or the one a person dialled out on), DIALING the number a call was ringing when it ended with nobody answered — never an answered call, whatever failed to join it afterwards — BOT the AI flow that served the call, QUEUE a stay in a queue, AGENT one of this deployment's phones.
 type LegKind string
 
 // LoginRequest defines model for LoginRequest.

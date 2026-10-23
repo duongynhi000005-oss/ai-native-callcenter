@@ -2520,13 +2520,17 @@ export interface components {
          * @enum {string}
          */
         UnbackedClaim: "TRANSFER" | "LOOKUP" | "MESSAGE" | "FAREWELL";
-        /** @enum {string} */
+        /**
+         * @description What a hop of the journey was: TRUNK a leg to the carrier (the customer's own, or the one a person dialled out on), DIALING the number a call was ringing when it ended with nobody answered — never an answered call, whatever failed to join it afterwards — BOT the AI flow that served the call, QUEUE a stay in a queue, AGENT one of this deployment's phones.
+         * @enum {string}
+         */
         LegKind: "TRUNK" | "DIALING" | "BOT" | "QUEUE" | "AGENT";
         /** @description One hop of the call's journey, for the journey summary. */
         Leg: {
             kind: components["schemas"]["LegKind"];
             label: string;
             durationSec: number;
+            /** @description What became of the hop, when its duration does not say it: a phone nobody picked up ("did not answer"), or how a queue stay ended (its cancel reason). */
             note?: string;
         };
         /** @description One finished call. totalSec always equals the sum of its parts. */
@@ -2547,7 +2551,10 @@ export interface components {
             fromNumber: string;
             toNumber: string;
             did?: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The conversation the call was for: the DID's flow, recorded on an AI outbound call when it is placed and by the bot when it answers, whether or not the bot was ever reached. Absent on a call no flow was meant to serve (one a person dialled out) and on one placed before this was recorded.
+             */
             flowId?: string;
             /**
              * Format: uuid

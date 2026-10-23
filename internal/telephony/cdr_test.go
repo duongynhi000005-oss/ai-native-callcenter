@@ -2056,3 +2056,246 @@ func TestAnUnansweredOutboundCallToABusyCalleeIsBusy(t *testing.T) {
 		}
 	})
 }
+
+// An AI outbound call the customer answered and nothing on our side ever
+// joined used to get the journey of a call nobody picked up: DIALING at the
+// customer's number, 0 s. Beside its own answered_at and bill_sec that is a row
+// contradicting itself — the customer answered, the carrier billed, and the
+// journey says the phone was still ringing.
+//
+// Live 2026-10-22 (#313): two calls whose bridge to the bot never ran, billed
+// 30 and 35 seconds, both read [DIALING 18688886666 0s]. How each of them
+// ended is a case below; the shape of the journey is the same for all, because
+// the customer was answered on the trunk whatever failed after that.
+func TestAnAnsweredCallThatReachedNobodyIsTheTrunkItWasAnsweredOn(t *testing.T) {
+	t.Parallel()
+	flow := uuid.New()
+
+	// The originator of a call this platform placed is the customer's own leg,
+	// created towards the trunk. The flow is stamped on it when it is placed,
+	// so the row knows what the call was for even when the bot never joined.
+	unreached := func(cause string, answeredAt, endedAt int, withFlow bool) Snapshot {
+		s := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(endedAt),
+			Bot: BotShare{DID: "95099"},
+			Parties: []PartySnapshot{{
+				Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+				CreatedAt: at(0), AnsweredAt: atPtr(answeredAt), ReleasedAt: atPtr(endedAt),
+				ReleaseCause: cause,
+			}},
+		}
+		if withFlow {
+			// As the outbound originator stamps it: the DID's flow, before
+			// any bot has had a chance to name itself.
+			s.Bot.FlowID = &flow
+		}
+		return s
+	}
+
+	for _, tc := range []struct {
+		name string
+		snap Snapshot
+		want []string
+		// billSec is the answered window the trunk leg must match.
+		billSec int
+	}{
+		{
+			// The bridge command was never confirmed and never ran: the
+			// platform hung up the answered leg thirty seconds later.
+			name:    "the bridge to the bot never ran",
+			snap:    unreached("BOT_BRIDGE_UNCONFIRMED", 0, 30, true),
+			want:    []string{"TRUNK:18688886666:30"},
+			billSec: 30,
+		},
+		{
+			// No bot slot came free while the customer waited; the leg went the
+			// moment the hold ended, so a second of it was billed.
+			name:    "no bot slot, hung up at once",
+			snap:    unreached("OVERFLOW", 0, 1, true),
+			want:    []string{"TRUNK:18688886666:1"},
+			billSec: 1,
+		},
+		{
+			// Recovery ended a leg nobody was watching, 8 seconds in.
+			name:    "recovery ended a parked leg",
+			snap:    unreached("RECOVERY_ON_TIMER_EXPIRE", 0, 8, true),
+			want:    []string{"TRUNK:18688886666:8"},
+			billSec: 8,
+		},
+		{
+			// The customer hung up while the bridge was being made: they were
+			// on the trunk for the whole half minute.
+			name:    "the customer hung up during the bridge",
+			snap:    unreached("NORMAL_CLEARING", 0, 30, true),
+			want:    []string{"TRUNK:18688886666:30"},
+			billSec: 30,
+		},
+		{
+			// Answered and gone in under a second: the duration truncates to 0,
+			// as bill_sec does, and the leg is still the trunk.
+			name: "the customer hung up 0.3 s after answering",
+			snap: Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeOutbound,
+				CreatedAt: at(0), EndedAt: ms(0, 300),
+				Bot: BotShare{DID: "95099", FlowID: &flow},
+				Parties: []PartySnapshot{{
+					Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: ms(0, 300),
+					ReleaseCause: "NORMAL_CLEARING",
+				}},
+			},
+			want:    []string{"TRUNK:18688886666:0"},
+			billSec: 0,
+		},
+		{
+			// A leg placed before the flow was stamped on it (an older build,
+			// or one adopted across an upgrade): the journey is the same, and
+			// only flow_id is missing.
+			name:    "a call whose flow was never stamped",
+			snap:    unreached("BOT_BRIDGE_UNCONFIRMED", 0, 30, false),
+			want:    []string{"TRUNK:18688886666:30"},
+			billSec: 30,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tc.snap)
+			if got := journey(cdr.Legs); !slices.Equal(got, tc.want) {
+				t.Errorf("legs = %v, want %v", got, tc.want)
+			}
+			if cdr.Status != store.CDRStatusAnswered {
+				t.Errorf("status = %s, want ANSWERED: the customer answered", cdr.Status)
+			}
+			if cdr.BillSec != tc.billSec {
+				t.Errorf("billSec = %d, want %d", cdr.BillSec, tc.billSec)
+			}
+			if tc.snap.Bot.FlowID != nil && cdr.FlowID == nil {
+				t.Error("flowId is null on a call placed for a flow")
+			}
+			var spanned int
+			for _, leg := range cdr.Legs {
+				if leg.DurationSec < 0 {
+					t.Errorf("leg %+v has a negative duration", leg)
+				}
+				if leg.Kind == "TRUNK" {
+					spanned += leg.DurationSec
+				}
+			}
+			// The trunk leg is the answered window bill_sec measures, not a
+			// second measurement that could disagree with it.
+			if spanned != cdr.BillSec {
+				t.Errorf("the trunk leg spans %ds against billSec %ds", spanned, cdr.BillSec)
+			}
+		})
+	}
+}
+
+// The controls: a call nobody answered is still DIALING, and a call the bot did
+// join keeps the journey it always had — the fallback above must not add a
+// trunk hop to every AI call.
+func TestAnUnansweredCallIsStillDialingAndAReachedBotIsStillTheJourney(t *testing.T) {
+	t.Parallel()
+	flow := uuid.New()
+	unanswered := func(cause string) Snapshot {
+		return Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(9),
+			Bot: BotShare{DID: "95099", FlowID: &flow, FlowSlug: "lead_qualification"},
+			Parties: []PartySnapshot{{
+				Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+				CreatedAt: at(0), ReleasedAt: atPtr(9), ReleaseCause: cause,
+			}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		cause  string
+		status string
+	}{
+		{"rang out", "NO_ANSWER", store.CDRStatusNoAnswer},
+		{"busy", "USER_BUSY", store.CDRStatusBusy},
+		{"rejected by the trunk", "CALL_REJECTED", store.CDRStatusNoAnswer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), unanswered(tc.cause))
+			if got, want := journey(cdr.Legs), []string{"DIALING:18688886666:0"}; !slices.Equal(got, want) {
+				t.Errorf("legs = %v, want %v", got, want)
+			}
+			if cdr.Status != tc.status {
+				t.Errorf("status = %s, want %s", cdr.Status, tc.status)
+			}
+			if cdr.BillSec != 0 {
+				t.Errorf("billSec = %d, want 0 on a call nobody answered", cdr.BillSec)
+			}
+		})
+	}
+
+	t.Run("a call answered on one of our own phones", func(t *testing.T) {
+		t.Parallel()
+		// A call between our own extensions that reached nobody else: the one
+		// leg it has is the placer's phone, and naming it a trunk would send a
+		// reader looking for a carrier leg there was none of.
+		snap := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeInternal,
+			CreatedAt: at(0), EndedAt: atPtr(6),
+			Parties: []PartySnapshot{{
+				Role: RoleOriginator, Number: "1008", ExtensionNumber: "1008", ChannelID: "phone",
+				CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(6),
+			}},
+		}
+		cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+		if got, want := journey(cdr.Legs), []string{"AGENT:1008:6"}; !slices.Equal(got, want) {
+			t.Errorf("legs = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the bot answered and kept the call", func(t *testing.T) {
+		t.Parallel()
+		snap := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(45),
+			Bot: BotShare{Sec: 45, FlowID: &flow, FlowSlug: "lead_qualification", DID: "95099"},
+			Parties: []PartySnapshot{
+				{Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(45)},
+				{Role: RoleTarget, Number: "95099", ChannelID: "bot", IsBotLeg: true,
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(45)},
+			},
+		}
+		cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+		if got, want := journey(cdr.Legs), []string{"BOT:lead_qualification:45"}; !slices.Equal(got, want) {
+			t.Errorf("legs = %v, want %v", got, want)
+		}
+		if cdr.Status != store.CDRStatusAnswered {
+			t.Errorf("status = %s, want ANSWERED", cdr.Status)
+		}
+	})
+
+	t.Run("the bot answered and handed the call to a queue and an agent", func(t *testing.T) {
+		t.Parallel()
+		agentID := uuid.New()
+		snap := Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(200),
+			Bot:   BotShare{Sec: 30, FlowID: &flow, FlowSlug: "lead_qualification", DID: "95099", IsStamped: true},
+			Queue: QueueFacts{Name: "support-en", JoinedAt: at(32), BridgedAt: at(60)},
+			Parties: []PartySnapshot{
+				{Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(200)},
+				{Role: RoleTarget, Number: "95099", ChannelID: "bot", IsBotLeg: true,
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(32)},
+				{Role: RoleTarget, Number: "1008", AgentID: &agentID, ChannelID: "agent",
+					CreatedAt: at(58), AnsweredAt: atPtr(60), ReleasedAt: atPtr(200),
+					Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(60), EndedAt: at(200)}}},
+			},
+		}
+		cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+		want := []string{"BOT:lead_qualification:30", "QUEUE:support-en:28", "AGENT:1008:140"}
+		if got := journey(cdr.Legs); !slices.Equal(got, want) {
+			t.Errorf("legs = %v, want %v", got, want)
+		}
+	})
+}

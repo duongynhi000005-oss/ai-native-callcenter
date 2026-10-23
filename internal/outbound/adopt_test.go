@@ -281,6 +281,8 @@ type recoveryRig struct {
 	pub      *eventLog
 	clock    *testClock
 	sessions map[uuid.UUID]bool
+	// flowID is the flow both numbers are served by.
+	flowID uuid.UUID
 	// cold is true until the first pass has run, as in the application.
 	cold bool
 	// hasBotFn, when set, replaces the session lookup.
@@ -311,7 +313,7 @@ func newRecoveryRig(t *testing.T) *recoveryRig {
 	clock := &testClock{t: t0}
 	svc.now = clock.now
 	return &recoveryRig{svc: svc, coord: coord, registry: registry, sw: sw, pub: pub,
-		clock: clock, sessions: map[uuid.UUID]bool{}, cold: true}
+		clock: clock, sessions: map[uuid.UUID]bool{}, flowID: flowID, cold: true}
 }
 
 func (r *recoveryRig) hasBot(id uuid.UUID) bool {

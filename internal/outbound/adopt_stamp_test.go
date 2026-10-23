@@ -24,6 +24,10 @@ func TestTheOriginatedLegsCarryWhatRecoveryNeeds(t *testing.T) {
 	}
 	for _, want := range []string{
 		"aicc_placed_by=DIAL_AI", "aicc_placed_to=18688886666", "aicc_did=95099", "aicc_language=en",
+		// The flow the call is for, from its first moment: the CDR of an
+		// answered call whose bridge to the bot never ran has no bot stamp to
+		// read a flow from (#313).
+		"aicc_flow_id=" + rig.flowID.String(),
 	} {
 		if !strings.Contains(rig.sw.commands[0], want) {
 			t.Errorf("AI outbound originate lacks %s: %s", want, rig.sw.commands[0])

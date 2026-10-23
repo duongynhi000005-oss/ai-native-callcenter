@@ -73,7 +73,12 @@ const (
 // handing the call to a person: its part of the eventual CDR. The channel
 // variable names stop at this boundary.
 type BotShare struct {
-	Sec    int
+	Sec int
+	// FlowID is the conversation this call was for: the DID's flow, stamped on
+	// the customer leg when an AI outbound call is placed, and restamped by the
+	// bot when it hands the call on. A flow being known is not a bot having
+	// been there — the journey asks for the bot's leg, and who writes the row
+	// asks IsStamped.
 	FlowID *uuid.UUID
 	// FlowSlug names the flow for a reader; the ledger's BOT leg is labelled
 	// with it, as the bot's own row labels it when it writes the row itself.
@@ -106,7 +111,8 @@ type BotShare struct {
 // stamp changes nothing about who owns the row.
 func (b BotShare) HandedOver() bool { return b.IsStamped }
 
-// IsZero reports whether the call ever met a bot.
+// IsZero reports whether the call knows nothing about a bot: no time with one,
+// no flow it was placed for, and no DID or queue it was handed to.
 func (b BotShare) IsZero() bool {
 	return b.Sec == 0 && b.FlowID == nil && b.DID == "" && b.Queue == ""
 }
