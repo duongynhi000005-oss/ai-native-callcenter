@@ -9,12 +9,14 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/campaign"
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 )
 
 // callActions is what one call's flow tools actually do.
@@ -242,15 +244,18 @@ func (a *callActions) queueForTransfer(ctx context.Context, name string) (catalo
 
 // TakeMessage records what the caller wants passed on as an OPEN callback,
 // which is the work queue an agent later rings through.
+//
+// The number called back is the caller's own unless the model gave one that is
+// a telephone number (callbackNumber). Neither the message nor a number reaches
+// the log: the message is what a customer said, and the number is theirs.
 func (a *callActions) TakeMessage(ctx context.Context, request flow.MessageRequest) (flow.Result, error) {
+	phoneNumber, source := a.callbackNumber(request.CallbackNumber)
 	a.log.Info("message taken",
-		"message", request.Message, "callbackNumber", request.CallbackNumber)
+		"messageRunes", utf8.RuneCountInString(request.Message),
+		"callbackNumberSource", source,
+		"callbackNumber", maskNumber(phoneNumber))
 
 	if ledger := a.orchestrator.cfg.Ledger; ledger != nil && a.recorder != nil {
-		phoneNumber := request.CallbackNumber
-		if phoneNumber == "" && a.facts != nil {
-			phoneNumber = a.facts.fromNumber
-		}
 		callID := a.recorder.callID
 		callback, err := ledger.InsertCallback(ctx, &callID, a.fallbackQueue,
 			phoneNumber, request.Message)
@@ -263,6 +268,47 @@ func (a *callActions) TakeMessage(ctx context.Context, request flow.MessageReque
 		}
 	}
 	return flow.Succeeded(nil, ""), nil
+}
+
+// Where a callback number came from, as the log names it.
+const (
+	callbackNumberCaller = "CALLER" // the caller's own number (the ANI)
+	callbackNumberSpoken = "SPOKEN" // a number the caller gave
+)
+
+// callbackNumber decides the number a callback rings. A number the model gave
+// is kept when it is a plausible telephone number, written the way this
+// deployment dials (phonenum.Callback). Anything else it wrote — a description
+// of the caller's own number ("当前来电号码"), digits inside words, a number a
+// digit short — is discarded for the caller's number, and the call goes on
+// (#311): the model is not asked to try again, because an agent working the
+// queue needs something to dial, and the caller is reachable on the line they
+// called from. The discarded value is not logged, only its length.
+func (a *callActions) callbackNumber(given string) (number, source string) {
+	if given != "" {
+		cfg := a.orchestrator.cfg
+		if number, ok := phonenum.Callback(given, cfg.DefaultCountryCode, cfg.DialForm); ok {
+			return number, callbackNumberSpoken
+		}
+		a.log.Warn("callback number discarded: not a telephone number; calling back the caller's number",
+			"givenRunes", utf8.RuneCountInString(given))
+	}
+	if a.facts == nil {
+		return "", callbackNumberCaller
+	}
+	return a.facts.fromNumber, callbackNumberCaller
+}
+
+// maskNumber keeps at most the last four characters of a number, which is
+// enough to tell two callbacks apart in a log and not enough to dial.
+func maskNumber(number string) string {
+	if number == "" {
+		return ""
+	}
+	if len(number) <= 4 {
+		return "***"
+	}
+	return "***" + number[len(number)-4:]
 }
 
 // RecordLead stores the lead on the call's attempt, overwriting an earlier one.

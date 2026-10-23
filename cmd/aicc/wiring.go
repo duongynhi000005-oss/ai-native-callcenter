@@ -23,6 +23,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/httpapi"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider/doubao"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
@@ -610,6 +611,8 @@ func botConfig(
 	isGreetingGated bool,
 	greetingMediaWait time.Duration,
 	noInput time.Duration,
+	countryCode string,
+	dialForm phonenum.DialForm,
 ) aicall.OrchestratorConfig {
 	return aicall.OrchestratorConfig{
 		UAS:                uas,
@@ -637,6 +640,10 @@ func botConfig(
 		GreetingMediaWait: greetingMediaWait,
 		// Dead air before NO_INPUT: the deployment's AICC_BOT_NO_INPUT_TIMEOUT.
 		NoInput: noInput,
+		// take_message writes a callback number the way this deployment
+		// dials: AICC_DEFAULT_COUNTRY_CODE and AICC_OUTBOUND_DIAL_FORM.
+		DefaultCountryCode: countryCode,
+		DialForm:           dialForm,
 	}
 }
 

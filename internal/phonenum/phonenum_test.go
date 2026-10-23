@@ -108,3 +108,126 @@ func TestParseDialForm(t *testing.T) {
 		}
 	}
 }
+
+// The callback numbers of issue #311, as a speech model writes them down, in
+// every dial form. want is per form: E164, E164_NO_PLUS, NATIONAL; "" means
+// refused.
+func TestCallback(t *testing.T) {
+	t.Parallel()
+	const refused = ""
+	cases := []struct {
+		name, in, cc string
+		e164, noPlus string
+		national     string
+	}{
+		// What the model wrote instead of a number.
+		{"a description of the caller's number", "当前来电号码", "86", refused, refused, refused},
+		{"this phone, in Chinese", "本机号码", "86", refused, refused, refused},
+		{"this number", "this number", "86", refused, refused, refused},
+		{"empty", "", "86", refused, refused, refused},
+		{"whitespace only", "   ", "86", refused, refused, refused},
+		{"full-width whitespace only", "　　", "86", refused, refused, refused},
+		{"separators only", "-()-", "86", refused, refused, refused},
+		{"plus alone", "+", "86", refused, refused, refused},
+		// Words around digits are refused, not mined for a number.
+		{"digits inside Chinese words", "号码是13800138000谢谢", "86", refused, refused, refused},
+		{"an extension after the number", "13800138000转123", "86", refused, refused, refused},
+		{"a hash", "13800138000#", "86", refused, refused, refused},
+		{"a star", "*13800138000", "86", refused, refused, refused},
+		{"letters", "1380013800O", "86", refused, refused, refused},
+		{"a plus inside", "86+13800138000", "86", refused, refused, refused},
+		{"two pluses", "++8613800138000", "86", refused, refused, refused},
+		{"a newline", "13800138000\n", "86", refused, refused, refused},
+		// Implausible digits.
+		{"one digit short", "1380013800", "86", refused, refused, refused},
+		{"one digit long", "138001380001", "86", refused, refused, refused},
+		{"a landline too long", "0571888866661", "86", refused, refused, refused},
+		{"forty digits", "1234567890123456789012345678901234567890", "86", refused, refused, refused},
+		{"forty digits without a country code", "1234567890123456789012345678901234567890", "", refused, refused, refused},
+		{"not a mobile prefix", "12800138000", "86", refused, refused, refused},
+		{"a landline without its trunk zero", "1061234567", "86", refused, refused, refused},
+		{"an area code beginning with 1 that is not 10", "01161234567", "86", refused, refused, refused},
+		{"a landline too short", "010612345", "86", refused, refused, refused},
+		{"an extension", "1002", "86", refused, refused, refused},
+		{"plus 86 and a short mobile", "+86 1380013800", "86", refused, refused, refused},
+		{"plus 86 and a trunk zero", "+86 010 6123 4567", "86", refused, refused, refused},
+		{"a foreign number too long", "+1234567890123456", "86", refused, refused, refused},
+		{"a foreign number beginning with zero", "+0123456789", "86", refused, refused, refused},
+		{"national too short without a country code", "123456", "", refused, refused, refused},
+		// Mobiles.
+		{"a mobile", "13800138000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"spaced", "138 0013 8000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"dashed", "138-0013-8000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"dotted", "138.0013.8000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"plus 86", "+86 13800138000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"plus 86 in brackets", "(+86) 138-0013-8000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"86 without a plus", "8613800138000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"double zero 86", "0086 138 0013 8000", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"full-width digits", "１３８００１３８０００", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"full-width plus and spaces", "＋８６　１３８　００１３　８０００", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		{"full-width brackets and dashes", "（１３８）－００１３—８０００", "86",
+			"+8613800138000", "8613800138000", "13800138000"},
+		// Landlines keep the trunk zero nationally and lose it in E.164.
+		{"a Beijing landline in brackets", "(010) 6123 4567", "86",
+			"+861061234567", "861061234567", "01061234567"},
+		{"a Shanghai landline", "021-6666-8888", "86",
+			"+862166668888", "862166668888", "02166668888"},
+		{"a three-digit area code", "0571 8888 6666", "86",
+			"+8657188886666", "8657188886666", "057188886666"},
+		{"a landline after plus 86", "+86 10 6123 4567", "86",
+			"+861061234567", "861061234567", "01061234567"},
+		{"a landline after bare 86", "861061234567", "86",
+			"+861061234567", "861061234567", "01061234567"},
+		// Another country stays E.164 under NATIONAL.
+		{"a US number", "+1 (415) 555-0100", "86",
+			"+14155550100", "14155550100", "+14155550100"},
+		{"a UK number after double zero", "0044 20 7946 0958", "86",
+			"+442079460958", "442079460958", "+442079460958"},
+		// Another deployment country: 7 to 15 national digits.
+		{"a US national number", "(415) 555-0100", "1",
+			"+14155550100", "14155550100", "4155550100"},
+		{"a US number with its country code", "14155550100", "1",
+			"+14155550100", "14155550100", "4155550100"},
+		{"a UK national number keeps its trunk zero nationally", "020 7946 0958", "44",
+			"+442079460958", "442079460958", "02079460958"},
+		// No country code: a national number cannot be completed, so it is
+		// kept as given in every form.
+		{"no country code, national", "138 0013 8000", "",
+			"13800138000", "13800138000", "13800138000"},
+		{"no country code, international", "+86 138 0013 8000", "",
+			"+8613800138000", "8613800138000", "+8613800138000"},
+	}
+	forms := []DialForm{FormE164, FormE164NoPlus, FormNational}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			for i, want := range []string{c.e164, c.noPlus, c.national} {
+				got, ok := Callback(c.in, c.cc, forms[i])
+				if ok != (want != refused) || got != want {
+					t.Errorf("Callback(%q, %q, %s) = %q, %v; want %q, %v",
+						c.in, c.cc, forms[i], got, ok, want, want != refused)
+				}
+			}
+		})
+	}
+}
+
+// An unknown form is E.164, as it is for DialString.
+func TestCallbackUnknownFormIsE164(t *testing.T) {
+	t.Parallel()
+	for _, form := range []DialForm{"", "BOGUS"} {
+		if got, ok := Callback("13800138000", "86", form); !ok || got != "+8613800138000" {
+			t.Errorf("Callback with form %q = %q, %v", form, got, ok)
+		}
+	}
+}

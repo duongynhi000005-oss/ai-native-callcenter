@@ -227,7 +227,7 @@ func builtinSchemas(lang string, queues []string) map[string]Tool {
 				"type": "object",
 				"properties": {
 					"message": {"type": "string", "description": "What the caller wants passed on"},
-					"callbackNumber": {"type": "string", "description": "Where to call back, if different from the caller's number"}
+					"callbackNumber": {"type": "string", "description": "Only when the caller gives another number to be called back on: its digits, nothing else (for example 13800138000). Leave it empty when they want to be called back on the number they are calling from; never write words that describe a number."}
 				},
 				"required": ["message"]
 			}`),

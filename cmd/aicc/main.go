@@ -473,6 +473,8 @@ func run() error {
 			cfg.IsBotGreetingGated,
 			cfg.BotGreetingMediaWait,
 			cfg.BotNoInputTimeout,
+			cfg.DefaultCountryCode,
+			cfg.OutboundDialForm,
 		))
 		if err != nil {
 			return fmt.Errorf("build ai voice leg: %w", err)

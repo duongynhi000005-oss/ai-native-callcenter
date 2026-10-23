@@ -172,6 +172,7 @@ type Config struct {
 	DefaultCountryCode string
 	// OutboundDialForm (AICC_OUTBOUND_DIAL_FORM) is how the campaign dialer
 	// writes a number to the trunk: E164 (default), E164_NO_PLUS or NATIONAL.
+	// The bot's take_message writes a callback number in it too.
 	OutboundDialForm    phonenum.DialForm
 	outboundDialFormErr error // a malformed value, refused by validate
 	// IsBotEnabled turns the whole AI leg off, for deployments that only
