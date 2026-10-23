@@ -432,34 +432,39 @@ func (d *dialog) hangUp() {
 		return
 	}
 	d.ended = true
-	contact := d.invite.Contact()
-	target := d.from
-	if addr, err := net.ResolveUDPAddr("udp", hostPortOf(contact)); err == nil && contact != "" {
-		target = addr
-	}
+	target := d.byeTarget()
 	// A UAS's route set is the INVITE's Record-Route values in the order
-	// received (RFC 3261 §12.1.1), which is what BuildBye emits.
-	records := d.invite.RecordRoutes()
+	// received (RFC 3261 §12.1.1). BuildBye writes them as Route headers in that
+	// order, and byeTarget sends the BYE to the first of them.
 	packet := voice.BuildBye(d.rec.CallID, d.invite.From(), d.invite.To(), d.toTag,
-		d.localIP, d.s.Addr().Port, records, contact)
+		d.localIP, d.s.Addr().Port, d.invite.RecordRoutes(), d.invite.Contact())
 	d.rec.End = &EndRecord{Method: EndedWithBye, By: EndedByCallee, At: time.Now().UTC()}
 	d.s.send(target, packet)
 	d.mu.Unlock()
 	d.finish()
 }
 
-// hostPortOf pulls host:port out of a Contact header value.
-func hostPortOf(contact string) string {
-	uri := voice.URIOfHeader(contact)
-	_, rest, _ := strings.Cut(uri, ":")
-	if _, host, found := strings.Cut(rest, "@"); found {
-		rest = host
+// byeTarget is where the callee's BYE goes, by the rule the bot's own BYE
+// follows: the top of the route set when the INVITE was record-routed, so
+// every proxy that asked to stay in the dialog sees it, and otherwise the
+// caller's Contact. The address the INVITE came from is the fallback for an
+// entry or a Contact that is not an IP address reachable over UDP.
+func (d *dialog) byeTarget() *net.UDPAddr {
+	if routeSet := d.invite.RecordRoutes(); len(routeSet) > 0 {
+		addr, err := voice.RouteSetNextHop(routeSet)
+		if err != nil {
+			d.s.log.Warn("bye cannot go to the top of its route set, sending it to the invite's source",
+				"callId", d.invite.CallID(), "route", routeSet[0], "error", err)
+			return d.from
+		}
+		return addr
 	}
-	rest, _, _ = strings.Cut(rest, ";")
-	if !strings.Contains(rest, ":") {
-		rest += ":5060"
+	if contact := d.invite.Contact(); contact != "" {
+		if addr, err := voice.UDPAddrOfURI(voice.URIOfHeader(contact)); err == nil {
+			return addr
+		}
 	}
-	return rest
+	return d.from
 }
 
 func (d *dialog) onAck() {

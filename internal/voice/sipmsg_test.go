@@ -164,7 +164,7 @@ func TestByeKeepsTheRouteSetInTheOrderReceived(t *testing.T) {
 	}
 	// A UAS's route set is the Record-Route set in the order it appeared in
 	// the request (RFC 3261 §12.1.1); reversing it is the UAC's job (§12.1.2).
-	if got, want := routeLines(bye), []string{"<sip:10.0.0.9;lr>", "<sip:10.0.0.8;lr>"}; !slices.Equal(got, want) {
+	if got, want := routesOf(t, bye), []string{"<sip:10.0.0.9;lr>", "<sip:10.0.0.8;lr>"}; !slices.Equal(got, want) {
 		t.Errorf("Route headers = %v, want the INVITE's order %v:\n%s", got, want, bye)
 	}
 	// From and To swap relative to the INVITE, and our tag goes on the new From.
@@ -181,16 +181,15 @@ func TestByeKeepsTheRouteSetInTheOrderReceived(t *testing.T) {
 	}
 }
 
-// routeLines returns the Route header values a message carries, one per header
-// line, in the order they appear.
-func routeLines(request string) []string {
-	var routes []string
-	for line := range strings.SplitSeq(request, "\r\n") {
-		if value, ok := strings.CutPrefix(line, "Route: "); ok {
-			routes = append(routes, value)
-		}
+// routesOf parses a request this side built and returns its Route values in
+// order, read the way uas_test.go reads them.
+func routesOf(t *testing.T, request string) []string {
+	t.Helper()
+	msg, err := parseSIP([]byte(request))
+	if err != nil {
+		t.Fatalf("the request does not parse: %v\n%s", err, request)
 	}
-	return routes
+	return msg.multi["route"]
 }
 
 // However the INVITE grouped its Record-Route values — three separate headers,
@@ -202,9 +201,9 @@ func TestByeEmitsEachRouteAsItsOwnHeaderInOrder(t *testing.T) {
 	const (
 		near = "<sip:10.0.0.9;lr>"
 		mid  = "<sip:10.0.0.8:5060;lr>"
-		// A strict-routed entry is still a member of the set and keeps its
-		// place; only its Request-URI promotion (RFC 3261 §12.2.1.1) is not
-		// done here, because no peer on this path record-routes strictly.
+		// A strict-routed entry after a loose one keeps its place: only a
+		// strict router first in the set moves to the Request-URI
+		// (RFC 3261 §12.2.1.1), which siproute_test.go covers.
 		strict = "<sip:10.0.0.7>"
 	)
 	tests := []struct{ name, routing string }{
@@ -228,7 +227,7 @@ func TestByeEmitsEachRouteAsItsOwnHeaderInOrder(t *testing.T) {
 			bye := string(buildBye(msg.callID(), msg.fromHeader(), msg.toHeader(), "aicc-4",
 				"10.0.0.5", 6060, msg.recordRoutes(), msg.contact(), byeReason{}))
 
-			got := routeLines(bye)
+			got := routesOf(t, bye)
 			if tt.routing == "" {
 				if len(got) != 0 {
 					t.Fatalf("a dialog with no route set got Route headers %v:\n%s", got, bye)

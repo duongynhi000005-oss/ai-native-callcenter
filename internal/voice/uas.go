@@ -206,12 +206,41 @@ func (d *Dialog) sendBye() {
 	if conn == nil || addr == nil {
 		return
 	}
+	addr = d.byeNextHop(addr)
 	bye := buildBye(d.CallID, d.FromHeader, d.ToHeader, d.LocalTag,
 		d.LocalIP, d.LocalSIPPort, d.RecordRoutes, d.RemoteContact, reason)
 	if _, err := conn.WriteToUDP(bye, addr); err == nil {
-		d.log.Info("sip bye sent", "callId", d.CallID,
+		d.log.Info("sip bye sent", "callId", d.CallID, "to", addr.String(),
 			"sipCause", reason.SIPCause, "q850Cause", reason.Q850Cause)
 	}
+}
+
+// byeNextHop is where the BYE is written: the first route set entry's address
+// when the dialog has a route set (RFC 3261 §8.1.2, §12.2.1.1), and source
+// otherwise.
+//
+// source is the address the INVITE came from. With no route set, which is the
+// normal case because the INVITE comes straight from the switch, it is used
+// rather than the remote Contact on purpose: the switch is on the LAN and the
+// INVITE's source is the address that already reached us, while the Contact
+// can carry the address the switch advertises outward (ext-sip-ip).
+//
+// The first entry is used only when it is sip: over UDP (or no transport
+// parameter) to an IP literal. Anything else — a hostname, sips:, another
+// transport, an IPv6 address on the IPv4 socket, an entry that does not parse
+// — falls back to source with a warning naming the entry and why. No name is
+// looked up: the BYE goes out from Stop, without waiting on DNS.
+func (d *Dialog) byeNextHop(source *net.UDPAddr) *net.UDPAddr {
+	if len(d.RecordRoutes) == 0 {
+		return source
+	}
+	addr, err := routeSetNextHop(d.RecordRoutes, "udp4")
+	if err != nil {
+		d.log.Warn("bye cannot go to the top of its route set, sending it to the invite's source",
+			"callId", d.CallID, "route", d.RecordRoutes[0], "to", source.String(), "error", err)
+		return source
+	}
+	return addr
 }
 
 // StopWithReason ends the dialog and says why on the BYE.

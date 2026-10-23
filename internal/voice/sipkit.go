@@ -2,7 +2,11 @@
 
 package voice
 
-import "github.com/rasonyang/ai-native-callcenter/internal/media"
+import (
+	"net"
+
+	"github.com/rasonyang/ai-native-callcenter/internal/media"
+)
 
 // This file exports the SIP and SDP building blocks of the UAS unchanged, for
 // the test tools that play the other side of a call (internal/calleesim). Each
@@ -53,6 +57,9 @@ func (m *SIPMessage) Body() string    { return m.msg.body }
 // RecordRoutes returns the Record-Route values in the order received.
 func (m *SIPMessage) RecordRoutes() []string { return m.msg.recordRoutes() }
 
+// Routes returns the Route values in the order received.
+func (m *SIPMessage) Routes() []string { return m.msg.multi["route"] }
+
 // Response answers the message; see buildResponse for the arguments.
 func (m *SIPMessage) Response(status, toTag, cseqOverride, extraHeaders string, body []byte) []byte {
 	return buildResponse(m.msg, status, toTag, cseqOverride, extraHeaders, body)
@@ -82,10 +89,33 @@ func BuildSDPAnswer(localIP string, localPort int, sessionID uint32,
 }
 
 // BuildBye renders a BYE for a dialog this side accepted, with no Reason.
-// recordRoutes is the Record-Route set as the INVITE carried it, in order
-// (RFC 3261 §12.1.1); the BYE's Route headers keep that order.
+// routeSet is the Record-Route set as the INVITE carried it, in order
+// (RFC 3261 §12.1.1). The BYE's Route headers keep that order; a strict router
+// first in the set (no `;lr`) takes the Request-URI and the remote Contact
+// becomes the last Route (§12.2.1.1). Each BYE has a fresh Via branch and
+// Max-Forwards: 70. Send it to RouteSetNextHop when routeSet is not empty.
 func BuildBye(callID, fromHeader, toHeader, localTag, localIP string,
-	localPort int, recordRoutes []string, remoteContact string) []byte {
+	localPort int, routeSet []string, remoteContact string) []byte {
 	return buildBye(callID, fromHeader, toHeader, localTag, localIP, localPort,
-		recordRoutes, remoteContact, byeReason{})
+		routeSet, remoteContact, byeReason{})
+}
+
+// RouteSetNextHop is the UDP address an in-dialog request is sent to when the
+// dialog has a route set: the first entry's URI, by the rule the UAS's own BYE
+// follows. It fails for an empty set, a sips: or non-UDP entry, and a host
+// that is not an IP literal; nothing is resolved.
+func RouteSetNextHop(routeSet []string) (*net.UDPAddr, error) {
+	return routeSetNextHop(routeSet, "udp")
+}
+
+// UDPAddrOfURI is the UDP address a sip: URI sends a request to, by the same
+// rules as RouteSetNextHop: an IP literal host and its port (5060 when absent,
+// maddr when present), refused for a hostname, sips: and a transport other
+// than UDP.
+func UDPAddrOfURI(uri string) (*net.UDPAddr, error) {
+	hop, err := parseHop(uri)
+	if err != nil {
+		return nil, err
+	}
+	return hop.udpAddr("udp")
 }
