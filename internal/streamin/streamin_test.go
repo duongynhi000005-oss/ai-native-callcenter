@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/events"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcribe"
@@ -297,6 +299,17 @@ func (p *statePub) all() []string {
 	return append([]string(nil), p.states...)
 }
 
+// has reports whether any published state contains substr, which is how these
+// tests name a state and the reason it carries.
+func (p *statePub) has(substr string) bool {
+	for _, st := range p.all() {
+		if strings.Contains(st, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // `uuid_audio_stream … start` returns +OK before the socket exists — an attach
 // to a port with nothing listening succeeds just as loudly. Without this the
 // panel would sit at "Connecting…" for the whole call, which reads exactly
@@ -320,20 +333,14 @@ func TestAnAttachThatNeverConnectsSaysSo(t *testing.T) {
 	}
 
 	claim := Claim{CallID: callID, Channel: "chan-1", Expires: time.Now().Add(time.Minute)}
-	key := claim.CallID.String() + "|" + claim.Channel
+	token := s.Token(claim)
 
 	// Expect, then let the grace expire by firing the check directly rather
 	// than sleeping twelve seconds for it.
-	s.Expect(claim)
-	s.giveUpOn(key, claim)
+	s.Expect(token, claim)
+	s.expireExpectations()
 
-	found := false
-	for _, st := range pub.all() {
-		if strings.Contains(st, "ERROR") && strings.Contains(st, "STREAM_NEVER_CONNECTED") {
-			found = true
-		}
-	}
-	if !found {
+	if !pub.has("STREAM_NEVER_CONNECTED") {
 		t.Errorf("states = %v, want an ERROR naming the stream that never arrived", pub.all())
 	}
 }
@@ -354,20 +361,80 @@ func TestAConnectedStreamIsNotReportedMissing(t *testing.T) {
 		Logger:      nopLogger{},
 	})
 	claim := Claim{CallID: callID, Channel: "chan-1", Expires: time.Now().Add(time.Minute)}
+	token := s.Token(claim)
 	key := claim.CallID.String() + "|" + claim.Channel
 
-	s.Expect(claim)
+	s.Expect(token, claim)
 	// The stream arrives.
 	s.mu.Lock()
 	s.sessions[key] = &session{}
 	s.mu.Unlock()
-	s.arrived(key)
-	s.giveUpOn(key, claim)
+	s.arrived(token)
+	s.expireExpectations()
 
-	for _, st := range pub.all() {
-		if strings.Contains(st, "STREAM_NEVER_CONNECTED") {
-			t.Errorf("a connected stream was reported as never arriving: %v", pub.all())
-		}
+	if pub.has("STREAM_NEVER_CONNECTED") {
+		t.Errorf("a connected stream was reported as never arriving: %v", pub.all())
+	}
+}
+
+// A dial-back can beat the attach command's reply, which is the live order on a
+// short leg (#287). The arrival is remembered, so the Expect that follows
+// neither arms a watchdog nor publishes CONNECTING after the session's LIVE —
+// it is a no-op for a stream that is already here.
+func TestAStreamThatArrivesBeforeItsExpectationIsNotReportedMissing(t *testing.T) {
+	t.Parallel()
+	pub := &statePub{}
+	reg := transcript.NewRegistry(nil, pub, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	callID := uuid.New()
+	reg.For(callID, "INBOUND", time.Now())
+	t.Cleanup(func() { reg.Close(callID) })
+
+	s, err := New(Config{
+		Addr: "127.0.0.1:0", Secret: []byte("k"),
+		NewSession:  func() (transcribe.Session, error) { return newStallSession(), nil },
+		Transcripts: recordingTranscripts{reg: reg, callID: callID},
+		Logger:      nopLogger{},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	claim := Claim{CallID: callID, Channel: "chan-1", Expires: time.Now().Add(time.Minute)}
+	token := s.Token(claim)
+	key := claim.CallID.String() + "|" + claim.Channel
+
+	// The module dials back while the tap is still inside the attach command,
+	// before it can call Expect.
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+s.Addr()+StreamPath+"?t="+url.QueryEscape(token), nil)
+	if err != nil {
+		t.Fatalf("the early stream could not connect: %v", err)
+	}
+	defer conn.Close()
+	waitUntil(t, func() bool { return s.hasArrived(token) },
+		"the ingest to record the early stream")
+
+	s.Expect(token, claim)
+	if s.isExpecting(token) {
+		t.Error("Expect armed a watchdog for a stream that had already arrived")
+	}
+	s.expireExpectations()
+	if pub.has("STREAM_NEVER_CONNECTED") {
+		t.Errorf("the early stream was reported as never arriving: %v", pub.all())
+	}
+	if pub.has("CONNECTING") {
+		t.Errorf("Expect published CONNECTING for a stream already connected: %v", pub.all())
+	}
+
+	s.mu.Lock()
+	_, live := s.sessions[key]
+	s.mu.Unlock()
+	if !live {
+		t.Error("the early stream is not the live session")
 	}
 }
 
