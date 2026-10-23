@@ -285,9 +285,6 @@ func appendTag(header, tag string) string {
 	return header + ";tag=" + tag
 }
 
-// buildBye ends a dialog we accepted. From and To swap relative to the INVITE,
-// the Route set is the Record-Route set reversed, and the request goes to the
-// peer's Contact.
 // byeReason is why a dialog is being ended, carried on the BYE as RFC 3326
 // Reason headers.
 //
@@ -348,6 +345,27 @@ func (r byeReason) headers() string {
 	return out.String()
 }
 
+// buildBye ends a dialog we accepted. From and To swap relative to the INVITE,
+// the request goes to the peer's Contact, and the Route headers are the
+// INVITE's Record-Route values in the order they arrived.
+//
+// That order is the one RFC 3261 §12.1.1 defines for our side: a UAS's route
+// set is the Record-Route field values as they appear in the request. Only the
+// UAC reverses (§12.1.2), because its list came back in the response, which a
+// proxy builds by prepending as the request travels — the response's order is
+// the request's reversed, so reversing again restores the path outward. Doing
+// that here walked a multi-proxy path backwards, from the proxy nearest the
+// caller toward the one nearest us; the far end never saw the BYE and the call
+// stayed up until a timer cleared it. Nothing in this deployment's topology put
+// more than one Record-Route in the request, which is why it took a second
+// proxy to notice (issue #250).
+//
+// Each value is written as its own header. The parser has already split the
+// comma-joined ones, so however the INVITE grouped them — three headers, one
+// comma-joined, a mix — the BYE carries one Route header per entry, in order.
+// A strict-routed entry (no `;lr`) is copied in its place: §12.2.1.1 would
+// instead put the first URI of a strict set in the Request-URI, and no peer on
+// this path record-routes strictly, so that form is not implemented here.
 func buildBye(callID, fromHeader, toHeader, localTag, localIP string,
 	localPort int, recordRoutes []string, remoteContact string, reason byeReason) []byte {
 
@@ -356,8 +374,8 @@ func buildBye(callID, fromHeader, toHeader, localTag, localIP string,
 		target = extractURI(remoteContact)
 	}
 	var routes strings.Builder
-	for i := len(recordRoutes) - 1; i >= 0; i-- {
-		routes.WriteString("Route: " + recordRoutes[i] + "\r\n")
+	for _, route := range recordRoutes {
+		routes.WriteString("Route: " + route + "\r\n")
 	}
 	branch := callID
 	if len(branch) > 8 {
