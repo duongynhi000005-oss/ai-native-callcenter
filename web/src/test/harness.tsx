@@ -301,7 +301,9 @@ export function installBackend(initial: Partial<Backend> = {}): Backend {
     get commands() {
       return backend.requests.filter((r) => r.method !== 'GET')
     },
-    session: initial.session ?? identityFixture(),
+    // `??` would read null as absent, and null is a test saying nobody is
+    // signed in — the difference between the fixture and a 401.
+    session: initial.session === undefined ? identityFixture() : initial.session,
     sipSession: initial.sipSession === undefined ? sipSessionFixture() : initial.sipSession,
     presence: initial.presence ?? presenceFixture(),
     calls: initial.calls ?? [],
