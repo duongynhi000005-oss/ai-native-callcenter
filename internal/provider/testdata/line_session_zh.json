@@ -75,7 +75,7 @@
      },
      "callbackNumber": {
       "type": "string",
-      "description": "Where to call back, if different from the caller's number"
+      "description": "Only when the caller gives another number to be called back on: its digits, nothing else (for example 13800138000). Leave it empty when they want to be called back on the number they are calling from; never write words that describe a number."
      }
     },
     "required": [

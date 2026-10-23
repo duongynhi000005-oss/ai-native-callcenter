@@ -17,6 +17,7 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/catalog"
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/obs"
+	"github.com/rasonyang/ai-native-callcenter/internal/phonenum"
 	"github.com/rasonyang/ai-native-callcenter/internal/provider"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcript"
@@ -167,7 +168,14 @@ type OrchestratorConfig struct {
 	// Profile is the provider this deployment runs, resolved at startup. The
 	// same one answers every call, whatever language it is in.
 	Profile provider.Profile
-	Logger  *slog.Logger
+	// DefaultCountryCode and DialForm are the deployment's
+	// AICC_DEFAULT_COUNTRY_CODE and AICC_OUTBOUND_DIAL_FORM: take_message
+	// checks a callback number against the one and writes it in the other, so
+	// an agent's callback dials it the way every other call does. Empty means
+	// no country code and FormE164.
+	DefaultCountryCode string
+	DialForm           phonenum.DialForm
+	Logger             *slog.Logger
 }
 
 // Orchestrator answers bot legs and runs a conversation on each.
