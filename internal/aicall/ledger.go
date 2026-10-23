@@ -439,13 +439,41 @@ const (
 // so the CDR the human path writes after a transfer carries it.
 func (a *callActions) stampBotShare(facts *callFacts) {
 	a.stampChannel("aicc_language", facts.language)
+	a.stampFlow(facts)
+	a.stampChannel("aicc_did", facts.did)
+}
+
+// stampFlow writes the flow the bot runs onto the caller's channel.
+func (a *callActions) stampFlow(facts *callFacts) {
 	if facts.flowID != nil {
 		a.stampChannel("aicc_flow_id", facts.flowID.String())
 	}
 	if facts.flowSlug != "" {
 		a.stampChannel("aicc_flow_slug", facts.flowSlug)
 	}
-	a.stampChannel("aicc_did", facts.did)
+}
+
+// stampAtStart writes onto the caller's channel, as the conversation begins,
+// what a row the human path writes must know however the call ends.
+//
+// An agent's call to a bot number is the human path's row from the start, and
+// the agent can hang up before the bot says anything, so it gets the whole
+// share now (finish). Every other call gets the flow: the human path also
+// writes the row of a call whose bot session died with the process
+// (IsBotAbandoned), and the hand-over that would have stamped the flow never
+// came, so the row named no flow though the bot had answered and run one, where
+// the contract's CDR.flowId says every call the bot answered has it (#313).
+//
+// Not aicc_bot_sec: that variable alone is what says a call was handed over.
+func (a *callActions) stampAtStart() {
+	if a.callerChannel == "" || a.facts == nil {
+		return
+	}
+	if a.facts.isPlacedByAgent() {
+		a.stampBotShare(a.facts)
+		return
+	}
+	a.stampFlow(a.facts)
 }
 
 // stampBotSec writes how long the caller was with the bot, and belongs at the

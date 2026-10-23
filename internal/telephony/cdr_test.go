@@ -2124,12 +2124,30 @@ func TestAnAnsweredCallThatReachedNobodyIsTheTrunkItWasAnsweredOn(t *testing.T) 
 			billSec: 8,
 		},
 		{
-			// The customer hung up while the bridge was being made: they were
-			// on the trunk for the whole half minute.
+			// The customer hung up while the bridge was being made, before the
+			// transfer had dialled the bot: they were on the trunk for the
+			// whole half minute.
 			name:    "the customer hung up during the bridge",
 			snap:    unreached("NORMAL_CLEARING", 0, 30, true),
 			want:    []string{"TRUNK:18688886666:30"},
 			billSec: 30,
+		},
+		{
+			// One step later: the uuid_transfer had dialled the bot's leg, and
+			// the customer hung up before the bot's 200 OK. A bot leg nobody
+			// answered is not the bot having been there, so there is no BOT
+			// hop of 0 s and the trunk is not lost behind one.
+			name: "the customer hung up before the bot's leg answered",
+			snap: func() Snapshot {
+				s := unreached("NORMAL_CLEARING", 0, 12, true)
+				s.Parties = append(s.Parties, PartySnapshot{
+					Role: RoleTarget, Number: "95099", ChannelID: "bot", IsBotLeg: true,
+					CreatedAt: at(11), ReleasedAt: atPtr(12), ReleaseCause: "ORIGINATOR_CANCEL",
+				})
+				return s
+			}(),
+			want:    []string{"TRUNK:18688886666:12"},
+			billSec: 12,
 		},
 		{
 			// Answered and gone in under a second: the duration truncates to 0,
@@ -2233,24 +2251,94 @@ func TestAnUnansweredCallIsStillDialingAndAReachedBotIsStillTheJourney(t *testin
 		})
 	}
 
-	t.Run("a call answered on one of our own phones", func(t *testing.T) {
-		t.Parallel()
-		// A call between our own extensions that reached nobody else: the one
-		// leg it has is the placer's phone, and naming it a trunk would send a
-		// reader looking for a carrier leg there was none of.
-		snap := Snapshot{
-			CallID: uuid.New(), CallType: events.CallTypeInternal,
-			CreatedAt: at(0), EndedAt: atPtr(6),
-			Parties: []PartySnapshot{{
-				Role: RoleOriginator, Number: "1008", ExtensionNumber: "1008", ChannelID: "phone",
-				CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(6),
-			}},
-		}
-		cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
-		if got, want := journey(cdr.Legs), []string{"AGENT:1008:6"}; !slices.Equal(got, want) {
-			t.Errorf("legs = %v, want %v", got, want)
-		}
-	})
+	// Calls on our own side of the trunk. Our phone's own answer is not the
+	// call being answered: click-to-dial rings the agent's phone first and it
+	// auto-answers in front of them, so a call that reached nobody beyond it
+	// is still DIALING, whatever its originator's answeredAt says. A leg that
+	// never left the building is never a TRUNK, answered or not.
+	phone := PartySnapshot{
+		Role: RoleOriginator, Number: "1008", ExtensionNumber: "1008", ChannelID: "phone",
+		CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(6),
+	}
+	for _, tc := range []struct {
+		name   string
+		snap   Snapshot
+		want   []string
+		status string
+	}{
+		{
+			// The gateway was down, or the agent hung up before the switch
+			// dialled out: the trunk leg never existed.
+			name: "a click-to-dial whose trunk leg never came up",
+			snap: Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeOutbound,
+				CreatedAt: at(0), EndedAt: atPtr(6),
+				Parties: []PartySnapshot{phone},
+			},
+			want:   []string{"DIALING:1008:0"},
+			status: store.CDRStatusNoAnswer,
+		},
+		{
+			// The same between two extensions: the far phone was never rung.
+			name: "a call between our own phones that reached nobody",
+			snap: Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeInternal,
+				CreatedAt: at(0), EndedAt: atPtr(6),
+				Parties: []PartySnapshot{phone},
+			},
+			want:   []string{"DIALING:1008:0"},
+			status: store.CDRStatusNoAnswer,
+		},
+		{
+			// An agent dialled a bot's DID and the bot never answered (no slot,
+			// or the agent gave up first). The bot's leg was dialled, but the
+			// bot was not there: no BOT hop of 0 s, and not answered — the
+			// agent's own phone picking up is all that happened.
+			name: "an agent's call to a DID the bot never answered",
+			snap: Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeOutbound,
+				CreatedAt: at(0), EndedAt: atPtr(6),
+				Bot: BotShare{DID: "95001", FlowID: &flow, FlowSlug: "novanet_support"},
+				Parties: []PartySnapshot{phone, {
+					Role: RoleTarget, Number: "95001", ChannelID: "bot", IsBotLeg: true,
+					CreatedAt: at(1), ReleasedAt: atPtr(6), ReleaseCause: "ORIGINATOR_CANCEL",
+				}},
+			},
+			want:   []string{"DIALING:1008:0"},
+			status: store.CDRStatusNoAnswer,
+		},
+		{
+			// An internal call whose only leg is one the dialplan spawned (no
+			// extension of ours on it) and which reached nobody: answered, by
+			// the switch, but nothing faces a carrier on an internal call, and
+			// a TRUNK here would be a carrier leg there was none of.
+			name: "an internal call on a leg the dialplan spawned",
+			snap: Snapshot{
+				CallID: uuid.New(), CallType: events.CallTypeInternal,
+				CreatedAt: at(0), EndedAt: atPtr(6),
+				Parties: []PartySnapshot{{
+					Role: RoleOriginator, Number: "7001", ChannelID: "spawned",
+					CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(6),
+				}},
+			},
+			want:   []string{"AGENT:7001:6"},
+			status: store.CDRStatusAnswered,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), tc.snap)
+			if got := journey(cdr.Legs); !slices.Equal(got, tc.want) {
+				t.Errorf("legs = %v, want %v", got, tc.want)
+			}
+			if cdr.Status != tc.status {
+				t.Errorf("status = %s, want %s", cdr.Status, tc.status)
+			}
+			if cdr.BillSec != 0 {
+				t.Errorf("billSec = %d, want 0: no carrier leg answered", cdr.BillSec)
+			}
+		})
+	}
 
 	t.Run("the bot answered and kept the call", func(t *testing.T) {
 		t.Parallel()
@@ -2296,6 +2384,9 @@ func TestAnUnansweredCallIsStillDialingAndAReachedBotIsStillTheJourney(t *testin
 		want := []string{"BOT:lead_qualification:30", "QUEUE:support-en:28", "AGENT:1008:140"}
 		if got := journey(cdr.Legs); !slices.Equal(got, want) {
 			t.Errorf("legs = %v, want %v", got, want)
+		}
+		if cdr.Status != store.CDRStatusAnswered {
+			t.Errorf("status = %s, want ANSWERED", cdr.Status)
 		}
 	})
 }

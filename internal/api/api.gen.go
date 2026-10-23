@@ -1494,7 +1494,7 @@ type CDR struct {
 	Disposition *string             `json:"disposition,omitempty"`
 	EndedAt     time.Time           `json:"endedAt"`
 
-	// FlowID The conversation the call was for: the DID's flow, recorded on an AI outbound call when it is placed and by the bot when it answers, whether or not the bot was ever reached. Absent on a call no flow was meant to serve (one a person dialled out) and on one placed before this was recorded.
+	// FlowID The conversation the call was for: the DID's flow. Recorded on every call the bot answered, when it starts the conversation, and on an AI outbound call from the moment it is placed, so one whose bridge to the bot never ran still names it. Absent where no flow was resolved for the call: one that never reached a bot number (a person's call out, a caller sent straight to a queue), a person's call to a bot number the bot never answered, and a row written before this was recorded.
 	FlowID       *openapi_types.UUID `json:"flowId,omitempty"`
 	FromNumber   string              `json:"fromNumber"`
 	HangupCause  *string             `json:"hangupCause,omitempty"`

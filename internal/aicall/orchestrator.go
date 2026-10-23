@@ -407,13 +407,10 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		attemptID:     headers[headerAttemptID],
 	}
 	// An agent who hangs up first leaves the bot no chance to say what it ran,
-	// and it is their call's row the human path writes, so the flow and the
-	// number go onto their channel now rather than at an ending that may never
-	// come. Not aicc_bot_sec: that variable alone is what says a call was
-	// handed over.
-	if facts.isPlacedByAgent() && callerChannel != "" {
-		actions.stampBotShare(facts)
-	}
+	// and a session that dies with the process leaves it none either; either
+	// way the human path writes the row, so the flow goes onto the caller's
+	// channel now rather than at an ending that may never come (stampAtStart).
+	actions.stampAtStart()
 	backend := o.cfg.Backend
 	if backend == nil {
 		backend = flow.NewBackend("")

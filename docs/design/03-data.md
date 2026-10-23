@@ -130,7 +130,20 @@ cdrs(call_id uuid pk, started_at, answered_at, ended_at,
      -- call is never DIALING, even when nothing joined it afterwards — its journey is the leg it
      -- was answered on, from answered to ended, which is bill_sec's window (#313). A bot that was
      -- meant to take the call and never joined is not a BOT hop, because BOT means the journey
-     -- reached it: flow_id names what the call was placed for, and hangup_cause how it ended.
+     -- reached it (its leg answered, its time, or its hand-over; a bot leg dialled and never
+     -- answered is none of them): flow_id names what the call was placed for, and hangup_cause
+     -- how it ended. The hop of a leg follows one rule (journeyHop): an agent's or one of our
+     -- extensions' leg is AGENT, a leg facing a carrier TRUNK, and nothing on an INTERNAL call
+     -- faces a carrier. Whether a call was answered is its status, never its originator's own
+     -- answer: an agent's phone auto-answers on every call it places, so a click-to-dial whose
+     -- trunk leg never came up is NO_ANSWER and DIALING.
+     -- flow_id: the DID's flow. The bot stamps it on the caller's channel (aicc_flow_id) when it
+     -- starts the conversation, on every call, and writes it on the rows it writes itself; the AI
+     -- outbound originate stamps it on the customer leg from its first moment (#313). So a row the
+     -- human path writes names the flow after a hand-over, on an agent's call to a bot number,
+     -- and on a call whose bot session died with the process (Call.IsBotAbandoned) or whose
+     -- bridge to the bot never ran. Null where no flow was resolved: a call that reached no bot
+     -- number, a person's call to a bot number the bot never answered, rows from before.
      -- queue_id / queue_wait_sec: the first queue the caller joined and that stay's wait (join →
      -- bridge, or → leave if never bridged); owner decision on #283. A call that passed through
      -- several queues is one row counted once, under its first queue, and the reports read these

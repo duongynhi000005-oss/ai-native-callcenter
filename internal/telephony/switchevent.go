@@ -75,10 +75,10 @@ const (
 type BotShare struct {
 	Sec int
 	// FlowID is the conversation this call was for: the DID's flow, stamped on
-	// the customer leg when an AI outbound call is placed, and restamped by the
-	// bot when it hands the call on. A flow being known is not a bot having
-	// been there — the journey asks for the bot's leg, and who writes the row
-	// asks IsStamped.
+	// the customer leg when an AI outbound call is placed, and by the bot on
+	// the caller's channel when it starts the conversation. A flow being known
+	// is not a bot having been there — the journey asks whether the bot joined
+	// (botJoined), and who writes the row asks IsStamped.
 	FlowID *uuid.UUID
 	// FlowSlug names the flow for a reader; the ledger's BOT leg is labelled
 	// with it, as the bot's own row labels it when it writes the row itself.
