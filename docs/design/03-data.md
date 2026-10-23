@@ -123,6 +123,27 @@ cdrs(call_id uuid pk, started_at, answered_at, ended_at,
                                        -- call behaviour and not is_contained. Reaches the human path's row
                                        -- through the aicc_bot_unbacked_claims channel variable.
      -- legs: [{"kind":"TRUNK"|"DIALING"|"BOT"|"QUEUE"|"AGENT","label":…,"durationSec":…,"note":…}]
+     -- One hop per stretch of the call, in the order joined: TRUNK a leg to the carrier (the
+     -- customer's own, or the one a person dialled out on), BOT the AI flow that served it, QUEUE
+     -- one per queue stay, AGENT one of our phones. DIALING is what is left when nobody answered:
+     -- the number the call was ringing when it ended, with no duration of its own. An answered
+     -- call is never DIALING, even when nothing joined it afterwards — its journey is the leg it
+     -- was answered on, from answered to ended, which is bill_sec's window (#313). A bot that was
+     -- meant to take the call and never joined is not a BOT hop, because BOT means the journey
+     -- reached it (its leg answered, its time, or its hand-over; a bot leg dialled and never
+     -- answered is none of them): flow_id names what the call was placed for, and hangup_cause
+     -- how it ended. The hop of a leg follows one rule (journeyHop): an agent's or one of our
+     -- extensions' leg is AGENT, a leg facing a carrier TRUNK, and nothing on an INTERNAL call
+     -- faces a carrier. Whether a call was answered is its status, never its originator's own
+     -- answer: an agent's phone auto-answers on every call it places, so a click-to-dial whose
+     -- trunk leg never came up is NO_ANSWER and DIALING.
+     -- flow_id: the DID's flow. The bot stamps it on the caller's channel (aicc_flow_id) when it
+     -- starts the conversation, on every call, and writes it on the rows it writes itself; the AI
+     -- outbound originate stamps it on the customer leg from its first moment (#313). So a row the
+     -- human path writes names the flow after a hand-over, on an agent's call to a bot number,
+     -- and on a call whose bot session died with the process (Call.IsBotAbandoned) or whose
+     -- bridge to the bot never ran. Null where no flow was resolved: a call that reached no bot
+     -- number, a person's call to a bot number the bot never answered, rows from before.
      -- queue_id / queue_wait_sec: the first queue the caller joined and that stay's wait (join →
      -- bridge, or → leave if never bridged); owner decision on #283. A call that passed through
      -- several queues is one row counted once, under its first queue, and the reports read these
@@ -275,7 +296,7 @@ Key rule (both backends): `recordings/YYYY/MM/DD/<call_id>.wav` (UTC date of cal
 **M4.5 amendments — one CDR per conversation (live-verified with raw ESL captures):**
 
 - **Reidentify.** The caller's `CHANNEL_CREATE` fires *before* the dialplan runs, so the caller is always adopted under a provisional id; the minted `variable_aicc_call_id` only rides events from `CHANNEL_ANSWER` on. The coordinator therefore *reidentifies*: the first event that reveals a minted id on a provisionally-bound channel merges the provisional call into the minted one (creating it if this is the first sighting). Relying on the bridge event alone was a coin toss — chi's `CHANNEL_BRIDGE` names an arbitrary side first, and the loser produced one phantom CDR per AI call (8 rows for 3 real calls, found live in M4.5).
-- **CDR ownership rule.** The bot writes the CDR for calls it finished; the switch-side assembler writes for calls a person finished — including bot calls that were handed over, which are marked by the bot-share stamp. Concretely: `CallFinished` skips `InsertCDR` when the call has a bot leg (`Party.IsBotLeg`, stamped at adoption: outbound leg whose destination equals its `aicc_did`) and no bot share. Recording ingestion still runs either way. Known gap: if the bot process dies mid-call, that call's row is lost — accepted, noted here.
+- **CDR ownership rule.** The bot writes the CDR for calls it finished; the switch-side assembler writes for calls a person finished — including bot calls that were handed over, which are marked by the bot-share stamp (`aicc_bot_sec`, `BotShare.IsStamped`). Concretely: `CallFinished` skips `InsertCDR` only when the bot joined the call (`botJoined`: its leg answered, or it stamped a share) and did not hand it over, the call was not placed by one of our phones (`isAgentPlaced`), and its bot session did not die with the process (`Call.IsBotAbandoned`, set by recovery; this closed the gap first noted here, a row lost when the bot process died mid-call). Recording ingestion still runs either way. A bot leg that was dialled and never answered is not a writer: the bot's row comes from a session, which starts on the ACK of its 200 OK, so a customer who hung up before the bot answered, a late bridge refused 480 after its reservation was withdrawn, or an inbound call the bot refused (486 at capacity, a peer it drops) is the assembler's row; asking only whether a bot leg existed left those calls with no row at all (#313).
 - **Containment.** Reaching a terminal flow phase marks the call contained exactly like the `hangup` tool does (`markHangup` in `afterMove`); before this every farewell-concluded call reported uncontained.
 - **Harness marker.** Scripted verification/seed calls originate `{aicc_harness=true}loopback/<did>/public`. Loopback copies the variable to both halves, so the coordinator ignores only the `-a` half (pure scaffolding); the `-b` half plays the caller and is tracked normally. Seed calls that should survive to the flow's farewell need real media on the caller side — `&playback(local_stream://moh)`, not `&park()` (a silent caller trips the UAS's RTP-dead watchdog in ~5s).
 

@@ -882,6 +882,15 @@ func (s *Service) PlaceAI(ctx context.Context, req AIDialRequest) (Placement, er
 		// dialled *at* the DID, and this one is dialled at the customer.
 		"aicc_did":                     did.Number,
 		"origination_caller_id_number": did.Number,
+		// The flow the call is for, on the leg from its first moment, so the
+		// row of an answered call whose bridge to the bot never ran still names
+		// the conversation it was placed for — as the row of one whose
+		// originate never made a channel already does (placementFailureCDR).
+		// The bot stamps the same flow on the channel when it starts the
+		// conversation; a flow being known is not a bot having been there,
+		// which is why the journey asks whether the bot joined and not for
+		// this (#313).
+		"aicc_flow_id": did.FlowID.String(),
 		// Explicit and below the answer window; see Dial.
 		"originate_timeout": ringTimeoutVar(ring),
 	}

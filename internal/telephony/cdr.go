@@ -108,7 +108,7 @@ func (a *CDRAssembler) SetRecordingOffer(o RecordingOffer) { a.offer = o }
 // CallFinished receives the final snapshot; safe to set as Registry.OnCallFinished.
 func (a *CDRAssembler) CallFinished(snap Snapshot) {
 	go func() {
-		// The ledger follows the call. A call with a bot leg that was never
+		// The ledger follows the call. A call the bot answered and never
 		// handed to a person is the bot's story to write — its session holds
 		// the transcript, timings and containment this path cannot see. The
 		// bot-share stamp is what marks a handover, and only then does this
@@ -124,8 +124,23 @@ func (a *CDRAssembler) CallFinished(snap Snapshot) {
 		//
 		// One more owner: a bot whose session died with the process (a call
 		// recovery adopted and ended) has no one left to write the row.
+		//
+		// And a bot that never answered was never a writer at all. The switch
+		// dials a bot leg before the bot has said anything, and a leg dialled
+		// is not a session: the bot answers (200 OK) only once it has admitted
+		// the call, and the conversation that writes the row starts on the
+		// ACK. A customer who hangs up between an AI outbound call's
+		// uuid_transfer and that answer, a bridge the switch makes after its
+		// reservation was withdrawn (refused 480), an inbound call refused at
+		// capacity (486) or dropped by the peer list, then sent to the
+		// fallback queue or told the call cannot be completed: asked "was a bot
+		// leg dialled", each of these left the row to a bot that never existed,
+		// and the call reached the ledger from neither side (#313). The test is
+		// the one the journey and the status ask (botJoined), so a row written
+		// here because the bot was not there says so, and a row it leaves to
+		// the bot is one the bot's session writes.
 		originator, _ := split(snap)
-		if !hasBotLeg(snap) || snap.Bot.HandedOver() || isAgentPlaced(originator) || snap.IsBotAbandoned {
+		if !botJoined(snap, snap.Bot.Sec) || snap.Bot.HandedOver() || isAgentPlaced(originator) || snap.IsBotAbandoned {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := a.ledger.InsertCDR(ctx, a.assemble(ctx, snap)); err != nil {
 				a.log.Error("could not write the cdr", "callId", snap.CallID, "error", err)
@@ -156,17 +171,6 @@ func (a *CDRAssembler) CallFinished(snap Snapshot) {
 // (#105).
 func isAgentPlaced(originator *PartySnapshot) bool {
 	return originator != nil && originator.ExtensionNumber != ""
-}
-
-// hasBotLeg reports whether the switch dialed this call towards the AI
-// gateway at some point.
-func hasBotLeg(snap Snapshot) bool {
-	for _, p := range snap.Parties {
-		if p.IsBotLeg {
-			return true
-		}
-	}
-	return false
 }
 
 // ingestRecording books the call's audio into the ledger, if any was made.
@@ -406,7 +410,7 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 	// Any stay will do: a caller who joined a queue at any point was waiting
 	// for a person from then on.
 	soughtAPerson := len(agentLegs) > 0 || len(stays) > 0
-	metBot := botLeg(snap) != nil || snap.Bot.Sec > 0
+	metBot := botJoined(snap, cdr.BotSec)
 
 	switch {
 	case !firstBridge.IsZero():
@@ -452,6 +456,12 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 			placerIsAHop(dialled, metBot, handedOver), cdr.EndedAt)
 	} else {
 		cdr.Legs = buildLegs(snap, stays, originator, agentLegs, cdr.BotSec, false, cdr.EndedAt)
+	}
+	if cdr.Legs == nil && originator != nil {
+		// Whether anybody answered is the status's answer, not the
+		// originator's: an agent's phone auto-answers in front of them on
+		// every call it places, whether or not the far end ever comes up.
+		cdr.Legs = unreachedJourney(snap, originator, cdr.Status == store.CDRStatusAnswered, cdr.EndedAt)
 	}
 	cdr.UnbackedClaims = snap.Bot.UnbackedClaims
 	if snap.Bot.Summary != "" {
@@ -518,6 +528,24 @@ func botLeg(snap Snapshot) *PartySnapshot {
 		}
 	}
 	return nil
+}
+
+// botJoined reports whether the bot was on the call: its leg answered, it has
+// time on the call, or it handed the call on, which it can only do from a
+// conversation. botSec is the reconciled figure (assemble).
+//
+// A bot leg the switch dialled is not enough. On an AI outbound call the
+// customer can hang up between the uuid_transfer that creates the bot's leg
+// and the bot's answer, and on an agent's call to a DID the bot can refuse it
+// or the agent can give up first; read as "the bot was here", the first came
+// out as a 0 s BOT hop with no trunk and the second as an answered call. Nor
+// is a known flow: the outbound originator stamps the DID's flow on the
+// customer leg from its first moment (#313).
+func botJoined(snap Snapshot, botSec int) bool {
+	if bot := botLeg(snap); bot != nil && bot.AnsweredAt != nil {
+		return true
+	}
+	return botSec > 0 || snap.Bot.HandedOver()
 }
 
 // checkDurations says so when the row's own numbers cannot all be true.
@@ -1034,10 +1062,15 @@ func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, par
 		// The call is theirs from its first moment: they placed it.
 		hops = append(hops, hop{placerLeg(originator, end), snap.CreatedAt})
 	}
-	if botSec > 0 || snap.Bot.FlowID != nil {
+	if botJoined(snap, botSec) {
 		// Labelled with the flow, as the bot labels the row it writes itself.
 		// Unlabelled, the same flow read one way on a contained call and
 		// another on a transferred one.
+		//
+		// Only a bot that joined is a hop (botJoined): neither the flow the
+		// call was placed for nor a bot leg nobody answered says the journey
+		// reached it, and either would give an answered call that never did a
+		// BOT hop of 0 s and no trunk.
 		joined := snap.CreatedAt
 		if bot := botLeg(snap); bot != nil {
 			joined = joinedAt(snap, bot)
@@ -1052,21 +1085,7 @@ func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, par
 		hops = append(hops, hop{leg, stay.JoinedAt})
 	}
 	for _, agent := range parties {
-		// A leg belonging to an agent is theirs; one the agent dialled out
-		// of the building went through a carrier.
-		//
-		// A leg at one of our own phones is an agent's leg whether or not
-		// anybody is signed in there: it never left the building (#284). The
-		// extension is what the leg itself said, so a carrier caller whose
-		// number merely resembles one stays a trunk.
-		kind, label := "AGENT", agent.Number
-		switch {
-		case agent.AgentID != nil:
-		case agent.ExtensionNumber != "":
-			label = agent.ExtensionNumber
-		case snap.CallType == events.CallTypeOutbound:
-			kind = "TRUNK"
-		}
+		kind, label := journeyHop(snap, agent)
 		leg := store.Leg{Kind: kind, Label: label}
 		if agent.AnsweredAt != nil {
 			end := snap.CreatedAt
@@ -1089,10 +1108,90 @@ func buildLegs(snap Snapshot, stays []QueueFacts, originator *PartySnapshot, par
 	for _, h := range hops {
 		legs = append(legs, h.leg)
 	}
-	if legs == nil && originator != nil {
-		legs = append(legs, store.Leg{Kind: "DIALING", Label: originator.Number})
-	}
 	return legs
+}
+
+// journeyHop is the kind and label leg p takes in the journey: AGENT for one of
+// our own phones, TRUNK for a leg facing a carrier. Which legs face one depends
+// on the leg's role.
+//
+// A leg the call reached out to is an agent's when it belongs to one, and a
+// leg at one of our own phones is an agent's leg whether or not anybody is
+// signed in there: it never left the building (#284). The extension is what
+// the leg itself said, so a carrier caller whose number merely resembles one
+// stays a trunk. Any other leg an outbound call dialled went through a
+// carrier.
+//
+// The originator faces a carrier on any call that is not between our own
+// extensions — the carrier's caller on an inbound call, the customer leg this
+// platform created on an AI outbound one — unless one of our phones placed it
+// (isAgentPlaced), when it is labelled as placerLeg labels it. An agent id on
+// the originator does not make it ours: a carrier caller whose number matches
+// a signed-in agent's extension carries their id for the screen pop (#105). On
+// an internal call nothing faces a carrier, so a leg the dialplan spawned is
+// not a trunk either (#313).
+func journeyHop(snap Snapshot, p *PartySnapshot) (kind, label string) {
+	if p.Role == RoleOriginator {
+		switch {
+		case isAgentPlaced(p), snap.CallType == events.CallTypeInternal:
+			return "AGENT", p.Number
+		default:
+			return "TRUNK", p.Number
+		}
+	}
+	switch {
+	case p.AgentID != nil:
+		return "AGENT", p.Number
+	case p.ExtensionNumber != "":
+		return "AGENT", p.ExtensionNumber
+	case snap.CallType == events.CallTypeOutbound:
+		return "TRUNK", p.Number
+	default:
+		return "AGENT", p.Number
+	}
+}
+
+// unreachedJourney is the journey of a call buildLegs could draw no hop for:
+// nobody on this side joined it.
+//
+// DIALING is the number being rung and nobody answering. It is not a state an
+// answered call can be in, and writing it on one produced a row that
+// contradicted the answered_at and bill_sec beside it: an AI outbound call the
+// customer answered, whose bridge to the bot never ran, read as still dialling
+// the number it had been billed thirty seconds for (2026-10-22). answered is
+// the row's status, never the originator's own answer: an agent's phone
+// auto-answers in front of them, so a click-to-dial whose trunk leg never came
+// up (a gateway down, the agent hanging up first) was answered on nobody's
+// side, and is NO_ANSWER and DIALING both.
+//
+// An answered call's one hop is the leg it was answered on (journeyHop), for
+// as long as it lasted: the trunk facing the carrier — the caller of an
+// inbound call, the customer leg of a call this platform placed — whose span
+// is the window bill_sec measures, or, on a call between our own extensions,
+// the leg it began on, which nobody bills. A call one of our phones placed
+// is answered only when it reached somebody, and then has hops of its own; if
+// one ever arrives here it is the placer's hop, counted from their bridges as
+// everywhere else (placerLeg).
+//
+// A bot that was meant to take the call and never joined is not a hop, because
+// it did not happen: BOT means the journey reached the bot (botJoined), and the
+// reader is told what was intended instead by flow_id, which the outbound
+// originator stamps on the customer leg from its first moment, and why the call
+// ended by hangupCause (BOT_BRIDGE_UNCONFIRMED, OVERFLOW). A 0 s BOT hop would
+// have said the bot was there for no time at all (#313).
+func unreachedJourney(snap Snapshot, originator *PartySnapshot, answered bool, end time.Time) []store.Leg {
+	if !answered {
+		return []store.Leg{{Kind: "DIALING", Label: originator.Number}}
+	}
+	if isAgentPlaced(originator) {
+		return []store.Leg{placerLeg(originator, end)}
+	}
+	kind, label := journeyHop(snap, originator)
+	leg := store.Leg{Kind: kind, Label: label}
+	if originator.AnsweredAt != nil {
+		leg.DurationSec = max(0, int(end.Sub(*originator.AnsweredAt).Seconds()))
+	}
+	return []store.Leg{leg}
 }
 
 // causeUserBusy is the switch's release cause for a callee whose line is in

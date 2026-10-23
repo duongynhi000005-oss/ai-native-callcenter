@@ -136,7 +136,7 @@ func TestAProvisionalCallCollapsesIntoItsMintedIdentity(t *testing.T) {
 	if len(snap.Parties) != 2 {
 		t.Fatalf("the finished call has %d parties, want the caller and the bot leg", len(snap.Parties))
 	}
-	if !hasBotLeg(snap) {
+	if botLeg(snap) == nil {
 		t.Error("no party is marked as the bot leg")
 	}
 	if o := snap.Parties[0]; o.Number != "13800138000" && snap.Parties[1].Number != "13800138000" {

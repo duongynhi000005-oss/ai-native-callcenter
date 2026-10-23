@@ -2450,6 +2450,63 @@ func TestTheBotShareOfAnAgentsCallNamesTheFlow(t *testing.T) {
 	}
 }
 
+// The flow goes onto the caller's channel as the conversation begins, on every
+// call the bot answers, not only at a hand-over: the human path also writes
+// the row of a call whose bot session died with the process, and that row named
+// no flow though the bot had run one (#313). An agent's call gets the whole
+// share, as before; none of it may read as a hand-over.
+func TestTheFlowIsOnTheCallersChannelFromTheStart(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		callType         callType
+		placedToCustomer bool
+		wantWholeShare   bool
+	}{
+		{"an inbound caller", callTypeInbound, false, false},
+		{"an AI outbound customer", callTypeOutbound, true, false},
+		{"an agent's call to a bot number", callTypeOutbound, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sw := &fakeSwitch{}
+			facts := testFacts()
+			facts.callType, facts.isPlacedToCustomer = tc.callType, tc.placedToCustomer
+			actions := &callActions{
+				orchestrator:  testOrchestrator(t, sw),
+				log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+				callerChannel: "caller-channel-1",
+				facts:         facts,
+			}
+
+			actions.stampAtStart()
+
+			if sw.variable("aicc_flow_id") != facts.flowID.String() || sw.variable("aicc_flow_slug") != "novanet_support" {
+				t.Errorf("stamped = %v, want the flow's id and slug", sw.variables)
+			}
+			// The DID and the language are the dialplan's to set on a caller's
+			// channel, and the originate's on a customer's.
+			if got, want := sw.variable("aicc_did") != "", tc.wantWholeShare; got != want {
+				t.Errorf("aicc_did stamped = %v, want %v (stamped = %v)", got, want, sw.variables)
+			}
+			if got := sw.variable("aicc_bot_sec"); got != "" {
+				t.Errorf("aicc_bot_sec = %q: a stamp at the start must not read as a handover", got)
+			}
+		})
+	}
+
+	t.Run("a call with no caller channel", func(t *testing.T) {
+		sw := &fakeSwitch{}
+		actions := &callActions{
+			orchestrator: testOrchestrator(t, sw),
+			log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+			facts:        testFacts(),
+		}
+		actions.stampAtStart()
+		if len(sw.variables) != 0 {
+			t.Errorf("stamped %v with no channel to stamp", sw.variables)
+		}
+	})
+}
+
 //
 // A tool result that changes what the phase's instruction says.
 //
