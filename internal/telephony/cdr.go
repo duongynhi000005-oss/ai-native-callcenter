@@ -108,7 +108,7 @@ func (a *CDRAssembler) SetRecordingOffer(o RecordingOffer) { a.offer = o }
 // CallFinished receives the final snapshot; safe to set as Registry.OnCallFinished.
 func (a *CDRAssembler) CallFinished(snap Snapshot) {
 	go func() {
-		// The ledger follows the call. A call with a bot leg that was never
+		// The ledger follows the call. A call the bot answered and never
 		// handed to a person is the bot's story to write — its session holds
 		// the transcript, timings and containment this path cannot see. The
 		// bot-share stamp is what marks a handover, and only then does this
@@ -124,8 +124,23 @@ func (a *CDRAssembler) CallFinished(snap Snapshot) {
 		//
 		// One more owner: a bot whose session died with the process (a call
 		// recovery adopted and ended) has no one left to write the row.
+		//
+		// And a bot that never answered was never a writer at all. The switch
+		// dials a bot leg before the bot has said anything, and a leg dialled
+		// is not a session: the bot answers (200 OK) only once it has admitted
+		// the call, and the conversation that writes the row starts on the
+		// ACK. A customer who hangs up between an AI outbound call's
+		// uuid_transfer and that answer, a bridge the switch makes after its
+		// reservation was withdrawn (refused 480), an inbound call refused at
+		// capacity (486) or dropped by the peer list, then sent to the
+		// fallback queue or told the call cannot be completed: asked "was a bot
+		// leg dialled", each of these left the row to a bot that never existed,
+		// and the call reached the ledger from neither side (#313). The test is
+		// the one the journey and the status ask (botJoined), so a row written
+		// here because the bot was not there says so, and a row it leaves to
+		// the bot is one the bot's session writes.
 		originator, _ := split(snap)
-		if !hasBotLeg(snap) || snap.Bot.HandedOver() || isAgentPlaced(originator) || snap.IsBotAbandoned {
+		if !botJoined(snap, snap.Bot.Sec) || snap.Bot.HandedOver() || isAgentPlaced(originator) || snap.IsBotAbandoned {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := a.ledger.InsertCDR(ctx, a.assemble(ctx, snap)); err != nil {
 				a.log.Error("could not write the cdr", "callId", snap.CallID, "error", err)
@@ -156,17 +171,6 @@ func (a *CDRAssembler) CallFinished(snap Snapshot) {
 // (#105).
 func isAgentPlaced(originator *PartySnapshot) bool {
 	return originator != nil && originator.ExtensionNumber != ""
-}
-
-// hasBotLeg reports whether the switch dialed this call towards the AI
-// gateway at some point.
-func hasBotLeg(snap Snapshot) bool {
-	for _, p := range snap.Parties {
-		if p.IsBotLeg {
-			return true
-		}
-	}
-	return false
 }
 
 // ingestRecording books the call's audio into the ledger, if any was made.

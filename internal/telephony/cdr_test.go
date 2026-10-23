@@ -5,6 +5,7 @@ package telephony
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1907,6 +1908,224 @@ func awaitCDRs(t *testing.T, ledger *memoryLedger, n int) {
 	defer ledger.mu.Unlock()
 	if len(ledger.cdrs) != n {
 		t.Fatalf("wrote %d cdrs, want %d", len(ledger.cdrs), n)
+	}
+}
+
+// finishedStorage tells the test that CallFinished's goroutine has decided:
+// recording ingestion runs after the row is written or declined, so once
+// Ingest is reached the ledger holds every row this call will get. No file
+// is found, so nothing else happens.
+type finishedStorage struct{ reached chan struct{} }
+
+func (finishedStorage) Backend() string { return "FS" }
+func (finishedStorage) Bucket() string  { return "" }
+func (s finishedStorage) Ingest(context.Context, string) (int64, error) {
+	close(s.reached)
+	return 0, errors.New("no file")
+}
+
+// finishCall hands the snapshot to CallFinished and returns the rows this path
+// wrote for it, once its goroutine has finished deciding. No sleep: the
+// storage's Ingest is the goroutine's own last step before returning.
+func finishCall(t *testing.T, snap Snapshot) []store.CDR {
+	t.Helper()
+	ledger := &memoryLedger{}
+	storage := finishedStorage{reached: make(chan struct{})}
+	a := NewCDRAssembler(ledger, staticQueues{"support": uuid.New()}, storage,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.flushWait = 0
+	a.CallFinished(snap)
+	select {
+	case <-storage.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CallFinished never finished deciding")
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	return slices.Clone(ledger.cdrs)
+}
+
+// A bot leg the switch dialled and the bot never answered is not a bot
+// session, and only a session writes the bot's row (internal/aicall: the
+// recorder's finish is deferred inside a conversation the ACK starts). Left to
+// the bot because a bot leg existed, each of these calls reached the ledger
+// from neither side (#313).
+func TestABotThatNeverAnsweredLeavesTheRowToThisPath(t *testing.T) {
+	t.Parallel()
+	flow := uuid.New()
+	agentID := uuid.New()
+
+	// An AI outbound call: the customer's leg is the originator, answered on
+	// the trunk, with the DID's flow stamped on it when it was placed.
+	outbound := func(endedAt int, cause string, bot PartySnapshot) Snapshot {
+		return Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeOutbound,
+			CreatedAt: at(0), EndedAt: atPtr(endedAt),
+			Bot: BotShare{DID: "95099", FlowID: &flow},
+			Parties: []PartySnapshot{{
+				Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+				CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(endedAt),
+				ReleaseCause: cause,
+			}, bot},
+		}
+	}
+	// An inbound call: the dialplan answers the carrier's caller before it
+	// bridges to the bot, and exports the DID to the bot's leg.
+	refusedInbound := func(endedAt int, cause string, more ...PartySnapshot) Snapshot {
+		return Snapshot{
+			CallID: uuid.New(), CallType: events.CallTypeInbound,
+			CreatedAt: at(0), EndedAt: atPtr(endedAt),
+			Bot: BotShare{DID: "95001"},
+			Parties: append([]PartySnapshot{{
+				Role: RoleOriginator, Number: "13800138000", ChannelID: "caller",
+				CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(endedAt),
+				ReleaseCause: cause,
+			}, {
+				// 486 Busy Here at capacity; a peer the list drops gets no
+				// answer at all and times out, which is the same leg here.
+				Role: RoleTarget, Number: "95001", ChannelID: "bot", IsBotLeg: true,
+				CreatedAt: at(0), ReleasedAt: atPtr(0), ReleaseCause: "USER_BUSY",
+			}}, more...),
+		}
+	}
+	withQueue := func(s Snapshot) Snapshot {
+		s.Queue = QueueFacts{Name: "support", JoinedAt: at(1), BridgedAt: at(6)}
+		return s
+	}
+
+	for _, tc := range []struct {
+		name  string
+		snap  Snapshot
+		legs  []string
+		agent *uuid.UUID
+	}{
+		{
+			// (a) The uuid_transfer dialled the bot's leg and the customer
+			// hung up before the bot's 200 OK; the switch CANCELled it.
+			name: "the customer hung up before the bot answered",
+			snap: outbound(12, "NORMAL_CLEARING", PartySnapshot{
+				Role: RoleTarget, Number: "95099", ChannelID: "bot", IsBotLeg: true,
+				CreatedAt: at(11), ReleasedAt: atPtr(12), ReleaseCause: "ORIGINATOR_CANCEL",
+			}),
+			legs: []string{"TRUNK:18688886666:12"},
+		},
+		{
+			// (b) An ESL stall held the bridge past its window; the platform
+			// withdrew the reservation and is ending the customer's leg, and
+			// the transfer the switch runs late is refused 480 by the bot.
+			name: "a late bridge the bot refused once its reservation was withdrawn",
+			snap: outbound(30, "BOT_BRIDGE_UNCONFIRMED", PartySnapshot{
+				Role: RoleTarget, Number: "95099", ChannelID: "bot", IsBotLeg: true,
+				CreatedAt: at(30), ReleasedAt: atPtr(30), ReleaseCause: "NO_USER_RESPONSE",
+			}),
+			legs: []string{"TRUNK:18688886666:30"},
+		},
+		{
+			// The bot refused an inbound call and the number has no fallback
+			// queue: the caller is told the call cannot be completed.
+			name: "an inbound call the bot refused, with no fallback queue",
+			snap: refusedInbound(4, "NORMAL_TEMPORARY_FAILURE"),
+			legs: []string{"TRUNK:13800138000:4"},
+		},
+		{
+			// The same refusal on a number with a fallback queue: the caller
+			// reached a person, and that call was missing from the ledger.
+			name: "an inbound call the bot refused, answered from the fallback queue",
+			snap: withQueue(refusedInbound(60, "NORMAL_CLEARING", PartySnapshot{
+				Role: RoleTarget, Number: "1007", AgentID: &agentID, ChannelID: "agent",
+				CreatedAt: at(2), AnsweredAt: atPtr(6), ReleasedAt: atPtr(60),
+				Bridges: []BridgeSpan{{OtherChannelID: "caller", StartedAt: at(6), EndedAt: at(60)}},
+			})),
+			legs:  []string{"QUEUE:support:5", "AGENT:1007:54"},
+			agent: &agentID,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := finishCall(t, tc.snap)
+			if len(rows) != 1 {
+				t.Fatalf("wrote %d rows, want exactly one: no bot session exists to write it", len(rows))
+			}
+			got := rows[0]
+			if got.CallID != tc.snap.CallID {
+				t.Errorf("wrote call %s, want %s", got.CallID, tc.snap.CallID)
+			}
+			if got.Status != store.CDRStatusAnswered {
+				t.Errorf("status = %s, want ANSWERED: the caller was answered", got.Status)
+			}
+			if j := journey(got.Legs); !slices.Equal(j, tc.legs) {
+				t.Errorf("legs = %v, want %v", j, tc.legs)
+			}
+			if got.BotSec != 0 || got.IsContained {
+				t.Errorf("botSec=%d contained=%v, want 0 and false: the bot never answered",
+					got.BotSec, got.IsContained)
+			}
+			if tc.agent != nil && (got.PrimaryAgentID == nil || *got.PrimaryAgentID != *tc.agent) {
+				t.Errorf("primary agent = %v, want the agent who answered", got.PrimaryAgentID)
+			}
+		})
+	}
+}
+
+// The controls: a bot that answered has a session, and that session writes the
+// row unless it handed the call to a person. Two writers for one call race for
+// its primary key, and the one that ends later wins (store.InsertCDR).
+func TestABotThatAnsweredStillDecidesWhoWritesTheRow(t *testing.T) {
+	t.Parallel()
+	flow := uuid.New()
+	answeredBot := func(number string) PartySnapshot {
+		return PartySnapshot{
+			Role: RoleTarget, Number: number, ChannelID: "bot", IsBotLeg: true,
+			CreatedAt: at(1), AnsweredAt: atPtr(1), ReleasedAt: atPtr(40),
+			Bridges: []BridgeSpan{{OtherChannelID: "customer", StartedAt: at(1), EndedAt: at(40)}},
+		}
+	}
+	keptOutbound := Snapshot{
+		CallID: uuid.New(), CallType: events.CallTypeOutbound,
+		CreatedAt: at(0), EndedAt: atPtr(40),
+		Bot: BotShare{DID: "95099", FlowID: &flow, FlowSlug: "lead_qualification"},
+		Parties: []PartySnapshot{{
+			Role: RoleOriginator, Number: "18688886666", ChannelID: "customer",
+			CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(40),
+			ReleaseCause: "NORMAL_CLEARING",
+		}, answeredBot("95099")},
+	}
+	keptInbound := Snapshot{
+		CallID: uuid.New(), CallType: events.CallTypeInbound,
+		CreatedAt: at(0), EndedAt: atPtr(40),
+		Bot: BotShare{DID: "95001", FlowID: &flow, FlowSlug: "novanet_support"},
+		Parties: []PartySnapshot{{
+			Role: RoleOriginator, Number: "13800138000", ChannelID: "customer",
+			CreatedAt: at(0), AnsweredAt: atPtr(0), ReleasedAt: atPtr(40),
+			ReleaseCause: "NORMAL_CLEARING",
+		}, answeredBot("95001")},
+	}
+	handedOver := keptOutbound
+	handedOver.CallID = uuid.New()
+	handedOver.Bot = BotShare{Sec: 39, DID: "95099", FlowID: &flow, FlowSlug: "lead_qualification",
+		IsStamped: true}
+
+	for _, tc := range []struct {
+		name string
+		snap Snapshot
+		rows int
+	}{
+		{"an AI outbound call the bot kept is the bot's", keptOutbound, 0},
+		{"an inbound call the bot kept is the bot's", keptInbound, 0},
+		{"a call the bot handed over is this path's", handedOver, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := finishCall(t, tc.snap)
+			if len(rows) != tc.rows {
+				t.Fatalf("wrote %d rows, want %d", len(rows), tc.rows)
+			}
+			if tc.rows == 1 {
+				if j := journey(rows[0].Legs); len(j) == 0 || !strings.HasPrefix(j[0], "BOT:") {
+					t.Errorf("legs = %v, want the bot first: it answered", j)
+				}
+			}
+		})
 	}
 }
 

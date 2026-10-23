@@ -203,11 +203,12 @@ func TestWhoWritesACallIsDecidedByTheSwitchNotByTheCallersNumber(t *testing.T) {
 			snap := finished.all()[0]
 			time.Sleep(200 * time.Millisecond) // a wrong extra write needs time to land
 
-			// The bot ledger (internal/aicall/ledger.go) declines a call that
-			// was handed over, and one the dialplan typed as an agent's own
-			// (OUTBOUND or INTERNAL, not placed to a customer). It writes the
-			// rest. Both read the same two facts off this snapshot.
-			botLedgerWrites := hasBotLeg(snap) && !snap.Bot.HandedOver() &&
+			// The bot ledger (internal/aicall/ledger.go) writes only from a
+			// session, which needs a bot leg that answered; it declines a call
+			// that was handed over, and one the dialplan typed as an agent's
+			// own (OUTBOUND or INTERNAL, not placed to a customer). It writes
+			// the rest. Both read the same facts off this snapshot.
+			botLedgerWrites := botJoined(snap, snap.Bot.Sec) && !snap.Bot.HandedOver() &&
 				snap.CallType == events.CallTypeInbound
 			ledger.mu.Lock()
 			rows := slices.Clone(ledger.cdrs)
