@@ -109,3 +109,50 @@ func TestARefusedStreamIsNotAlsoReportedAsNeverConnected(t *testing.T) {
 	waitUntil(t, func() bool { return !s.isExpecting(token) },
 		"the refusal to disarm the watchdog")
 }
+
+// hasSessionOn reports whether a stream is registered for the call's channel.
+// A stream's session is dropped only after its end handler has returned, so
+// waiting for this to go false also waits for the tap to have been told.
+func (s *Server) hasSessionOn(callID uuid.UUID, channelID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[callID.String()+"|"+channelID] != nil
+}
+
+// A refusal can beat the attach's `+OK` just as an acceptance can (#287): the
+// module dials back while `start` is still in flight and is turned away — here
+// for want of a transcript actor. It did dial back, so the Expect that follows
+// must not arm a watchdog that reports it twelve seconds later as a stream
+// that never connected.
+func TestAStreamRefusedBeforeItsExpectationIsNotReportedMissing(t *testing.T) {
+	t.Parallel()
+	s := testServer(t) // no transcript actor for any call
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	claim := Claim{
+		CallID: uuid.New(), PartyID: uuid.New(), AgentID: uuid.New(),
+		Channel: "agent-chan", Expires: time.Now().Add(time.Minute),
+	}
+	token := s.Token(claim)
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+s.Addr()+StreamPath+"?t="+url.QueryEscape(token), nil)
+	if err != nil {
+		t.Fatalf("the tap could not reach the ingest at all: %v", err)
+	}
+	defer conn.Close()
+	// The ingest closes the socket only after it has recorded the refusal, so
+	// the read returning is the moment the refusal is on the books.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("a stream with no transcript actor was not refused; the rest of this proves nothing")
+	}
+
+	s.Expect(token, claim)
+	if s.isExpecting(token) {
+		t.Error("Expect armed a watchdog for a stream that had already dialled back and been refused")
+	}
+}

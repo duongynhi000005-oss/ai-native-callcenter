@@ -141,6 +141,13 @@ func tapRigFor(t *testing.T) *tapRig {
 	return &tapRig{tap: tap, sw: sw, srv: srv, callID: callID, pub: pub}
 }
 
+// tokenOn is the token the channel's live attachment handed the switch.
+func (t *Tap) tokenOn(channelID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.tokens[t.current[channelID]]
+}
+
 func tapFixture(t *testing.T) (*Tap, *fakeSwitch, uuid.UUID) {
 	t.Helper()
 	rig := tapRigFor(t)
@@ -419,7 +426,7 @@ func TestAStreamTheModuleEndedIsNotStoppedAgain(t *testing.T) {
 	tap.Attach(callID, nil, nil, "chan-a", "en")
 
 	// The module closes the stream because the channel went away.
-	tap.streamEnded(callID, "chan-a")
+	tap.streamEnded("chan-a", tap.tokenOn("chan-a"))
 
 	// Both teardown paths now find nothing to do.
 	tap.Detach("chan-a")
@@ -437,10 +444,11 @@ func TestAStreamEndingCannotRetireALaterCallsTap(t *testing.T) {
 	tap, sw, absorbed := tapFixture(t)
 	kept := uuid.New()
 	tap.Attach(absorbed, nil, nil, "chan-a", "en")
+	first := tap.tokenOn("chan-a")
 	tap.Attach(kept, nil, nil, "chan-a", "en") // the leg was folded into another call
 
 	// The first stream's socket closes, late.
-	tap.streamEnded(absorbed, "chan-a")
+	tap.streamEnded("chan-a", first)
 
 	// The live tap is untouched.
 	if err := tap.Pause("chan-a"); err != nil {
@@ -709,5 +717,145 @@ func TestADetachWhileTheAttachIsInFlightArmsNothing(t *testing.T) {
 	rig.srv.expireExpectations()
 	if rig.pub.has("STREAM_NEVER_CONNECTED") {
 		t.Errorf("a retired attachment was reported as never arriving: %v", rig.pub.all())
+	}
+}
+
+// A graceful close is matched by the stream's token, not by its call and
+// channel. The leg is detached and re-attached under the same call while the
+// first stream is still open; that stream's close, arriving now, must not
+// retire the attachment that replaced it, or the hangup that follows sends no
+// stop and the second stream runs with nothing owning it.
+func TestALateCloseFromAReplacedStreamDoesNotForgetItsSuccessor(t *testing.T) {
+	t.Parallel()
+	rig := tapRigFor(t)
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+	conn, _, err := websocket.DefaultDialer.Dial(rig.sw.dialURL("chan-a"), nil)
+	if err != nil {
+		t.Fatalf("the first stream could not connect: %v", err)
+	}
+	defer conn.Close()
+	waitUntil(t, func() bool { return !rig.srv.isExpectingAny() },
+		"the first stream to arrive")
+
+	rig.tap.Detach("chan-a")
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+	second := rig.tap.tokenOn("chan-a")
+	if second == "" {
+		t.Fatal("the re-attach left no attachment; the rest of this proves nothing")
+	}
+
+	// The first stream's module closes it only now, after its successor exists.
+	_ = conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	waitUntil(t, func() bool { return !rig.srv.hasSessionOn(rig.callID, "chan-a") },
+		"the first stream's close to reach the tap")
+
+	if got := rig.tap.tokenOn("chan-a"); got != second {
+		t.Error("the replaced stream's close forgot the attachment that replaced it")
+	}
+	rig.tap.Detach("chan-a")
+	if _, stopped, _, _ := rig.sw.snapshot(); len(stopped) != 2 {
+		t.Errorf("stopped %v, want the first stream's stop and then its successor's", stopped)
+	}
+}
+
+// A re-attach of the same leg replaces an attachment whose grace gave up. A
+// timed-out start is kept as an attachment (#312); without this, a start the
+// switch never ran pins the channel, every later bridge of the leg finds it
+// already tapped, and the call is never transcribed again.
+func TestAReattachReplacesAnAttachThatNeverConnected(t *testing.T) {
+	t.Parallel()
+	rig := tapRigFor(t)
+	rig.sw.mu.Lock()
+	rig.sw.startErr = fmt.Errorf("uuid_audio_stream: %w", esl.ErrTimeout)
+	rig.sw.mu.Unlock()
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+	first := rig.sw.dialURL("chan-a")
+
+	rig.srv.expireExpectations()
+	if !rig.pub.has("STREAM_NEVER_CONNECTED") {
+		t.Fatalf("states = %v, want the grace to have given up; the rest of this proves nothing",
+			rig.pub.all())
+	}
+
+	// The leg is bridged again, and this time the switch answers.
+	rig.sw.mu.Lock()
+	rig.sw.startErr = nil
+	rig.sw.mu.Unlock()
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+
+	started, stopped, _, _ := rig.sw.snapshot()
+	if len(started) != 1 {
+		t.Fatalf("started %v, want the re-attach sent to the switch", started)
+	}
+	if len(stopped) != 1 {
+		t.Errorf("stopped %v, want the given-up attachment stopped before its replacement", stopped)
+	}
+
+	// The given-up start, if the switch runs it after all, is refused.
+	if conn, _, err := websocket.DefaultDialer.Dial(first, nil); err == nil {
+		conn.Close()
+		t.Error("the replaced attachment's late stream was accepted over its successor")
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(rig.sw.dialURL("chan-a"), nil)
+	if err != nil {
+		t.Fatalf("the re-attach's own stream could not connect: %v", err)
+	}
+	defer conn.Close()
+	waitUntil(t, func() bool { return !rig.srv.isExpectingAny() },
+		"the re-attach's stream to disarm its watchdog")
+}
+
+// Giving up is a report, not a retirement. With no re-attach, the late stream
+// of a timed-out start is still owned: it is let in, it moves the panel from
+// ERROR to LIVE, the next detach stops it, and once it is here a re-attach of
+// the same leg leaves it alone.
+func TestALateStreamAfterTheGraceGaveUpIsStillOwned(t *testing.T) {
+	t.Parallel()
+	rig := tapRigFor(t)
+	rig.sw.mu.Lock()
+	rig.sw.startErr = fmt.Errorf("uuid_audio_stream: %w", esl.ErrTimeout)
+	rig.sw.mu.Unlock()
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+	token := rig.tap.tokenOn("chan-a")
+	rig.srv.expireExpectations()
+
+	conn, _, err := websocket.DefaultDialer.Dial(rig.sw.dialURL("chan-a"), nil)
+	if err != nil {
+		t.Fatalf("the late stream was refused after the grace gave up: %v", err)
+	}
+	defer conn.Close()
+	waitUntil(t, func() bool { return rig.srv.hasSessionOn(rig.callID, "chan-a") },
+		"the late stream to arrive")
+	waitUntil(t, func() bool { return rig.pub.has("LIVE") }, "the late stream to go live")
+	states := rig.pub.all()
+	errAt, liveAt := -1, -1
+	for i, st := range states {
+		if strings.Contains(st, "STREAM_NEVER_CONNECTED") && errAt < 0 {
+			errAt = i
+		}
+		if strings.HasPrefix(st, "LIVE") {
+			liveAt = i
+		}
+	}
+	if errAt < 0 || liveAt < errAt {
+		t.Errorf("states = %v, want ERROR and then LIVE", states)
+	}
+	if rig.srv.hasGivenUp(token) {
+		t.Error("a stream that arrived is still marked as given up, so a re-attach would replace it")
+	}
+
+	rig.sw.mu.Lock()
+	rig.sw.startErr = nil
+	rig.sw.mu.Unlock()
+	rig.tap.Attach(rig.callID, nil, nil, "chan-a", "en")
+	if started, stopped, _, _ := rig.sw.snapshot(); len(started) != 0 || len(stopped) != 0 {
+		t.Errorf("started %v stopped %v, want a re-attach to leave the live stream alone",
+			started, stopped)
+	}
+
+	rig.tap.Detach("chan-a")
+	if _, stopped, _, _ := rig.sw.snapshot(); len(stopped) != 1 {
+		t.Errorf("stopped %v, want the late stream stopped by the detach", stopped)
 	}
 }

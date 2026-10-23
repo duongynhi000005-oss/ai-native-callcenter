@@ -5,9 +5,11 @@ package streamin
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -368,8 +370,8 @@ func TestAConnectedStreamIsNotReportedMissing(t *testing.T) {
 	// The stream arrives.
 	s.mu.Lock()
 	s.sessions[key] = &session{}
+	s.arrivedLocked(token)
 	s.mu.Unlock()
-	s.arrived(token)
 	s.expireExpectations()
 
 	if pub.has("STREAM_NEVER_CONNECTED") {
@@ -435,6 +437,78 @@ func TestAStreamThatArrivesBeforeItsExpectationIsNotReportedMissing(t *testing.T
 	s.mu.Unlock()
 	if !live {
 		t.Error("the early stream is not the live session")
+	}
+}
+
+// lookupHook runs fn the first time the ingest looks a call up. serve does that
+// after handle's revocation check and the websocket upgrade, and before it
+// registers the session, so fn lands in exactly the window a detach can.
+type lookupHook struct {
+	Transcripts
+	once sync.Once
+	fn   func()
+}
+
+func (h *lookupHook) Lookup(id uuid.UUID) (*transcript.Actor, bool) {
+	h.once.Do(h.fn)
+	return h.Transcripts.Lookup(id)
+}
+
+// A detach can revoke a token while its stream is being upgraded: past the
+// check handle makes, short of the session being registered. Revocation must be
+// decided in the same critical section that registers the session, or the
+// stream runs anyway with no attachment owning it — no detach will ever stop
+// it, because the detach already happened (#312).
+func TestAStreamRevokedDuringItsUpgradeIsStillRefused(t *testing.T) {
+	t.Parallel()
+	pub := &statePub{}
+	reg := transcript.NewRegistry(nil, pub, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	callID := uuid.New()
+	reg.For(callID, "INBOUND", time.Now())
+	t.Cleanup(func() { reg.Close(callID) })
+
+	hook := &lookupHook{Transcripts: recordingTranscripts{reg: reg, callID: callID}}
+	s, err := New(Config{
+		Addr: "127.0.0.1:0", Secret: []byte("k"),
+		NewSession:  func() (transcribe.Session, error) { return newStallSession(), nil },
+		Transcripts: hook,
+		Logger:      nopLogger{},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	claim := Claim{CallID: callID, Channel: "chan-1", Expires: time.Now().Add(time.Minute)}
+	token := s.Token(claim)
+	hook.fn = func() { s.Revoke(token) } // the hangup's detach, mid-upgrade
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+s.Addr()+StreamPath+"?t="+url.QueryEscape(token), nil)
+	if err != nil {
+		t.Fatalf("the handshake failed, so the revocation landed before the window: %v", err)
+	}
+	defer conn.Close()
+
+	// A refused stream is closed at once; an accepted one sits open waiting
+	// for audio, and this read times out.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = conn.ReadMessage()
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("a stream revoked during its upgrade was let in and runs with nothing owning it")
+	}
+	if s.hasSessionOn(callID, "chan-1") {
+		t.Error("a revoked stream is registered as the channel's live session")
+	}
+	if s.hasArrived(token) {
+		t.Error("a revoked stream was recorded as an arrival")
+	}
+	if pub.has("LIVE") {
+		t.Errorf("a revoked stream published LIVE: %v", pub.all())
 	}
 }
 

@@ -2496,7 +2496,10 @@ timed-out command is *sent, not confirmed*: the attachment and its expectation a
 detach revokes that attach's token so a late `start` cannot join a later one, and the grace
 decides whether the stream ever arrived. The expectation, arrival and revocation are keyed
 by the attachment's token, never by the channel, because a re-attach on the same channel is
-a different stream.
+a different stream. So is a graceful close: it retires only the attachment whose token it
+carries. A grace that gives up reports and keeps the attachment, so a late stream is still
+owned and moves the state from `ERROR` to `LIVE`; a re-attach of the same leg after that
+replaces it, revoking its token, rather than finding the channel already tapped.
 
 **The starvation edge was reproduced independently**, by accident, which is the best kind of
 confirmation: a `stereo` tap on a `&park()`ed leg gave `+OK`, a completed websocket

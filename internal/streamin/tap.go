@@ -81,6 +81,10 @@ type Tap struct {
 // in a container the two differ, exactly as the ESL address already does. The
 // scheme comes from configuration and is never composed here, so a deployment
 // that needs wss:// is a config change rather than a patch.
+//
+// ttl is how long an attach token stays usable, and it must outlast how late a
+// stalled switch may run a timed-out start (41 s measured, #312): a start run
+// after its token expired is refused as expired, and its leg goes untranscribed.
 func NewTap(srv *Server, sw SwitchTap, publicURL string, rateHz int, ttl time.Duration, log Logger) *Tap {
 	if ttl <= 0 {
 		ttl = 60 * time.Second
@@ -106,14 +110,19 @@ func NewTap(srv *Server, sw SwitchTap, publicURL string, rateHz int, ttl time.Du
 // logs that at ERR, once for every tapped call, and a log where teardown is
 // always an error is a log where a real error is invisible.
 //
-// Keyed on call and channel together, so a stream ending cannot retire an
-// attachment that belongs to a later call on the same channel.
-func (t *Tap) streamEnded(callID uuid.UUID, channelID string) {
+// Matched on the stream's token, not on its call and channel: the channel may
+// already carry the next attachment — a re-attach under a new call, or under
+// the same call after a detach — and a late close from the stream it replaced
+// would otherwise forget the live one, so that no detach ever stops it.
+func (t *Tap) streamEnded(channelID, token string) {
 	if t == nil {
 		return
 	}
-	key, ok := t.currentKey(channelID)
-	if !ok || key.callID != callID {
+	t.mu.Lock()
+	key, ok := t.current[channelID]
+	ok = ok && t.tokens[key] == token
+	t.mu.Unlock()
+	if !ok {
 		return
 	}
 	t.forget(key)
@@ -122,17 +131,20 @@ func (t *Tap) streamEnded(callID uuid.UUID, channelID string) {
 // Attach taps one agent leg.
 //
 // A channel already tapped for this call is left alone: one bug per channel,
-// which the module enforces too. A channel tapped for a *different* call has
-// had its conversation renamed under it — two calls turned out to be one — and
-// the old stream is reporting into a transcript that is no longer this
-// conversation's, so it is stopped before the new one starts.
+// which the module enforces too — unless the connect grace gave up on that
+// attachment, in which case it is replaced, because otherwise a start the
+// switch never ran leaves the leg untranscribed for the rest of the call. A
+// channel tapped for a *different* call has had its conversation renamed under
+// it — two calls turned out to be one — and the old stream is reporting into a
+// transcript that is no longer this conversation's, so it is stopped before the
+// new one starts.
 //
 // A timed-out `uuid_audio_stream … start` is not a failed attach. The command
 // was written, and a stalled switch runs what it read when it recovers (#302).
 // So the attachment and its expectation are kept, and the connect grace decides
 // whether the stream ever arrived; only a command the switch cannot have read
 // (esl.ErrDown) or refused (-ERR) forgets the tap. Before this, a timeout threw
-// the attachment away and the stream that came up twelve seconds later was
+// the attachment away and the stream that came up 41 seconds later was
 // tracked by nothing — no detach could stop it, and no state was ever published
 // for it (#312).
 func (t *Tap) Attach(callID uuid.UUID, agentID, partyID *uuid.UUID, channelID, language string) {
@@ -161,7 +173,11 @@ func (t *Tap) Attach(callID uuid.UUID, agentID, partyID *uuid.UUID, channelID, l
 	token := t.srv.Token(claim)
 	t.mu.Lock()
 	prev, replaced := t.current[channelID]
-	if replaced && prev.callID == callID {
+	// The Server is asked under t.mu so that the answer and the replacement
+	// are one decision. That is safe because the Server never calls into the
+	// Tap while holding its own lock.
+	neverCame := replaced && prev.callID == callID && t.srv.hasGivenUp(t.tokens[prev])
+	if replaced && prev.callID == callID && !neverCame {
 		t.mu.Unlock()
 		return
 	}
@@ -173,8 +189,16 @@ func (t *Tap) Attach(callID uuid.UUID, agentID, partyID *uuid.UUID, channelID, l
 	t.mu.Unlock()
 
 	if replaced {
-		t.log.Info("transcription tap follows the call its leg was folded into",
-			"channelId", channelID, "from", prev.callID, "to", callID)
+		if neverCame {
+			// Detaching revokes the old token, so if the switch runs that
+			// start after all, its stream is refused rather than racing this
+			// one for the channel.
+			t.log.Info("transcription tap replaces an attach whose stream never connected",
+				"callId", callID, "channelId", channelID)
+		} else {
+			t.log.Info("transcription tap follows the call its leg was folded into",
+				"channelId", channelID, "from", prev.callID, "to", callID)
+		}
 		_ = t.detach(prev)
 	}
 

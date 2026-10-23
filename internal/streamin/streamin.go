@@ -62,8 +62,6 @@ type Config struct {
 	Addr string
 	// Secret keys the attach token.
 	Secret []byte
-	// TokenTTL bounds how long a minted token stays usable.
-	TokenTTL time.Duration
 	// Profile is the transcription profile this deployment runs.
 	Profile transcribe.Profile
 	// NewSession builds a recognition session per speaker.
@@ -100,10 +98,19 @@ type Server struct {
 	// arrived, so a late `uuid_audio_stream … start` executing after the stop
 	// is refused instead of leaving a stream nothing owns (#312).
 	revoked map[string]time.Time
+	// gaveUp holds tokens whose connect grace ran out and was reported. The
+	// attachment is kept, because a stalled switch may still run its start,
+	// but a re-attach of the same call on the same channel may replace it:
+	// otherwise a start the switch never ran leaves the leg untranscribed for
+	// the rest of the call. Cleared when the stream does arrive, or when the
+	// attachment is revoked.
+	gaveUp map[string]time.Time
 
 	// onStreamEnded is told when a stream ends gracefully, so the tap can stop
-	// tracking an attachment the switch has already finished with.
-	onStreamEnded func(callID uuid.UUID, channelID string)
+	// tracking an attachment the switch has already finished with. It is
+	// always called without s.mu held, because the Tap queries the Server
+	// while holding its own lock.
+	onStreamEnded func(channelID, token string)
 }
 
 // Claim is what a token asserts and the metadata frame must agree with.
@@ -137,9 +144,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.NewSession == nil || cfg.Transcripts == nil {
 		return nil, errors.New("streamin: a session factory and a transcript registry are required")
 	}
-	if cfg.TokenTTL <= 0 {
-		cfg.TokenTTL = 60 * time.Second
-	}
 	if cfg.Logger == nil {
 		return nil, errors.New("streamin: a logger is required")
 	}
@@ -151,6 +155,7 @@ func New(cfg Config) (*Server, error) {
 		pending:  map[string]*expectation{},
 		arrivals: map[string]time.Time{},
 		revoked:  map[string]time.Time{},
+		gaveUp:   map[string]time.Time{},
 	}, nil
 }
 
@@ -288,7 +293,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		// A `uuid_audio_stream … start` that timed out was written, and a
 		// stalled switch runs it late — possibly after the caller's leg is
 		// gone and the tap was detached (#302, #312). Refusing it here is
-		// what keeps it from becoming a stream nothing owns.
+		// what keeps it from becoming a stream nothing owns. This is the cheap
+		// answer before the upgrade; serve asks again under the lock that
+		// registers the session, which is the answer that counts.
 		s.log.Warn("transcription ingest refused a stream whose tap was detached",
 			"callId", claim.CallID, "channelId", claim.Channel, "remote", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -315,15 +322,16 @@ func (s *Server) claimToken(token string) bool {
 	return true
 }
 
-// tokenRetention bounds the spent, arrived and revoked indexes. A token lives
-// for TokenTTL, so an entry kept far longer than that can no longer describe a
-// connection that will be made.
+// tokenRetention bounds the spent, arrived, revoked and given-up indexes. A
+// token is usable until its claim's Expires, which the Tap stamps from its own
+// ttl (a minute in production), so an entry kept far longer than that can no
+// longer describe a connection that will be made.
 const tokenRetention = 10 * time.Minute
 
 // pruneLocked drops index entries that are too old to matter. The caller holds
 // s.mu.
 func (s *Server) pruneLocked(now time.Time) {
-	for _, index := range []map[string]time.Time{s.used, s.arrivals, s.revoked} {
+	for _, index := range []map[string]time.Time{s.used, s.arrivals, s.revoked, s.gaveUp} {
 		for token, at := range index {
 			if now.Sub(at) > tokenRetention {
 				delete(index, token)
@@ -357,7 +365,9 @@ func (s *Server) serve(conn *websocket.Conn, claim Claim, token string) {
 	if !ok {
 		s.log.Warn("transcription ingest has no transcript actor for this call",
 			"callId", claim.CallID, "channelId", claim.Channel)
-		s.refused(token)
+		s.mu.Lock()
+		s.refusedLocked(token)
+		s.mu.Unlock()
 		conn.Close()
 		return
 	}
@@ -369,18 +379,31 @@ func (s *Server) serve(conn *websocket.Conn, claim Claim, token string) {
 		log:   s.log,
 		cfg:   s.cfg,
 	}
+	// Revocation, registration and arrival are one critical section. The check
+	// in handle ran before the websocket upgrade, and a detach landing between
+	// the two would otherwise revoke a token whose stream then runs anyway,
+	// owned by nothing (#312). Recording the arrival under the same lock is
+	// what stops a Revoke from falling between "the session is registered"
+	// and "its attachment has arrived".
 	s.mu.Lock()
+	if _, gone := s.revoked[token]; gone {
+		s.mu.Unlock()
+		s.log.Warn("transcription ingest refused a stream whose tap was detached",
+			"callId", claim.CallID, "channelId", claim.Channel, "remote", conn.RemoteAddr().String())
+		conn.Close()
+		return
+	}
 	if prev := s.sessions[key]; prev != nil {
+		s.refusedLocked(token)
 		s.mu.Unlock()
 		s.log.Warn("a stream is already open for this channel",
 			"callId", claim.CallID, "channelId", claim.Channel)
-		s.refused(token)
 		conn.Close()
 		return
 	}
 	s.sessions[key] = sess
+	s.arrivedLocked(token)
 	s.mu.Unlock()
-	s.arrived(token)
 	// The switch dialling back is the only observable moment between "the
 	// switch accepted the attach" and "audio is being recognised", and without
 	// it attach-to-LIVE is a latency stage with no measurement anywhere.
@@ -399,13 +422,17 @@ func (s *Server) serve(conn *websocket.Conn, claim Claim, token string) {
 		// Detach that follows a hangup would otherwise issue a stop against a
 		// channel FreeSWITCH has already destroyed, and mod_audio_stream logs
 		// that at ERR — once per tapped call, which buries a real one.
-		s.onStreamEnded(claim.CallID, claim.Channel)
+		//
+		// It names the stream's token, not just its channel: the channel may
+		// already carry the next attachment, and only the token says which
+		// one this close belongs to.
+		s.onStreamEnded(claim.Channel, token)
 	}
 }
 
 // AttachStreamEndHandler registers who to tell when a tapped stream ends of its
 // own accord. The Tap sets this on itself; nothing else has a use for it.
-func (s *Server) AttachStreamEndHandler(fn func(callID uuid.UUID, channelID string)) {
+func (s *Server) AttachStreamEndHandler(fn func(channelID, token string)) {
 	s.onStreamEnded = fn
 }
 
@@ -486,9 +513,6 @@ func (s *Server) Expect(token string, c Claim) {
 		s.mu.Unlock()
 		return
 	}
-	if prev := s.pending[token]; prev != nil {
-		prev.timer.Stop()
-	}
 	exp := &expectation{key: key, claim: c}
 	exp.timer = time.AfterFunc(connectGrace, func() { s.giveUpOn(token, exp) })
 	s.pending[token] = exp
@@ -509,15 +533,13 @@ func (s *Server) Expect(token string, c Claim) {
 	}
 }
 
-// arrived cancels the expectation: the stream connected. When the stream won
-// the race and got here first, it is remembered so the Expect that follows is
-// a no-op.
-func (s *Server) arrived(token string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if exp := s.pending[token]; exp != nil {
-		exp.timer.Stop()
-		delete(s.pending, token)
+// arrivedLocked cancels the expectation: the stream connected. When the stream
+// won the race and got here first, it is remembered so the Expect that follows
+// is a no-op. A stream that arrives after its grace gave up is no longer one a
+// re-attach may replace. The caller holds s.mu.
+func (s *Server) arrivedLocked(token string) {
+	delete(s.gaveUp, token)
+	if s.stopExpectingLocked(token) {
 		return
 	}
 	s.arrivals[token] = time.Now()
@@ -536,33 +558,56 @@ func (s *Server) Revoke(token string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exp := s.pending[token]; exp != nil {
-		exp.timer.Stop()
-		delete(s.pending, token)
-	}
+	s.stopExpectingLocked(token)
 	delete(s.arrivals, token)
+	delete(s.gaveUp, token)
 	now := time.Now()
 	s.pruneLocked(now)
 	s.revoked[token] = now
 }
 
-// refused cancels the expectation for a stream that did dial back and was
-// turned away here.
+// refusedLocked cancels the expectation for a stream that did dial back and was
+// turned away here. The caller holds s.mu.
 //
-// The reason has already been logged where the decision was made; what this
-// prevents is the watchdog reporting the same stream twelve seconds later as
-// one that never connected. That is a different fault with a different cause —
-// the switch never dialled back at all — and an operator who reads both
-// accounts of one event goes looking for a network problem that is not there.
-func (s *Server) refused(token string) { s.stopExpecting(token) }
-
-func (s *Server) stopExpecting(token string) {
-	s.mu.Lock()
-	if exp := s.pending[token]; exp != nil {
-		exp.timer.Stop()
-		delete(s.pending, token)
+// The reason is logged where the decision was made; what this prevents is the
+// watchdog reporting the same stream twelve seconds later as one that never
+// connected. That is a different fault with a different cause — the switch
+// never dialled back at all — and an operator who reads both accounts of one
+// event goes looking for a network problem that is not there.
+//
+// A refusal can beat the attach's `+OK` just as an acceptance can (#287), so
+// with nothing yet expected it is recorded as an arrival: the stream did dial
+// back, and the Expect that follows must be the same no-op it is for a stream
+// that was let in.
+func (s *Server) refusedLocked(token string) {
+	if s.stopExpectingLocked(token) {
+		return
 	}
-	s.mu.Unlock()
+	if _, gone := s.revoked[token]; gone {
+		return
+	}
+	s.arrivals[token] = time.Now()
+}
+
+// stopExpectingLocked disarms the token's watchdog and reports whether one was
+// armed. The caller holds s.mu.
+func (s *Server) stopExpectingLocked(token string) bool {
+	exp := s.pending[token]
+	if exp == nil {
+		return false
+	}
+	exp.timer.Stop()
+	delete(s.pending, token)
+	return true
+}
+
+// hasGivenUp reports whether this attachment's connect grace ran out without
+// its stream arriving, which is what lets a re-attach replace it.
+func (s *Server) hasGivenUp(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, gave := s.gaveUp[token]
+	return gave
 }
 
 // giveUpOn reports a tap whose attach was sent and whose stream never dialled
@@ -570,7 +615,13 @@ func (s *Server) stopExpecting(token string) {
 //
 // It reports only when the expectation it was armed for is still the live one:
 // a timer that was disarmed by the attach's failure or by a detach, or that a
-// later attach superseded, has nothing to say.
+// later attach superseded, has nothing to say. A revocation always disarms the
+// expectation first, so a revoked token never gets past that check.
+//
+// It does not forget or revoke the attachment: a stalled switch may still run
+// the start, and that stream must then be owned and move the panel from ERROR
+// to LIVE. It only marks the token as given up, so that a re-attach of the
+// same leg is allowed to replace it.
 func (s *Server) giveUpOn(token string, exp *expectation) {
 	s.mu.Lock()
 	if s.pending[token] != exp {
@@ -578,12 +629,12 @@ func (s *Server) giveUpOn(token string, exp *expectation) {
 		return
 	}
 	delete(s.pending, token)
-	_, connected := s.sessions[exp.key]
-	_, revoked := s.revoked[token]
-	s.mu.Unlock()
-	if connected || revoked {
+	if _, connected := s.sessions[exp.key]; connected {
+		s.mu.Unlock()
 		return
 	}
+	s.gaveUp[token] = time.Now()
+	s.mu.Unlock()
 
 	s.log.Error("a tap was attached but never connected",
 		"callId", exp.claim.CallID, "channelId", exp.claim.Channel, "after", connectGrace)
