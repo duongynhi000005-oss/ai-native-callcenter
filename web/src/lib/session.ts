@@ -1,9 +1,38 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import {
+  hashKey, useMutation, useQuery, useQueryClient, type Query, type QueryClient, type QueryFilters,
+} from '@tanstack/react-query'
 
 import { ApiError, api, type Identity } from './api'
 import { usePhoneBridge } from './phone-bridge'
 
 const SESSION_KEY = ['session'] as const
+const SESSION_HASH = hashKey(SESSION_KEY)
+
+/**
+ * Every query but the session itself: what belongs to the signed-in user, as
+ * opposed to the record of who that is. Code that sweeps the whole cache
+ * (ending a session, resyncing after the event stream opens) takes this filter
+ * rather than the session's key, which stays private to this file.
+ */
+export const ALL_BUT_SESSION = {
+  predicate: (query: Query) => query.queryHash !== SESSION_HASH,
+} satisfies QueryFilters
+
+/**
+ * Asks the server who is signed in. Only a 401 means nobody is: it resolves to
+ * null so the caller can send the reader to the sign-in page. Anything else (a
+ * 5xx, a network error) is thrown, because a server that is restarting has not
+ * signed anyone out.
+ */
+async function fetchSession(): Promise<Identity | null> {
+  try {
+    const { user } = await api.me()
+    return user
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return null
+    throw error
+  }
+}
 
 /**
  * The current session. An expired or absent session resolves to null rather
@@ -12,18 +41,38 @@ const SESSION_KEY = ['session'] as const
 export function useSession() {
   return useQuery({
     queryKey: SESSION_KEY,
-    queryFn: async (): Promise<Identity | null> => {
-      try {
-        const { user } = await api.me()
-        return user
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) return null
-        throw error
-      }
-    },
+    queryFn: fetchSession,
     staleTime: 30_000,
     retry: false,
   })
+}
+
+/**
+ * The session check a route makes before it loads, shared by the entry route
+ * and the authenticated layout so the two cannot drift apart again (#324).
+ *
+ * A user the server confirms is kept as the session; a 401 ends the session,
+ * the previous user's caches with it, and resolves to null; any other failure
+ * is thrown, with the session left as it was.
+ *
+ * `reuseProvedWithinMs` lets a caller take a user proved that recently instead
+ * of asking again. It is a hand-off, not a cache: past the window the server
+ * is asked, so a session that expired or was revoked is still caught on the
+ * next navigation. A cached null is never reused, since the server is the
+ * only one who can say a session has started.
+ */
+export async function loadSession(
+  queryClient: QueryClient,
+  { reuseProvedWithinMs = 0 }: { reuseProvedWithinMs?: number } = {},
+): Promise<Identity | null> {
+  const cached = queryClient.getQueryState<Identity | null>(SESSION_KEY)
+  if (cached?.data && Date.now() - cached.dataUpdatedAt < reuseProvedWithinMs) {
+    return cached.data
+  }
+  const user = await fetchSession()
+  if (user) rememberSession(queryClient, user)
+  else clearSession(queryClient)
+  return user
 }
 
 /**
@@ -37,10 +86,19 @@ export function rememberSession(queryClient: QueryClient, user: Identity) {
 /**
  * The session is over: forget the user, and with them every cache that was
  * theirs, so whoever signs in next in this tab starts from nothing.
+ *
+ * The session stays in the cache as null, which is what tells a mounted layout
+ * to stand down. Everything else is removed, not invalidated: an invalidated
+ * query keeps its data, and the next user's first render showed the previous
+ * user's presence, calls and callbacks until the refetch landed (#324). Nor is
+ * it reset: `resetQueries` refetches every query still observed, and when the
+ * session ends under an open page (signing out, a 401 on navigation) that is
+ * a burst of requests the server can only refuse. A removed query is fetched
+ * again only by a component that mounts after it, by then the next user's.
  */
 export function clearSession(queryClient: QueryClient) {
   queryClient.setQueryData(SESSION_KEY, null)
-  void queryClient.invalidateQueries()
+  queryClient.removeQueries(ALL_BUT_SESSION)
 }
 
 export function useLogin() {
@@ -49,7 +107,7 @@ export function useLogin() {
     mutationFn: ({ username, password }: { username: string; password: string }) =>
       api.login(username, password),
     onSuccess: ({ user }) => {
-      queryClient.setQueryData(SESSION_KEY, user)
+      rememberSession(queryClient, user)
     },
   })
 }

@@ -5,6 +5,7 @@ import { CALLS_KEY, PRESENCE_KEY, ROSTER_KEY, WAITING_KEY, WRAP_UP_KEY } from '.
 import { applyCampaignUpdated, campaignPayloadOf } from './campaigns'
 import { CALLBACKS_KEY, CDRS_KEY, REPORTS_KEY } from './ledger'
 import { connectEvents, type AiccEvent, type EventType } from './events'
+import { ALL_BUT_SESSION } from './session'
 
 /**
  * Refreshes the caches an event invalidates.
@@ -68,8 +69,8 @@ function notify(listener: Listener, event: AiccEvent) {
  * Opens the one application-wide event stream and reports its status.
  *
  * A SYSTEM_RESET means the client fell outside the server's replay window:
- * every query is invalidated so the UI resyncs from snapshots before trusting
- * incremental updates again.
+ * every query but the session is invalidated so the UI resyncs from snapshots
+ * before trusting incremental updates again.
  */
 export function useEventStream(enabled: boolean) {
   const queryClient = useQueryClient()
@@ -82,16 +83,20 @@ export function useEventStream(enabled: boolean) {
       return
     }
 
+    // The session is left out of both resyncs. No event changes who is signed
+    // in, and a stream that just opened was let in on the same cookie, so
+    // asking `/me` again at that moment learns nothing; it was the second
+    // `/me` of every page load (#324). Navigating still checks the session.
     const close = connectEvents({
       onOpen: () => {
         setStatus('connected')
         // Anything fetched before the stream attached may have missed events
         // in the gap, so snapshots are refetched once the tail is live. This
         // also covers every reconnect.
-        void queryClient.invalidateQueries()
+        void queryClient.invalidateQueries(ALL_BUT_SESSION)
       },
       onError: () => setStatus('reconnecting'),
-      onReset: () => void queryClient.invalidateQueries(),
+      onReset: () => void queryClient.invalidateQueries(ALL_BUT_SESSION),
       onEvent: (event) => {
         applyToCache(queryClient, event)
         // Each listener is isolated. Without this a listener that throws takes

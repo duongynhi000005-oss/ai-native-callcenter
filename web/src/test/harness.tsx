@@ -553,7 +553,16 @@ export function renderPage(Component: () => ReactElement | null) {
   )
 }
 
-export function renderWithProviders(ui: ReactElement): RenderResult & {
+export function renderWithProviders(
+  ui: ReactElement,
+  options: {
+    /**
+     * The client to provide, for a test whose router context must share it
+     * (a route's `beforeLoad` writes the cache the page then reads).
+     */
+    queryClient?: QueryClient
+  } = {},
+): RenderResult & {
   user: ReturnType<typeof userEvent.setup>
   /**
    * Refetches every query, which is what the event stream does in production
@@ -563,9 +572,11 @@ export function renderWithProviders(ui: ReactElement): RenderResult & {
    */
   refetch: () => Promise<void>
 } {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
-  })
+  const queryClient =
+    options.queryClient ??
+    new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+    })
   const result = render(
     <I18nextProvider i18n={i18n}>
       <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>

@@ -6,10 +6,20 @@ import { BreadcrumbDetailProvider } from '@/lib/breadcrumb'
 import { PhoneOnboarding } from '@/components/phone-onboarding'
 import { SoftphoneBar } from '@/components/softphone-bar'
 import { usePresence } from '@/lib/agent'
-import { ApiError, api } from '@/lib/api'
-import { clearSession, rememberSession, useSession } from '@/lib/session'
+import { loadSession, useSession } from '@/lib/session'
 import { PhoneBridgeProvider, usePhoneBridgeValue } from '@/lib/phone-bridge'
 import { EventStreamProvider, useEventStream } from '@/lib/use-event-stream'
+
+/**
+ * How long a user proved signed in may be taken without asking `/me` again.
+ * It covers a hand-off, not a stay: the entry route and the sign-in form both
+ * prove the session and then navigate straight here, and asking again would
+ * put a second round trip in front of the layout and the phone's first hello
+ * (#292, #324). A navigation that comes later than that asks, which is how a
+ * session that expired or was revoked under an open tab is caught: there is no
+ * other place that notices.
+ */
+const SESSION_HANDOFF_MS = 3_000
 
 /**
  * Authenticated layout. Everything below this route needs a session, so the
@@ -17,21 +27,9 @@ import { EventStreamProvider, useEventStream } from '@/lib/use-event-stream'
  */
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
-    try {
-      const { user } = await api.me()
-      // The layout's `useSession` would otherwise ask again before it can
-      // render, and the phone's first hello waits behind it (issue #292).
-      rememberSession(context.queryClient, user)
-      return { user }
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
-        // The cached user must not outlive the session that proved it:
-        // leaving this layout unmounts it with the cache still holding them.
-        clearSession(context.queryClient)
-        throw redirect({ to: '/login' })
-      }
-      throw error
-    }
+    const user = await loadSession(context.queryClient, { reuseProvedWithinMs: SESSION_HANDOFF_MS })
+    if (!user) throw redirect({ to: '/login' })
+    return { user }
   },
   component: AppLayout,
 })
