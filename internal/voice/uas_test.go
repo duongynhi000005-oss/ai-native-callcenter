@@ -472,19 +472,81 @@ func (p *peer) awaitBye(timeout time.Duration) *sipMessage {
 // arrived (RFC 3261 §12.1.1), however the INVITE grouped them. Reversing it
 // walks a path with two proxies backwards and the far end never sees the BYE,
 // so this drives the whole path that fills the set in, not only the rendering
-// buildBye's own test covers.
+// buildBye's own test covers. The top entry is the peer itself, which is where
+// the BYE is sent.
 func TestHangingUpKeepsTheRouteSetInTheOrderTheInviteCarriedIt(t *testing.T) {
 	_, hooks, p := startUAS(t, nil)
+	top := fmt.Sprintf("<sip:127.0.0.1:%d;lr>", p.sip.LocalAddr().(*net.UDPAddr).Port)
 	_, dialog := p.connect(hooks,
-		"Record-Route: <sip:10.0.0.7;lr>, <sip:10.0.0.8;lr>",
+		"Record-Route: "+top+", <sip:10.0.0.8;lr>",
 		"Record-Route: <sip:10.0.0.9;lr>")
 
 	dialog.Stop()
 
 	bye := p.awaitBye(2 * time.Second)
-	want := []string{"<sip:10.0.0.7;lr>", "<sip:10.0.0.8;lr>", "<sip:10.0.0.9;lr>"}
+	want := []string{top, "<sip:10.0.0.8;lr>", "<sip:10.0.0.9;lr>"}
 	if got := bye.multi["route"]; !slices.Equal(got, want) {
 		t.Errorf("Route headers = %v, want the INVITE's order %v", got, want)
+	}
+}
+
+// With a route set, the BYE goes to the top entry (RFC 3261 §8.1.2), not back
+// to the address the INVITE came from: an element that record-routes an
+// address or port other than the one it sent from never saw the BYE when it
+// did, and kept the dialog until a timer cleared it (issue #325).
+func TestHangingUpSendsTheByeToTheTopOfTheRouteSet(t *testing.T) {
+	_, hooks, p := startUAS(t, nil)
+	proxy, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("proxy socket: %v", err)
+	}
+	t.Cleanup(func() { proxy.Close() })
+	top := fmt.Sprintf("<sip:127.0.0.1:%d;lr>", proxy.LocalAddr().(*net.UDPAddr).Port)
+	_, dialog := p.connect(hooks, "Record-Route: "+top+", <sip:10.0.0.8;lr>")
+
+	dialog.Stop()
+
+	buf := make([]byte, 65536)
+	_ = proxy.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := proxy.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("no BYE reached the top of the route set: %v", err)
+	}
+	bye, err := parseSIP(buf[:n])
+	if err != nil || bye.method != methodBye {
+		t.Fatalf("the top of the route set got %q, want a BYE", buf[:n])
+	}
+	if want := []string{top, "<sip:10.0.0.8;lr>"}; !slices.Equal(bye.multi["route"], want) {
+		t.Errorf("Route headers = %v, want %v", bye.multi["route"], want)
+	}
+	wantURI := fmt.Sprintf("sip:1001@127.0.0.1:%d", p.sip.LocalAddr().(*net.UDPAddr).Port)
+	if bye.requestURI != wantURI {
+		t.Errorf("Request-URI = %q, want the peer's Contact %q", bye.requestURI, wantURI)
+	}
+	// The dialog sends one BYE, and it has gone to the proxy.
+	for {
+		msg, err := p.read(300 * time.Millisecond)
+		if err != nil {
+			break
+		}
+		if msg.method == methodBye {
+			t.Fatal("the BYE went to the INVITE's source as well as the route set")
+		}
+	}
+}
+
+// A top entry this process cannot send to (here, TCP) does not keep the BYE
+// from going out: it goes to the INVITE's source, as it did before the route
+// set was followed.
+func TestAByeWhoseTopRouteIsNotUDPGoesToTheInviteSource(t *testing.T) {
+	_, hooks, p := startUAS(t, nil)
+	_, dialog := p.connect(hooks, "Record-Route: <sip:127.0.0.1:9;transport=tcp;lr>")
+
+	dialog.Stop()
+
+	bye := p.awaitBye(2 * time.Second)
+	if got, want := bye.multi["route"], []string{"<sip:127.0.0.1:9;transport=tcp;lr>"}; !slices.Equal(got, want) {
+		t.Errorf("Route headers = %v, want %v", got, want)
 	}
 }
 

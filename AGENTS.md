@@ -94,6 +94,8 @@ make api-breaking BASE=main   # oasdiff: no undeclared breaking change
 
 Two telephony paths in one process; the AI path can be switched off (`AICC_BOT_ENABLED`).
 
+Topology: FreeSWITCH always sits on the LAN and reaches the public network only through an edge proxy or SBC (OpenSIPS, Kamailio, an SBC). The app is on the LAN beside the switch, so nothing sits between the switch and the bot: the bot's INVITE comes straight from the `aicc_bot` gateway. A proxy between the switch and the app is not a supported topology; the record-routing hop that matters is carrier ↔ edge ↔ switch.
+
 1. **Human path.** `esl.Link` (one ESL inbound connection, auto-reconnecting) → `telephony.Normalize` (the only place raw ESL events become domain `SwitchEvent`s; raw FreeSWITCH events are read only inside `internal/telephony`) → `telephony.Coordinator` + `Registry` (an actor per call: one goroutine mutates it, snapshots go through its mailbox), `agents.Service` (presence FSM, mirrored into mod_callcenter) and `outbound.Service`. Every api/bgapi command to the switch is a `*telephony.Adapter` method.
 2. **AI path.** FreeSWITCH bridges the caller to the `aicc_bot` gateway → `voice.UAS` (SIP on :6060, RTP 40000–40999) → `aicall.Session` bridges the leg to a `provider.VoiceSession` (OpenAI: G.711 passthrough; the other engines: PCM16 through `media.Converter`) while `flow.Engine`/`Runtime` steer phases and tools. `aicall.Orchestrator` resolves DID → flow (published revision only) and transfers by `uuid_transfer`-ing the caller's channel (named in the `X-AICC-Channel-ID` SIP header) to a queue extension.
 

@@ -13,11 +13,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/media"
+	"github.com/rasonyang/ai-native-callcenter/internal/voice"
 )
 
 const loopback = "127.0.0.1"
@@ -234,6 +236,48 @@ func TestTheCallerHangsUp(t *testing.T) {
 	}
 	if uac.byeCount() != 0 {
 		t.Errorf("the callee also sent a BYE")
+	}
+}
+
+// A record-routing proxy between the switch and the callee asked to see the
+// BYE, so the callee's BYE carries the route set in the INVITE's order
+// (RFC 3261 §12.1.1) and goes to its top entry, not to the caller's Contact.
+func TestTheCalleesByeFollowsTheRouteSet(t *testing.T) {
+	sim := startSim(t, loopback, scenarioOf(t, map[string][]Behaviour{
+		"1": {{ByeAfterMs: intp(50)}},
+	}), nil)
+	proxy, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(loopback)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxy.Close() })
+	top := fmt.Sprintf("<sip:%s;lr>", proxy.LocalAddr())
+	const second = "<sip:10.0.0.8:5070;lr>"
+
+	uac := newUAC(t, loopback, sim.Addr(), "1")
+	uac.write(uac.request("INVITE", 1, uac.branch,
+		"Record-Route: "+top+",\r\n "+second+"\r\nContent-Type: application/sdp\r\n", uac.offer()))
+	uac.waitFinal()
+
+	buf := make([]byte, 65536)
+	_ = proxy.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := proxy.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("no BYE reached the top of the route set: %v", err)
+	}
+	bye, err := voice.ParseSIP(buf[:n])
+	if err != nil || bye.Method() != "BYE" {
+		t.Fatalf("the top of the route set got %q, want a BYE", buf[:n])
+	}
+	if want := []string{top, second}; !slices.Equal(bye.Routes(), want) {
+		t.Errorf("Route headers = %q, want %q", bye.Routes(), want)
+	}
+	if want := "sip:caller@" + uac.local(); bye.RequestURI() != want {
+		t.Errorf("Request-URI = %q, want the caller's Contact %q", bye.RequestURI(), want)
+	}
+	// The simulator sends one BYE, and it went to the proxy.
+	if got := uac.byeCount(); got != 0 {
+		t.Errorf("the caller's Contact got %d BYEs as well", got)
 	}
 }
 

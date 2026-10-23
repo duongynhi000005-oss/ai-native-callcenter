@@ -8,6 +8,7 @@ package voice
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,7 +127,7 @@ func parseSIP(data []byte) (*sipMessage, error) {
 		}
 	}
 
-	for _, line := range lines[1:] {
+	for _, line := range unfoldHeaders(lines[1:]) {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
@@ -145,6 +146,26 @@ func parseSIP(data []byte) (*sipMessage, error) {
 	}
 	msg.body = strings.TrimSpace(body)
 	return msg, nil
+}
+
+// unfoldHeaders joins folded header lines. A line that starts with a space or
+// a tab continues the header above it (RFC 3261 §7.3.1), and the line break
+// with the whitespace after it reads as a single space. Cutting each line at
+// its colon without this keeps only the first line of a folded header:
+// `Record-Route: <sip:p2;lr>,` then ` <sip:p1;lr>` loses p1 from the route
+// set. A continuation with no header above it is dropped.
+func unfoldHeaders(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			if len(out) > 0 {
+				out[len(out)-1] += " " + strings.TrimLeft(line, " \t")
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // splitHeaderValues splits on commas that separate header values, ignoring the
@@ -269,13 +290,22 @@ var (
 )
 
 func extractURI(header string) string {
-	if m := uriInAnglesPattern.FindStringSubmatch(header); m != nil {
-		return m[1]
-	}
-	if m := bareURIPattern.FindStringSubmatch(header); m != nil {
-		return m[1]
+	if uri, ok := findURI(header); ok {
+		return uri
 	}
 	return "sip:unknown@0.0.0.0"
+}
+
+// findURI is extractURI for a caller that needs to know there was no URI,
+// rather than be handed a placeholder it might send something to.
+func findURI(header string) (string, bool) {
+	if m := uriInAnglesPattern.FindStringSubmatch(header); m != nil {
+		return m[1], true
+	}
+	if m := bareURIPattern.FindStringSubmatch(header); m != nil {
+		return m[1], true
+	}
+	return "", false
 }
 
 func appendTag(header, tag string) string {
@@ -346,8 +376,8 @@ func (r byeReason) headers() string {
 }
 
 // buildBye ends a dialog we accepted. From and To swap relative to the INVITE,
-// the request goes to the peer's Contact, and the Route headers are the
-// INVITE's Record-Route values in the order they arrived.
+// and the request is addressed through the route set, which is the INVITE's
+// Record-Route values in the order they arrived.
 //
 // That order is the one RFC 3261 §12.1.1 defines for our side: a UAS's route
 // set is the Record-Route field values as they appear in the request. Only the
@@ -361,30 +391,40 @@ func (r byeReason) headers() string {
 // proxy to notice (issue #250).
 //
 // Each value is written as its own header. The parser has already split the
-// comma-joined ones, so however the INVITE grouped them — three headers, one
-// comma-joined, a mix — the BYE carries one Route header per entry, in order.
-// A strict-routed entry (no `;lr`) is copied in its place: §12.2.1.1 would
-// instead put the first URI of a strict set in the Request-URI, and no peer on
-// this path record-routes strictly, so that form is not implemented here.
+// comma-joined ones and joined the folded ones, so however the INVITE grouped
+// them the BYE carries one Route header per entry, in order. When the first
+// entry is a loose router (`;lr`) the Request-URI is the peer's Contact and
+// every entry is a Route. When it is a strict router (no `;lr`), §12.2.1.1
+// puts its URI in the Request-URI, the remaining entries in the Route headers,
+// and the Contact last among them; routeRequest does both. No peer on this
+// path record-routes strictly, but a strict router handed the loose form
+// would forward on the Request-URI, the Contact, and skip every entry after it.
+//
+// Where the BYE is sent is not decided here: with a route set it is the first
+// entry's address (Dialog.byeNextHop), whichever form the request took.
+//
+// Every BYE is a new transaction, so it carries a branch of its own and the
+// Max-Forwards every request needs (§8.1.1). The branch used to be the
+// Call-ID's first eight characters, which repeats across calls whose Call-IDs
+// share a prefix; a transaction-stateful proxy can absorb the second such BYE
+// as a retransmission of the first (issue #325).
 func buildBye(callID, fromHeader, toHeader, localTag, localIP string,
-	localPort int, recordRoutes []string, remoteContact string, reason byeReason) []byte {
+	localPort int, routeSet []string, remoteContact string, reason byeReason) []byte {
 
 	target := extractURI(fromHeader)
 	if remoteContact != "" {
 		target = extractURI(remoteContact)
 	}
+	routing := routeRequest(routeSet, target)
 	var routes strings.Builder
-	for _, route := range recordRoutes {
+	for _, route := range routing.routes {
 		routes.WriteString("Route: " + route + "\r\n")
-	}
-	branch := callID
-	if len(branch) > 8 {
-		branch = branch[:8]
 	}
 
 	return fmt.Appendf(nil,
 		"BYE %s SIP/2.0\r\n"+
-			"Via: SIP/2.0/UDP %s:%d;branch=z9hG4bK%s\r\n"+
+			"Via: SIP/2.0/UDP %s:%d;branch=%s\r\n"+
+			"Max-Forwards: 70\r\n"+
 			"%s"+
 			"From: %s\r\n"+
 			"To: %s\r\n"+
@@ -393,9 +433,13 @@ func buildBye(callID, fromHeader, toHeader, localTag, localIP string,
 			"%s"+
 			"Content-Length: 0\r\n"+
 			"\r\n",
-		target, localIP, localPort, branch, routes.String(),
+		routing.requestURI, localIP, localPort, newBranch(), routes.String(),
 		appendTag(toHeader, localTag), fromHeader, callID, reason.headers())
 }
+
+// newBranch is a Via branch for a new client transaction: the RFC 3261 magic
+// cookie and 64 random bits, so no two requests this process sends share one.
+func newBranch() string { return fmt.Sprintf("z9hG4bK%016x", rand.Uint64()) }
 
 var dtmfSignalPattern = regexp.MustCompile(`(?i)Signal\s*=\s*([0-9A-D#*])`)
 
