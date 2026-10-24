@@ -5,6 +5,120 @@ under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
 run them together. From v0.2.0 on, the GitHub release of the same tag also
 carries the one-line installer's files.
 
+## v0.7.0 - 2026-10-24
+
+### Upgrade notes
+
+- Upgrade both images together, as always: they are published under one tag
+  and the deploy stack names both. The switch image has no change in this
+  release. The application adds migration 00043, which runs at startup: a
+  callback whose `phone_number` has no digit at all (the bot once filed the
+  words "the caller's current number") gets the caller's number from its
+  call's CDR, which is `to_number` on a call this platform placed to a
+  customer and `from_number` on every other call. A value that holds digits,
+  a callback whose call has no CDR, and a CDR with no number are left alone.
+  Nothing is dropped or narrowed, and the rewrite is not undone on rollback
+  (#311).
+- No new settings. `.env.example` only gained a comment: the bot's
+  `take_message` writes a callback number in the form `AICC_OUTBOUND_DIAL_FORM`
+  names, with `AICC_DEFAULT_COUNTRY_CODE` deciding which numbers are domestic
+  (#311).
+- API contract: transferring a caller can now answer
+  `409 TRANSFER_IN_PROGRESS` (a new code) while an earlier transfer of the same
+  caller, from this operation or from the bot handing the caller over, has not
+  been confirmed by the switch; it clears when the leg's events settle it or
+  after a minute (#303). The `202` of every call-control operation now reads
+  "sent, possibly unconfirmed": the switch accepted the command, or did not
+  answer in time and may still run it, so a client must not send it again
+  (#302, #303). `QueueFacts`, `CallSnapshot.queue`, `CDR.queueId`,
+  `CDR.queueWaitSec`, `QueueReport.queueId`, `CDR.flowId`, `LegKind` and
+  `Leg.note` have new descriptions only (#283, #313). `make api-breaking
+  BASE=v0.6.0` reports no breaking change.
+- Behaviour change: `POST /calls/{callId}/hangup` from a credential that is
+  not an agent, on a call handed to an extension nobody is signed in at, now
+  ends the call at that phone's leg. Before, it answered an error (#282).
+- A CDR status changes: an agent's call to a bot number the bot never
+  answered is now `NO_ANSWER`. Before, it was `ANSWERED` with a zero-second
+  bot hop (#313).
+
+### Added
+
+- An HTTP tool that has not returned after one second makes the bot say a
+  short wait line, once per batch of tools, only into silence and never as a
+  question; the result is never lost, even when the caller talks over the
+  line. A flow can word it with the optional bilingual `global.toolWaitLine`.
+  The one-second threshold is fixed. doubao is excluded: it drops a tool
+  result sent after a spoken line, so HTTP tools stay synchronous there and
+  the caller hears no wait line (#316, #286).
+- The mock backend gains `POST /api/kb/secure-search`, a bearer-token search
+  with a configurable delay, for trying the wait line (#316).
+
+### Changed
+
+- A call through several queues now records one `QUEUE` leg per stay, in time
+  order. The row's `queueId` and `queueWaitSec` are the first stay's, and
+  `missedReason` reads the last stay (#283).
+- A call that was answered and then reached nobody (an AI outbound call whose
+  bridge to the bot never ran, an overflow, a recovery) keeps the leg it was
+  answered on in its journey, with the span `billSec` measures, instead of a
+  `DIALING` hop. A bot hop now needs a bot that answered, and the call's
+  `flowId` is stamped from the moment the call is placed or the conversation
+  starts (#313).
+- A call whose bot leg never answered now gets its CDR row from the human
+  path; before, such a call could be left without a row (#313).
+- The session-limit documentation now states what the code does: a call the
+  bot ends has `hangupCause=SESSION_LIMIT`, a transferred call carries
+  `userData.botReason=SESSION_LIMIT` and the final leg's cause (#230).
+- A non-401 failure of the session check (a 5xx, a network error) shows the
+  same error page at `/` and inside the app and keeps the session, so a
+  server restart does not look like a sign-out. This reverses the earlier
+  rule that sent the reader to the sign-in form (#324).
+
+### Fixed
+
+- An agent-placed call the agent handed on recorded the hand-over
+  (`NORMAL_CLEARING` from the agent's leg) as its `hangupCause`; it is now the
+  cause of the leg whose release ended the call (#282).
+- A call through two queues kept one set of queue facts, so the second join
+  overwrote the name and join time but kept the first stay's bridge and
+  cause, and the wait could come out negative (#283).
+- A leg to one of our extensions read `TRUNK` in the journey when nobody was
+  signed in there; it is now an `AGENT` leg labelled with the extension
+  (#284).
+- A command to the switch that was written and not answered was reported as a
+  failure, or blocked other callers. It is now treated as sent: hangup,
+  transfers (the agent's and the bot's), the platform's own endings and the
+  bridge to the bot answer `202`, a second transfer is refused with
+  `TRANSFER_IN_PROGRESS`, and a bot hand-over that never ran returns the flow
+  to the phase it was made from instead of stranding the caller. A bridge to
+  the bot that never ran ends the customer leg with
+  `hangupCause=BOT_BRIDGE_UNCONFIRMED`. `ErrDown` now means nothing was
+  written, and a job result that arrives before the originate returns keeps
+  the switch's cause (#302, #303).
+- The bot's BYE sent the Record-Route set in reverse, so behind a
+  record-routing proxy the far end never saw it. It now keeps the INVITE's
+  order, goes to the top of the route set (the strict-router rule applies to
+  an entry without `lr`), carries `Max-Forwards: 70`, and has its own random
+  Via branch. Folded Record-Route headers are read whole (#250, #325).
+- A transcription tap whose stream dialled back before the attach reply was
+  read was reported as `STREAM_NEVER_CONNECTED` though it had transcribed, and
+  one whose attach command timed out was forgotten although the switch started
+  it later. An early arrival is remembered, a timed-out attach is kept as
+  sent, and every expectation is per attachment, so a detach stops exactly
+  that stream (#287, #312).
+- `take_message` stored whatever the model wrote as the callback number, once
+  a description of the caller's number. A value that is not a dialable number
+  is discarded with a warning and the caller's number is used; a valid one is
+  stored normalised. The `mobile_support` flow no longer asks for the "caller's
+  number" in a way that led to it, and the log no longer carries the message or
+  the full number (#311).
+- Opening the site root while signed in landed on the sign-in form instead of
+  the role's home, because the entry route swallowed its own redirect (#296).
+  The entry route and the app layout now share one session check, so a visit
+  makes one `/auth/me` instead of two; signing out or a 401 clears every
+  cached query of the previous user, and the event stream no longer refetches
+  the session (#324).
+
 ## v0.6.0 - 2026-10-21
 
 ### Upgrade notes
