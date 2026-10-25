@@ -115,6 +115,14 @@ type WrapUp struct {
 	Note             string    `json:"note"`
 	IsConfirmed      bool      `json:"isConfirmed"`
 	CreatedAt        time.Time `json:"createdAt"`
+
+	// The AI draft, kept apart from what the agent files and kept after they
+	// confirm. All three are absent until a draft exists. A draft that
+	// suggests no disposition has DraftNote and DraftGeneratedAt and no
+	// DraftDispositionCode.
+	DraftDispositionCode string     `json:"draftDispositionCode,omitempty"`
+	DraftNote            *string    `json:"draftNote,omitempty"`
+	DraftGeneratedAt     *time.Time `json:"draftGeneratedAt,omitempty"`
 }
 
 // Leg is one hop of a call's journey, in order, for the detail view.
@@ -712,12 +720,47 @@ func (l *LedgerStore) defaultDisposition(ctx context.Context) (code, label strin
 	return items[0].Code, items[0].Label, nil
 }
 
+// SaveWrapUpDraft writes an AI draft onto the agent's unconfirmed record. It
+// reports false, with no error, when there was nothing to write to: the agent
+// already confirmed, a draft is already there, or no record exists. That is the
+// whole of the idempotency, so the caller publishes only on true.
+//
+// code is the suggested disposition or nil. It is re-checked against the
+// enabled vocabulary inside the statement: a code disabled since the prompt was
+// built is stored as no suggestion, and the note is kept.
+func (l *LedgerStore) SaveWrapUpDraft(ctx context.Context, callID, agentID uuid.UUID,
+	code *string, note string) (WrapUp, bool, error) {
+	row, err := l.q.SaveWrapUpDraft(ctx, queries.SaveWrapUpDraftParams{
+		CallID: callID, AgentID: agentID, DispositionCode: code, Note: &note,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WrapUp{}, false, nil
+	}
+	if err != nil {
+		return WrapUp{}, false, err
+	}
+	return wrapUpFromRow(row), true, nil
+}
+
 func wrapUpFromRow(row queries.WrapUp) WrapUp {
-	return WrapUp{
+	out := WrapUp{
 		CallID: row.CallID, AgentID: row.AgentID,
 		DispositionCode: row.DispositionCode, DispositionLabel: row.DispositionLabel,
 		Note: row.Note, IsConfirmed: row.IsConfirmed, CreatedAt: row.CreatedAt.Time,
 	}
+	if row.DraftGeneratedAt.Valid {
+		at := row.DraftGeneratedAt.Time
+		out.DraftGeneratedAt = &at
+		note := ""
+		if row.DraftNote != nil {
+			note = *row.DraftNote
+		}
+		out.DraftNote = &note
+		if row.DraftDispositionCode != nil {
+			out.DraftDispositionCode = *row.DraftDispositionCode
+		}
+	}
+	return out
 }
 
 //

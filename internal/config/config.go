@@ -240,6 +240,23 @@ type Config struct {
 	PostCallTranscribeConcurrency int
 	PostCallTranscribeMaxAttempts int
 
+	// The text model: one OpenAI-compatible Chat Completions endpoint for work
+	// that is plain text in, text out, apart from the voice provider (A1). Off
+	// unless the endpoint and model are both set and TEXT_LLM_API_KEY holds a
+	// key. The key is read from the environment by name, like every provider
+	// key, and is not an AICC_* setting.
+	TextLLMEndpoint string
+	TextLLMModel    string
+	// TextLLMTimeout bounds one job that uses the model, end to end.
+	TextLLMTimeout time.Duration
+	// TextLLMContextChars is the most characters one prompt may total; a
+	// transcript is shortened to fit, and a call whose prompt cannot fit gets
+	// no model output at all.
+	TextLLMContextChars int
+	// IsWrapUpDraftEnabled turns the AI draft of after-call work on or off
+	// when the text model is configured and live transcription is enabled.
+	IsWrapUpDraftEnabled bool
+
 	// Recordings. Backend FS keeps files where the switch wrote them;
 	// S3 uploads them to any S3-compatible store and clears the local spool.
 	RecordingBackend string
@@ -369,6 +386,16 @@ const (
 	MaxBotNoInputTimeout     = 60 * time.Second
 )
 
+// The text model (AICC_TEXT_LLM_*): its defaults and bounds.
+const (
+	DefaultTextLLMTimeout      = 20 * time.Second
+	MaxTextLLMTimeout          = 5 * time.Minute
+	DefaultTextLLMContextChars = 24000
+	// MinTextLLMContextChars leaves room for the instructions themselves; a
+	// budget below it could never hold a prompt.
+	MinTextLLMContextChars = 4000
+)
+
 // Load reads configuration from .env (if present) and the environment.
 func Load() (Config, error) {
 	loadDotEnv(".env")
@@ -433,6 +460,11 @@ func Load() (Config, error) {
 		TranscribeModel:         env("AICC_TRANSCRIBE_MODEL", ""),
 		ProviderTranscribeModel: env("AICC_PROVIDER_TRANSCRIBE_MODEL", ""),
 
+		TextLLMEndpoint:               env("AICC_TEXT_LLM_ENDPOINT", ""),
+		TextLLMModel:                  env("AICC_TEXT_LLM_MODEL", ""),
+		TextLLMTimeout:                envDuration("AICC_TEXT_LLM_TIMEOUT", DefaultTextLLMTimeout),
+		TextLLMContextChars:           envInt("AICC_TEXT_LLM_CONTEXT_CHARS", DefaultTextLLMContextChars),
+		IsWrapUpDraftEnabled:          envBool("AICC_WRAPUP_DRAFT_ENABLED", true),
 		IsPostCallTranscribeEnabled:   envBool("AICC_POSTCALL_TRANSCRIBE_ENABLED", false),
 		PostCallTranscribeEndpoint:    env("AICC_POSTCALL_TRANSCRIBE_ENDPOINT", ""),
 		PostCallTranscribeModel:       env("AICC_POSTCALL_TRANSCRIBE_MODEL", "qwen-audio-3.1-asr-flash"),
@@ -531,6 +563,23 @@ func (c Config) validate() error {
 	}
 	if _, err := egress.ParseAllowList(c.ToolAllowedHosts); err != nil {
 		errs = append(errs, fmt.Errorf("AICC_TOOL_ALLOWED_HOSTS: %w", err))
+	}
+	if c.TextLLMEndpoint != "" {
+		if !strings.HasPrefix(c.TextLLMEndpoint, "http://") && !strings.HasPrefix(c.TextLLMEndpoint, "https://") {
+			errs = append(errs, fmt.Errorf(
+				"AICC_TEXT_LLM_ENDPOINT must be an http:// or https:// URL, got %q", c.TextLLMEndpoint))
+		}
+		if c.TextLLMModel == "" {
+			errs = append(errs, errors.New("AICC_TEXT_LLM_MODEL must be set when AICC_TEXT_LLM_ENDPOINT is"))
+		}
+		if c.TextLLMTimeout <= 0 || c.TextLLMTimeout > MaxTextLLMTimeout {
+			errs = append(errs, fmt.Errorf(
+				"AICC_TEXT_LLM_TIMEOUT must be above 0 and at most %s, got %s", MaxTextLLMTimeout, c.TextLLMTimeout))
+		}
+		if c.TextLLMContextChars < MinTextLLMContextChars {
+			errs = append(errs, fmt.Errorf(
+				"AICC_TEXT_LLM_CONTEXT_CHARS must be at least %d, got %d", MinTextLLMContextChars, c.TextLLMContextChars))
+		}
 	}
 	if c.IsPostCallTranscribeEnabled {
 		if !strings.HasPrefix(c.PostCallTranscribeEndpoint, "https://") {

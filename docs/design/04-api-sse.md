@@ -87,6 +87,7 @@ Mechanics: 15s `: hb` heartbeat; `Last-Event-ID` resume from the in-memory ring 
 | `CALL_RECORDING_STARTED / CALL_RECORDING_STOPPED` · `CALL_CDR` (full CDR) | facts |
 | `QUEUE_JOINED / QUEUE_LEFT` (cause) · `QUEUE_COUNT` (waiting, longestWaitAt) · `QUEUE_AGENT_OFFERED` | mod_callcenter events normalized. **Published since 2026-08-19** (the first three were declared and never emitted): scoped to the queue, so the agents staffing it and supervision receive them and nobody else does. A caller stops being "waiting" at the *bridge*, not at `member-queue-end` — the queue only announces that once the conversation is over — and a hangup removes them whether or not the queue ever says so. |
 | `AGENT_LOGGED_IN / AGENT_LOGGED_OUT / AGENT_READY / AGENT_NOT_READY` (reason) · `AGENT_AVAILABILITY` (derived word) | agent FSM |
+| `AGENT_WRAP_UP_DRAFTED` (`SseWrapUpDraftPayload`) | the AI drafted an agent's after-call record (#138); sent once, to that agent only, never for a confirmed record |
 | `DEVICE_REGISTERED / DEVICE_UNREGISTERED / DEVICE_IN_SERVICE` (isInService, reason) | sofia + OPTIONS ping |
 | `BOT_SESSION_STARTED` (flowSlug, provider, model) · `BOT_TRANSCRIPT` (role, kind, isFinal, text/tool) · `BOT_INTERRUPTED` · `BOT_SESSION_ENDED` (reason, usage) | AI leg; finals mirror `transcripts` rows; agents receive them live during/after transfer (cockpit transcript view) |
 | `CALLBACK_CREATED / CALLBACK_UPDATED` | overflow message-taking |

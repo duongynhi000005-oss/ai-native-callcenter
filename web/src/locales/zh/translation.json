@@ -215,6 +215,8 @@
     "disposition": "处理结果",
     "chooseDisposition": "选择处理结果…",
     "wrapUpNote": "小结…",
+    "aiDraft": "AI 草稿",
+    "useAiDraft": "使用 AI 草稿",
     "openCount_other": "{{count}} 条待办",
     "done": "完成",
     "callsHandled": "接听通话",

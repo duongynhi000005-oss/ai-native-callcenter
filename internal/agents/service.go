@@ -175,6 +175,8 @@ type Service struct {
 	staffing Staffing
 	// wrapUps is where the record of after-call work is opened.
 	wrapUps WrapUpLedger
+	// drafter writes the AI draft once the record is open. Nil is no drafting.
+	drafter WrapUpDrafter
 }
 
 // AttachStaffing points agent registration at queue reconciliation.
@@ -189,6 +191,18 @@ func (s *Service) AttachStaffing(st Staffing) { s.staffing = st }
 type WrapUpLedger interface {
 	OpenWrapUp(ctx context.Context, callID, agentID uuid.UUID) error
 }
+
+// WrapUpDrafter starts the job that drafts a wrap-up with AI. DraftWrapUp
+// returns at once: the job runs on its own goroutine, and after-call work never
+// waits for it. partyID is the agent leg that just ended, uuid.Nil when the
+// caller does not know it.
+type WrapUpDrafter interface {
+	DraftWrapUp(callID, agentID, partyID uuid.UUID)
+}
+
+// AttachDrafter points the opening of a wrap-up at the draft job. Without one,
+// after-call work is exactly what it always was.
+func (s *Service) AttachDrafter(d WrapUpDrafter) { s.drafter = d }
 
 // AttachWrapUps points the beginning of after-call work at the ledger, so a
 // finished call always has a record — with the defaults the platform would
@@ -330,6 +344,12 @@ func (s *Service) NotReady(ctx context.Context, agentID uuid.UUID, reason Reason
 // means, and a timer that let go early would deliver one to somebody still
 // writing up the last.
 func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (Presence, error) {
+	return s.startWrapUp(ctx, agentID, callID, uuid.Nil)
+}
+
+// startWrapUp is StartWrapUp for a caller that knows which party was the
+// agent's leg; the draft job reads that leg's transcript through it.
+func (s *Service) startWrapUp(ctx context.Context, agentID, callID, partyID uuid.UUID) (Presence, error) {
 	if callID != uuid.Nil {
 		s.mu.Lock()
 		s.lastWrapUpCall[agentID] = callID
@@ -354,6 +374,12 @@ func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (P
 	if err := s.wrapUps.OpenWrapUp(ctx, callID, agentID); err != nil {
 		slog.ErrorContext(ctx, "after-call record not opened",
 			"agentId", agentID, "callId", callID, "error", err)
+		return p, nil
+	}
+	// The draft is written onto the record just opened, so it starts only when
+	// there is one. Fire and forget: nothing here waits for it.
+	if s.drafter != nil {
+		s.drafter.DraftWrapUp(callID, agentID, partyID)
 	}
 	return p, nil
 }
@@ -365,8 +391,8 @@ func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (P
 // whether or not presence could be recorded, and there is nobody on that path
 // to hand a failure to. An agent who is not signed in — the leg outlived their
 // session — is not an error either, which is why this reports nothing.
-func (s *Service) BeginAfterCallWork(ctx context.Context, agentID, callID uuid.UUID) {
-	if _, err := s.StartWrapUp(ctx, agentID, callID); err != nil {
+func (s *Service) BeginAfterCallWork(ctx context.Context, agentID, callID, partyID uuid.UUID) {
+	if _, err := s.startWrapUp(ctx, agentID, callID, partyID); err != nil {
 		slog.WarnContext(ctx, "after-call work not started",
 			"agentId", agentID, "callId", callID, "error", err)
 	}

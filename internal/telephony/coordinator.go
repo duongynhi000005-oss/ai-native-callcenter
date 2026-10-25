@@ -43,8 +43,9 @@ type AgentLookup interface {
 	// leg just ended. Fire and forget: a call is over whether or not presence
 	// could be recorded, so this reports nothing back to the switch path.
 	// Which legs owe it is decided by the caller: an answered leg of any call
-	// that is not INTERNAL.
-	BeginAfterCallWork(ctx context.Context, agentID, callID uuid.UUID)
+	// that is not INTERNAL. partyID is the party of the leg that ended: the
+	// transcript tap stamped it on every line of that leg, whoever spoke.
+	BeginAfterCallWork(ctx context.Context, agentID, callID, partyID uuid.UUID)
 }
 
 // Errors returned by call operations.
@@ -378,7 +379,7 @@ func (c *Coordinator) Handle(ctx context.Context, ev SwitchEvent) {
 		// decides, so an internal call later transferred out to a customer
 		// still owes nobody a wrap-up: the type says what the call was.
 		if ended.wasAnswered && ended.callType != events.CallTypeInternal {
-			c.agents.BeginAfterCallWork(ctx, ended.agentID, ended.callID)
+			c.agents.BeginAfterCallWork(ctx, ended.agentID, ended.callID, ended.partyID)
 		}
 	}
 }
@@ -388,6 +389,7 @@ func (c *Coordinator) Handle(ctx context.Context, ev SwitchEvent) {
 type endedLeg struct {
 	agentID     uuid.UUID
 	callID      uuid.UUID
+	partyID     uuid.UUID
 	callType    events.CallType
 	wasAnswered bool
 }
@@ -1180,6 +1182,7 @@ func (c *Coordinator) agentLegEnded(channelID string) *endedLeg {
 		ended = &endedLeg{
 			agentID:     *p.AgentID,
 			callID:      call.CallID,
+			partyID:     p.PartyID,
 			callType:    call.CallType,
 			wasAnswered: !p.AnsweredAt.IsZero(),
 		}

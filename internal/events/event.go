@@ -54,6 +54,10 @@ const (
 	TypeAgentReady        Type = "AGENT_READY"
 	TypeAgentNotReady     Type = "AGENT_NOT_READY"
 	TypeAgentAvailability Type = "AGENT_AVAILABILITY"
+	// TypeAgentWrapUpDrafted says the AI drafted this agent's after-call
+	// record. Agent-scoped: it reaches the agent whose record it is, and
+	// nobody else on the call.
+	TypeAgentWrapUpDrafted Type = "AGENT_WRAP_UP_DRAFTED"
 	// A phone lives on two independent axes and each transition has a name of
 	// its own. REGISTERED/UNREGISTERED say whether a SIP registration exists;
 	// REACHABLE/UNREACHABLE say whether the registered phone still answers the

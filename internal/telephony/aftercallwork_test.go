@@ -31,6 +31,7 @@ type presenceCalls struct {
 	mu      sync.Mutex
 	steps   []string
 	calls   []uuid.UUID
+	parties []uuid.UUID
 	benched []uuid.UUID
 }
 
@@ -70,11 +71,12 @@ func (p *presenceCalls) BenchForNoAnswer(_ context.Context, agentID uuid.UUID) {
 	p.benched = append(p.benched, agentID)
 }
 
-func (p *presenceCalls) BeginAfterCallWork(_ context.Context, agentID, callID uuid.UUID) {
+func (p *presenceCalls) BeginAfterCallWork(_ context.Context, agentID, callID, partyID uuid.UUID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.steps = append(p.steps, "wrapUp:"+agentID.String())
 	p.calls = append(p.calls, callID)
+	p.parties = append(p.parties, partyID)
 }
 
 func (p *presenceCalls) taken() ([]string, []uuid.UUID) {
@@ -143,6 +145,27 @@ func TestAnAnsweredAgentLegEndingStartsAfterCallWork(t *testing.T) {
 	steps, calls := agents.taken()
 	if calls[0] != minted {
 		t.Errorf("wrap-up started for call %s, want the call the agent was on (%s)", calls[0], minted)
+	}
+	// The wrap-up is told which party was the agent's leg: the id the
+	// transcript tap stamps on every line of that leg, whoever spoke.
+	var agentParty uuid.UUID
+	if err := registry.Do(minted, func(call *Call) {
+		for _, p := range call.Parties {
+			if p.AgentID != nil && *p.AgentID == testAgentID {
+				agentParty = p.PartyID
+			}
+		}
+	}); err != nil {
+		t.Logf("call already retired: %v", err)
+	}
+	agents.mu.Lock()
+	gotParty := agents.parties[0]
+	agents.mu.Unlock()
+	if gotParty == uuid.Nil {
+		t.Error("wrap-up started with no party for the agent's leg")
+	}
+	if agentParty != uuid.Nil && gotParty != agentParty {
+		t.Errorf("wrap-up party = %s, want the agent's party %s", gotParty, agentParty)
 	}
 	// Off the call first. The other order shows the agent as still talking to
 	// somebody who has hung up, because being on a call outranks wrap-up when

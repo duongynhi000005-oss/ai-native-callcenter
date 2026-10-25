@@ -7376,6 +7376,19 @@
             "type": "string",
             "format": "date-time",
             "description": "When after-call work began for this call."
+          },
+          "draftDispositionCode": {
+            "type": "string",
+            "description": "The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed."
+          },
+          "draftNote": {
+            "type": "string",
+            "description": "The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation."
+          },
+          "draftGeneratedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed."
           }
         },
         "required": [
@@ -9110,6 +9123,19 @@
           "isConfirmed": {
             "type": "boolean",
             "description": "True once the agent pressed Done. False means the defaults are still standing."
+          },
+          "draftDispositionCode": {
+            "type": "string",
+            "description": "The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed."
+          },
+          "draftNote": {
+            "type": "string",
+            "description": "The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation."
+          },
+          "draftGeneratedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed."
           }
         },
         "required": [
@@ -9882,6 +9908,7 @@
           "AGENT_READY",
           "AGENT_NOT_READY",
           "AGENT_AVAILABILITY",
+          "AGENT_WRAP_UP_DRAFTED",
           "DEVICE_REGISTERED",
           "DEVICE_UNREGISTERED",
           "DEVICE_REACHABLE",
@@ -10259,6 +10286,33 @@
         },
         "required": [
           "state"
+        ]
+      },
+      "SseWrapUpDraftPayload": {
+        "type": "object",
+        "description": "Payload of AGENT_WRAP_UP_DRAFTED: the AI wrote a draft of this agent's after-call record. Sent once per record, only to the agent whose record it is (supervisors and administrators see every event, as for every AGENT_* event), and never for a record the agent has already confirmed. The same draft is on the record (CurrentWrapUp, WrapUp), so a client that missed the event reads it from there.",
+        "properties": {
+          "callId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "dispositionCode": {
+            "type": "string",
+            "description": "The suggested disposition, one of the enabled codes. Absent when the draft suggests none."
+          },
+          "note": {
+            "type": "string",
+            "description": "The drafted note."
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "callId",
+          "note",
+          "generatedAt"
         ]
       },
       "CallTranscript": {

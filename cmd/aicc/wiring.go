@@ -28,8 +28,10 @@ import (
 	"github.com/rasonyang/ai-native-callcenter/internal/provider/doubao"
 	"github.com/rasonyang/ai-native-callcenter/internal/store"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
+	"github.com/rasonyang/ai-native-callcenter/internal/textllm"
 	"github.com/rasonyang/ai-native-callcenter/internal/transcript"
 	"github.com/rasonyang/ai-native-callcenter/internal/voice"
+	"github.com/rasonyang/ai-native-callcenter/internal/wrapupdraft"
 )
 
 // The parts of the running system, as the composition uses them.
@@ -54,6 +56,7 @@ type switchWiring interface {
 type presenceWiring interface {
 	AttachStaffing(agents.Staffing)
 	AttachWrapUps(agents.WrapUpLedger)
+	AttachDrafter(agents.WrapUpDrafter)
 	SyncSwitch(ctx context.Context)
 	// ReleaseAgentsWithoutPhones signs off every READY agent whose phone the
 	// switch does not have registered. It is separate from SyncSwitch because
@@ -95,6 +98,10 @@ type composition struct {
 	CDR         *telephony.CDRAssembler
 	Queues      telephony.QueueCatalog
 	WrapUps     agents.WrapUpLedger
+	// Drafter writes the AI draft of a wrap-up. Nil when the text model is not
+	// configured or live transcription is off, which is the second conditional
+	// connection the composition has: after-call work is then what it was.
+	Drafter     agents.WrapUpDrafter
 	Transcripts transcriptRegistry
 	Audiences   telephony.Audiences
 	Taps        telephony.Tapper
@@ -148,6 +155,9 @@ func (c composition) connect() {
 	// somebody remembered to write up, and "nobody filed this" and "nobody
 	// finished typing" are the same absence.
 	c.Agents.AttachWrapUps(c.WrapUps)
+	if c.Drafter != nil {
+		c.Agents.AttachDrafter(c.Drafter)
+	}
 
 	// The switch forgets its agents when it restarts, and we are the source of
 	// truth, so every reconnect rebuilds its view.
@@ -738,4 +748,43 @@ func campaignUpdatedPayload(s campaign.Snapshot) map[string]any {
 		p["nextDialAt"] = s.NextDialAt
 	}
 	return p
+}
+
+// wrapUpDrafter builds the AI draft of after-call work, or returns nil.
+//
+// Nil is the whole of "off": the text model is not configured, its key is
+// missing, the feature is switched off, or live transcription is disabled (the
+// agent's part of a call is only transcribed by the live tap, so there would
+// be nothing to read). The caller then attaches nothing and after-call work is
+// exactly what it was. A configured model with a missing key is logged, because
+// a deployment that meant to turn the feature on should not find out from the
+// absence of drafts.
+func wrapUpDrafter(cfg config.Config, st wrapupdraft.Store, pub wrapupdraft.Publisher,
+	getenv func(string) string, log *slog.Logger) agents.WrapUpDrafter {
+	if !cfg.IsWrapUpDraftEnabled || cfg.TextLLMEndpoint == "" || cfg.TextLLMModel == "" {
+		return nil
+	}
+	if !cfg.IsTranscriptionEnabled {
+		log.Info("wrap-up drafts are off: live transcription is disabled")
+		return nil
+	}
+	key := getenv("TEXT_LLM_API_KEY")
+	if key == "" {
+		log.Error("wrap-up drafts are off: TEXT_LLM_API_KEY is not set",
+			"endpoint", cfg.TextLLMEndpoint)
+		return nil
+	}
+	llm, err := textllm.New(textllm.Config{
+		Endpoint: cfg.TextLLMEndpoint, Model: cfg.TextLLMModel, APIKey: key,
+	}, nil)
+	if err != nil {
+		log.Error("wrap-up drafts are off", "error", err)
+		return nil
+	}
+	log.Info("wrap-up drafts are on", "model", cfg.TextLLMModel)
+	return wrapupdraft.New(st, llm, pub, wrapupdraft.Config{
+		Timeout:     cfg.TextLLMTimeout,
+		BudgetChars: cfg.TextLLMContextChars,
+		Settle:      wrapupdraft.DefaultSettle,
+	}, log)
 }

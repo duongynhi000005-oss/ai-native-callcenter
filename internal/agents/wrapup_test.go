@@ -293,3 +293,97 @@ func TestEndingWrapUpWithNoPhoneLandsInDeviceLostRatherThanFailing(t *testing.T)
 		t.Error("the after-call work is over; the presence still names its call")
 	}
 }
+
+type recordedDrafts struct {
+	mu    sync.Mutex
+	drafs [][2]uuid.UUID
+	// parties is the leg each draft was told had just ended.
+	parties []uuid.UUID
+}
+
+func (r *recordedDrafts) DraftWrapUp(callID, agentID, partyID uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.drafs = append(r.drafs, [2]uuid.UUID{callID, agentID})
+	r.parties = append(r.parties, partyID)
+}
+
+func (r *recordedDrafts) all() [][2]uuid.UUID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][2]uuid.UUID(nil), r.drafs...)
+}
+
+// The draft job starts once the record it will be written onto is open, for
+// the call that just ended and the agent who ended it; and it does not start
+// when the record could not be opened, because there is nowhere to write it.
+func TestTheDraftStartsOnlyOnceTheRecordIsOpen(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		openErr error
+		want    int
+	}{
+		{"the record opens", nil, 1},
+		{"the record cannot be opened", errors.New("the database is down"), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			store := newFakeStore()
+			agentID := uuid.New()
+			store.profiles[agentID] = Profile{AgentID: agentID, CallcenterName: "agent-1001", ExtensionNumber: "1001"}
+			drafts := &recordedDrafts{}
+			svc := NewService(store, &fakeSwitch{up: true}, &fakePublisher{})
+			svc.AttachWrapUps(&openedWrapUps{err: c.openErr})
+			svc.AttachDrafter(drafts)
+			ctx := context.Background()
+			if _, err := svc.Login(ctx, agentID); err != nil {
+				t.Fatal(err)
+			}
+			callID := uuid.New()
+			p, err := svc.StartWrapUp(ctx, agentID, callID)
+			if err != nil || !p.IsInWrapUp() {
+				t.Fatalf("StartWrapUp() = %+v, %v; after-call work must begin either way", p, err)
+			}
+			got := drafts.all()
+			if len(got) != c.want {
+				t.Fatalf("drafts started = %v, want %d", got, c.want)
+			}
+			if c.want == 1 && got[0] != [2]uuid.UUID{callID, agentID} {
+				t.Errorf("draft for %v, want call %s agent %s", got[0], callID, agentID)
+			}
+		})
+	}
+}
+
+// The switch path knows which party was the agent's leg and hands it to the
+// draft job, so the agent's part of the transcript does not depend on the
+// agent having spoken; the path with no leg to name hands over nothing.
+func TestTheDraftIsToldWhichLegJustEnded(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	agentID := uuid.New()
+	store.profiles[agentID] = Profile{AgentID: agentID, CallcenterName: "agent-1001", ExtensionNumber: "1001"}
+	drafts := &recordedDrafts{}
+	svc := NewService(store, &fakeSwitch{up: true}, &fakePublisher{})
+	svc.AttachWrapUps(&openedWrapUps{})
+	svc.AttachDrafter(drafts)
+	ctx := context.Background()
+	if _, err := svc.Login(ctx, agentID); err != nil {
+		t.Fatal(err)
+	}
+	party := uuid.New()
+	svc.BeginAfterCallWork(ctx, agentID, uuid.New(), party)
+	if _, err := svc.EndWrapUp(ctx, agentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.StartWrapUp(ctx, agentID, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	drafts.mu.Lock()
+	defer drafts.mu.Unlock()
+	if len(drafts.parties) != 2 || drafts.parties[0] != party || drafts.parties[1] != uuid.Nil {
+		t.Errorf("parties handed to the draft job = %v, want [%s, nil]", drafts.parties, party)
+	}
+}

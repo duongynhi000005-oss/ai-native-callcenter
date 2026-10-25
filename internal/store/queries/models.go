@@ -452,11 +452,14 @@ type WebhookSubscription struct {
 }
 
 type WrapUp struct {
-	CallID           uuid.UUID          `json:"callId"`
-	AgentID          uuid.UUID          `json:"agentId"`
-	DispositionCode  string             `json:"dispositionCode"`
-	DispositionLabel string             `json:"dispositionLabel"`
-	Note             string             `json:"note"`
-	CreatedAt        pgtype.Timestamptz `json:"createdAt"`
-	IsConfirmed      bool               `json:"isConfirmed"`
+	CallID               uuid.UUID          `json:"callId"`
+	AgentID              uuid.UUID          `json:"agentId"`
+	DispositionCode      string             `json:"dispositionCode"`
+	DispositionLabel     string             `json:"dispositionLabel"`
+	Note                 string             `json:"note"`
+	CreatedAt            pgtype.Timestamptz `json:"createdAt"`
+	IsConfirmed          bool               `json:"isConfirmed"`
+	DraftDispositionCode *string            `json:"draftDispositionCode"`
+	DraftNote            *string            `json:"draftNote"`
+	DraftGeneratedAt     pgtype.Timestamptz `json:"draftGeneratedAt"`
 }

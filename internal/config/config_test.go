@@ -460,3 +460,32 @@ func TestPostCallTranscribeConfig(t *testing.T) {
 		t.Error("a maximum below the minimum was accepted")
 	}
 }
+
+func TestTheTextModelIsOffByDefaultAndChecksItsSettings(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TextLLMEndpoint != "" || c.TextLLMModel != "" || c.TextLLMTimeout != 20*time.Second ||
+		c.TextLLMContextChars != 24000 || !c.IsWrapUpDraftEnabled {
+		t.Errorf("defaults = %+v, want the ones .env.example documents", c)
+	}
+
+	t.Setenv("AICC_TEXT_LLM_ENDPOINT", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AICC_TEXT_LLM_MODEL") {
+		t.Errorf("an endpoint with no model: %v", err)
+	}
+	t.Setenv("AICC_TEXT_LLM_MODEL", "qwen-plus")
+	if _, err := Load(); err != nil {
+		t.Errorf("a valid configuration was refused: %v", err)
+	}
+	t.Setenv("AICC_TEXT_LLM_ENDPOINT", "dashscope.aliyuncs.com")
+	if _, err := Load(); err == nil {
+		t.Error("an endpoint without a scheme was accepted")
+	}
+	t.Setenv("AICC_TEXT_LLM_ENDPOINT", "https://x.example/v1")
+	t.Setenv("AICC_TEXT_LLM_CONTEXT_CHARS", "100")
+	if _, err := Load(); err == nil {
+		t.Error("a budget smaller than the instructions was accepted")
+	}
+}
