@@ -965,6 +965,7 @@ const (
 	SSEEventTypeAGENTLOGGEDOUT         SSEEventType = "AGENT_LOGGED_OUT"
 	SSEEventTypeAGENTNOTREADY          SSEEventType = "AGENT_NOT_READY"
 	SSEEventTypeAGENTREADY             SSEEventType = "AGENT_READY"
+	SSEEventTypeAGENTWRAPUPDRAFTED     SSEEventType = "AGENT_WRAP_UP_DRAFTED"
 	SSEEventTypeBOTSESSIONSTARTED      SSEEventType = "BOT_SESSION_STARTED"
 	SSEEventTypeCALLBACKCREATED        SSEEventType = "CALLBACK_CREATED"
 	SSEEventTypeCALLBACKUPDATED        SSEEventType = "CALLBACK_UPDATED"
@@ -1007,6 +1008,8 @@ func (e SSEEventType) Valid() bool {
 	case SSEEventTypeAGENTNOTREADY:
 		return true
 	case SSEEventTypeAGENTREADY:
+		return true
+	case SSEEventTypeAGENTWRAPUPDRAFTED:
 		return true
 	case SSEEventTypeBOTSESSIONSTARTED:
 		return true
@@ -2126,8 +2129,17 @@ type CurrentWrapUp struct {
 	CreatedAt        time.Time `json:"createdAt"`
 	DispositionCode  string    `json:"dispositionCode"`
 	DispositionLabel string    `json:"dispositionLabel"`
-	IsConfirmed      bool      `json:"isConfirmed"`
-	Note             string    `json:"note"`
+
+	// DraftDispositionCode The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed.
+	DraftDispositionCode *string `json:"draftDispositionCode,omitempty"`
+
+	// DraftGeneratedAt When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed.
+	DraftGeneratedAt *time.Time `json:"draftGeneratedAt,omitempty"`
+
+	// DraftNote The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation.
+	DraftNote   *string `json:"draftNote,omitempty"`
+	IsConfirmed bool    `json:"isConfirmed"`
+	Note        string  `json:"note"`
 }
 
 // DID An external number and which way calls go through it. A number callers can reach answers with a bot flow; the fallback queue takes the caller when the bot cannot. A number used only for dialling out has no flow to bind, because nobody calls it.
@@ -3162,6 +3174,15 @@ type WrapUp struct {
 	CreatedAt        time.Time          `json:"createdAt"`
 	DispositionCode  string             `json:"dispositionCode"`
 	DispositionLabel string             `json:"dispositionLabel"`
+
+	// DraftDispositionCode The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed.
+	DraftDispositionCode *string `json:"draftDispositionCode,omitempty"`
+
+	// DraftGeneratedAt When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed.
+	DraftGeneratedAt *time.Time `json:"draftGeneratedAt,omitempty"`
+
+	// DraftNote The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation.
+	DraftNote *string `json:"draftNote,omitempty"`
 
 	// IsConfirmed True once the agent pressed Done. False means the defaults are still standing.
 	IsConfirmed bool   `json:"isConfirmed"`

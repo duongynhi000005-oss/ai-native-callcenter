@@ -175,6 +175,8 @@ type Service struct {
 	staffing Staffing
 	// wrapUps is where the record of after-call work is opened.
 	wrapUps WrapUpLedger
+	// drafter writes the AI draft once the record is open. Nil is no drafting.
+	drafter WrapUpDrafter
 }
 
 // AttachStaffing points agent registration at queue reconciliation.
@@ -189,6 +191,17 @@ func (s *Service) AttachStaffing(st Staffing) { s.staffing = st }
 type WrapUpLedger interface {
 	OpenWrapUp(ctx context.Context, callID, agentID uuid.UUID) error
 }
+
+// WrapUpDrafter starts the job that drafts a wrap-up with AI. DraftWrapUp
+// returns at once: the job runs on its own goroutine, and after-call work never
+// waits for it.
+type WrapUpDrafter interface {
+	DraftWrapUp(callID, agentID uuid.UUID)
+}
+
+// AttachDrafter points the opening of a wrap-up at the draft job. Without one,
+// after-call work is exactly what it always was.
+func (s *Service) AttachDrafter(d WrapUpDrafter) { s.drafter = d }
 
 // AttachWrapUps points the beginning of after-call work at the ledger, so a
 // finished call always has a record — with the defaults the platform would
@@ -354,6 +367,12 @@ func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (P
 	if err := s.wrapUps.OpenWrapUp(ctx, callID, agentID); err != nil {
 		slog.ErrorContext(ctx, "after-call record not opened",
 			"agentId", agentID, "callId", callID, "error", err)
+		return p, nil
+	}
+	// The draft is written onto the record just opened, so it starts only when
+	// there is one. Fire and forget: nothing here waits for it.
+	if s.drafter != nil {
+		s.drafter.DraftWrapUp(callID, agentID)
 	}
 	return p, nil
 }

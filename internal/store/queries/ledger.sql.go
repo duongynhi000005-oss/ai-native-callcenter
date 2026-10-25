@@ -247,7 +247,7 @@ func (q *Queries) GetRecording(ctx context.Context, id uuid.UUID) (Recording, er
 }
 
 const getWrapUp = `-- name: GetWrapUp :one
-SELECT call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed FROM wrap_ups WHERE call_id = $1 AND agent_id = $2
+SELECT call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed, draft_disposition_code, draft_note, draft_generated_at FROM wrap_ups WHERE call_id = $1 AND agent_id = $2
 `
 
 type GetWrapUpParams struct {
@@ -266,6 +266,9 @@ func (q *Queries) GetWrapUp(ctx context.Context, arg GetWrapUpParams) (WrapUp, e
 		&i.Note,
 		&i.CreatedAt,
 		&i.IsConfirmed,
+		&i.DraftDispositionCode,
+		&i.DraftNote,
+		&i.DraftGeneratedAt,
 	)
 	return i, err
 }
@@ -1113,7 +1116,7 @@ func (q *Queries) ListTranscripts(ctx context.Context, callID uuid.UUID) ([]Tran
 }
 
 const listWrapUpsForCalls = `-- name: ListWrapUpsForCalls :many
-SELECT call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed FROM wrap_ups
+SELECT call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed, draft_disposition_code, draft_note, draft_generated_at FROM wrap_ups
 WHERE call_id = ANY($1::uuid[])
 ORDER BY created_at DESC
 `
@@ -1138,6 +1141,9 @@ func (q *Queries) ListWrapUpsForCalls(ctx context.Context, callIds []uuid.UUID) 
 			&i.Note,
 			&i.CreatedAt,
 			&i.IsConfirmed,
+			&i.DraftDispositionCode,
+			&i.DraftNote,
+			&i.DraftGeneratedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1543,6 +1549,56 @@ func (q *Queries) ReportOverview(ctx context.Context, arg ReportOverviewParams) 
 	return i, err
 }
 
+const saveWrapUpDraft = `-- name: SaveWrapUpDraft :one
+UPDATE wrap_ups
+SET draft_disposition_code = (
+        SELECT d.code FROM dispositions d
+        WHERE d.code = $1::text AND d.is_enabled),
+    draft_note         = $2,
+    draft_generated_at = now()
+WHERE call_id = $3 AND agent_id = $4
+  AND NOT is_confirmed AND draft_generated_at IS NULL
+RETURNING call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed, draft_disposition_code, draft_note, draft_generated_at
+`
+
+type SaveWrapUpDraftParams struct {
+	DispositionCode *string   `json:"dispositionCode"`
+	Note            *string   `json:"note"`
+	CallID          uuid.UUID `json:"callId"`
+	AgentID         uuid.UUID `json:"agentId"`
+}
+
+// SaveWrapUpDraft writes the AI draft onto the agent's record, once, and only
+// while the agent has not confirmed it. The condition is the whole of the
+// idempotency and the confirm-first rule: a draft that arrives after
+// confirmation, or a second job for the same record, matches no row.
+//
+// The suggested code is checked against the vocabulary in the same statement
+// (a code disabled since the prompt was built becomes NULL), so there is no
+// window between the check and the write.
+func (q *Queries) SaveWrapUpDraft(ctx context.Context, arg SaveWrapUpDraftParams) (WrapUp, error) {
+	row := q.db.QueryRow(ctx, saveWrapUpDraft,
+		arg.DispositionCode,
+		arg.Note,
+		arg.CallID,
+		arg.AgentID,
+	)
+	var i WrapUp
+	err := row.Scan(
+		&i.CallID,
+		&i.AgentID,
+		&i.DispositionCode,
+		&i.DispositionLabel,
+		&i.Note,
+		&i.CreatedAt,
+		&i.IsConfirmed,
+		&i.DraftDispositionCode,
+		&i.DraftNote,
+		&i.DraftGeneratedAt,
+	)
+	return i, err
+}
+
 const settleCallbackAttempt = `-- name: SettleCallbackAttempt :many
 UPDATE callbacks
 SET last_attempt_status = $2, last_attempt_at = $3
@@ -1606,7 +1662,7 @@ SET disposition_code  = excluded.disposition_code,
     disposition_label = excluded.disposition_label,
     note              = excluded.note,
     is_confirmed      = excluded.is_confirmed
-RETURNING call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed
+RETURNING call_id, agent_id, disposition_code, disposition_label, note, created_at, is_confirmed, draft_disposition_code, draft_note, draft_generated_at
 `
 
 type UpsertWrapUpParams struct {
@@ -1639,6 +1695,9 @@ func (q *Queries) UpsertWrapUp(ctx context.Context, arg UpsertWrapUpParams) (Wra
 		&i.Note,
 		&i.CreatedAt,
 		&i.IsConfirmed,
+		&i.DraftDispositionCode,
+		&i.DraftNote,
+		&i.DraftGeneratedAt,
 	)
 	return i, err
 }

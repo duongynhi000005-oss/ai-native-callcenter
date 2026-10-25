@@ -1933,6 +1933,15 @@ export interface components {
              * @description When after-call work began for this call.
              */
             createdAt: string;
+            /** @description The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed. */
+            draftDispositionCode?: string;
+            /** @description The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation. */
+            draftNote?: string;
+            /**
+             * Format: date-time
+             * @description When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed.
+             */
+            draftGeneratedAt?: string;
         };
         /** @description Sign-in takes no arguments: the agent-to-extension binding is static configuration, so the platform signs the agent in at the phone they are bound to. The body is optional, and any property in it is refused with VALIDATION_FAILED rather than quietly ignored. */
         AgentLoginRequest: Record<string, never>;
@@ -2620,6 +2629,15 @@ export interface components {
             createdAt: string;
             /** @description True once the agent pressed Done. False means the defaults are still standing. */
             isConfirmed: boolean;
+            /** @description The disposition the AI suggests, one of the enabled codes. Absent until a draft exists, and absent from a draft that suggests none. Kept after the agent confirms, apart from dispositionCode, so what was suggested can be told from what was filed. */
+            draftDispositionCode?: string;
+            /** @description The note the AI drafted about the agent's part of the call. Absent until a draft exists. Kept after confirmation. */
+            draftNote?: string;
+            /**
+             * Format: date-time
+             * @description When the draft was written. Present exactly when a draft exists; a client shows a draft when this is set. A draft is written at most once per record and never after the agent confirmed.
+             */
+            draftGeneratedAt?: string;
         };
         CDRList: {
             items: components["schemas"]["CDR"][];
@@ -2872,7 +2890,7 @@ export interface components {
          * @description Every event name on the stream. PARTY_* are leg-scoped, CALL_* call-scoped, CAMPAIGN_* describe an outbound campaign (supervision only). SYSTEM_* stream-control. DEVICE_* report a phone on two independent axes and name one transition each: REGISTERED/UNREGISTERED say whether a SIP registration exists, REACHABLE/UNREACHABLE whether the registered phone still answers the switch's OPTIONS ping. A registered phone that stops answering is the agent-side failure that matters most — it looks exactly like a working one — so it has a name of its own rather than borrowing UNREGISTERED.
          * @enum {string}
          */
-        SseEventType: "PARTY_DIALING" | "PARTY_RINGING" | "PARTY_ESTABLISHED" | "PARTY_HELD" | "PARTY_RETRIEVED" | "PARTY_RELEASED" | "PARTY_CHANGED" | "PARTY_DTMF" | "CALL_USER_DATA" | "CALL_RECORDING_STARTED" | "CALL_RECORDING_STOPPED" | "CALL_CDR" | "CALL_TRANSCRIPT" | "CALL_TRANSCRIPTION_STATE" | "QUEUE_JOINED" | "QUEUE_LEFT" | "QUEUE_COUNT" | "QUEUE_AGENT_OFFERED" | "AGENT_LOGGED_IN" | "AGENT_LOGGED_OUT" | "AGENT_READY" | "AGENT_NOT_READY" | "AGENT_AVAILABILITY" | "DEVICE_REGISTERED" | "DEVICE_UNREGISTERED" | "DEVICE_REACHABLE" | "DEVICE_UNREACHABLE" | "BOT_SESSION_STARTED" | "CALLBACK_CREATED" | "CALLBACK_UPDATED" | "CAMPAIGN_UPDATED" | "SYSTEM_LINK" | "SYSTEM_RESET";
+        SseEventType: "PARTY_DIALING" | "PARTY_RINGING" | "PARTY_ESTABLISHED" | "PARTY_HELD" | "PARTY_RETRIEVED" | "PARTY_RELEASED" | "PARTY_CHANGED" | "PARTY_DTMF" | "CALL_USER_DATA" | "CALL_RECORDING_STARTED" | "CALL_RECORDING_STOPPED" | "CALL_CDR" | "CALL_TRANSCRIPT" | "CALL_TRANSCRIPTION_STATE" | "QUEUE_JOINED" | "QUEUE_LEFT" | "QUEUE_COUNT" | "QUEUE_AGENT_OFFERED" | "AGENT_LOGGED_IN" | "AGENT_LOGGED_OUT" | "AGENT_READY" | "AGENT_NOT_READY" | "AGENT_AVAILABILITY" | "AGENT_WRAP_UP_DRAFTED" | "DEVICE_REGISTERED" | "DEVICE_UNREGISTERED" | "DEVICE_REACHABLE" | "DEVICE_UNREACHABLE" | "BOT_SESSION_STARTED" | "CALLBACK_CREATED" | "CALLBACK_UPDATED" | "CAMPAIGN_UPDATED" | "SYSTEM_LINK" | "SYSTEM_RESET";
         /** @description One envelope on the event stream. Call events repeat enough context (callType, userData) for a screen-pop without further requests. In SSE framing the envelope is the data: line, the event: line carries type, and the id: line carries seq. */
         SseEvent: {
             version: number;
@@ -3022,6 +3040,17 @@ export interface components {
             state: components["schemas"]["TranscriptionState"];
             reason?: string;
             degradedSpeakers?: components["schemas"]["Speaker"][];
+        };
+        /** @description Payload of AGENT_WRAP_UP_DRAFTED: the AI wrote a draft of this agent's after-call record. Sent once per record, only to the agent whose record it is (supervisors and administrators see every event, as for every AGENT_* event), and never for a record the agent has already confirmed. The same draft is on the record (CurrentWrapUp, WrapUp), so a client that missed the event reads it from there. */
+        SseWrapUpDraftPayload: {
+            /** Format: uuid */
+            callId: string;
+            /** @description The suggested disposition, one of the enabled codes. Absent when the draft suggests none. */
+            dispositionCode?: string;
+            /** @description The drafted note. */
+            note: string;
+            /** Format: date-time */
+            generatedAt: string;
         };
         /** @description A page of a call's transcript, plus where to resume. isLive says whether more is still coming, so a client knows to tail rather than poll. */
         CallTranscript: {

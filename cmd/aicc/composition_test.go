@@ -77,6 +77,7 @@ func (f *fakeCoordinator) AttachCDR(a *telephony.CDRAssembler) {
 type fakeAgents struct {
 	staffing agents.Staffing
 	wrapUps  agents.WrapUpLedger
+	drafter  agents.WrapUpDrafter
 	synced   int
 	// released counts the device-based sign-offs — the half of a reconnect
 	// that is only truthful when the registrations were actually read.
@@ -88,8 +89,9 @@ type fakeAgents struct {
 	steps []string
 }
 
-func (f *fakeAgents) AttachStaffing(s agents.Staffing)    { f.staffing = s }
-func (f *fakeAgents) AttachWrapUps(l agents.WrapUpLedger) { f.wrapUps = l }
+func (f *fakeAgents) AttachStaffing(s agents.Staffing)     { f.staffing = s }
+func (f *fakeAgents) AttachWrapUps(l agents.WrapUpLedger)  { f.wrapUps = l }
+func (f *fakeAgents) AttachDrafter(d agents.WrapUpDrafter) { f.drafter = d }
 func (f *fakeAgents) SyncSwitch(context.Context) {
 	f.synced++
 	// What the switch would be told, in the order it would be told it: the
@@ -169,6 +171,10 @@ func (s *systemEvents) Publish(_ context.Context, ev events.Event, scope events.
 	}
 	return ev
 }
+
+type fakeDrafter struct{}
+
+func (fakeDrafter) DraftWrapUp(uuid.UUID, uuid.UUID) {}
 
 // fakeWrapUps stands in for the ledger the beginning of after-call work opens
 // a record in.
@@ -299,6 +305,19 @@ func TestConnectMakesEveryConnection(t *testing.T) {
 				"has a record only when somebody remembered to file one, and "+
 				"\"nobody filed\" is indistinguishable from \"still typing\"",
 				f.agents.wrapUps)
+		}
+	})
+
+	t.Run("the wrap-up draft job is attached when there is one", func(t *testing.T) {
+		if f.agents.drafter != nil {
+			t.Fatalf("a drafter %#v was attached though none was composed", f.agents.drafter)
+		}
+		with := newWiringFixture(t)
+		d := fakeDrafter{}
+		with.comp.Drafter = d
+		with.comp.connect()
+		if with.agents.drafter != agents.WrapUpDrafter(d) {
+			t.Fatalf("drafter = %#v, want the composed one — without it no wrap-up is ever drafted", with.agents.drafter)
 		}
 	})
 

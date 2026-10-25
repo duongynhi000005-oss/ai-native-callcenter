@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -274,5 +275,46 @@ func TestAGeminiDeploymentIsRefusedWithTheAcceptedValuesFromEnvOrDotEnv(t *testi
 				}
 			}
 		})
+	}
+}
+
+// The AI draft of a wrap-up is on only when every part of it is: the text model
+// configured with a key, the feature not switched off, and live transcription
+// enabled. Anything less attaches nothing, and after-call work is what it was.
+func TestTheWrapUpDraftIsInertUnlessEverythingItNeedsIsConfigured(t *testing.T) {
+	on := config.Config{
+		TextLLMEndpoint: "https://llm.example/v1", TextLLMModel: "m",
+		TextLLMTimeout: time.Second, TextLLMContextChars: 8000,
+		IsWrapUpDraftEnabled: true, IsTranscriptionEnabled: true,
+	}
+	withKey := func(k string) string {
+		if k == "TEXT_LLM_API_KEY" {
+			return "secret"
+		}
+		return ""
+	}
+	noKey := func(string) string { return "" }
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cases := []struct {
+		name   string
+		mutate func(c *config.Config)
+		getenv func(string) string
+		want   bool
+	}{
+		{"everything configured", func(*config.Config) {}, withKey, true},
+		{"no endpoint", func(c *config.Config) { c.TextLLMEndpoint = "" }, withKey, false},
+		{"no model", func(c *config.Config) { c.TextLLMModel = "" }, withKey, false},
+		{"no key", func(*config.Config) {}, noKey, false},
+		{"switched off", func(c *config.Config) { c.IsWrapUpDraftEnabled = false }, withKey, false},
+		{"transcription off", func(c *config.Config) { c.IsTranscriptionEnabled = false }, withKey, false},
+	}
+	for _, c := range cases {
+		cfg := on
+		c.mutate(&cfg)
+		got := wrapUpDrafter(cfg, nil, nil, c.getenv, log)
+		if (got != nil) != c.want {
+			t.Errorf("%s: drafter present = %v, want %v", c.name, got != nil, c.want)
+		}
 	}
 }

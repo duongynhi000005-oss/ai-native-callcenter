@@ -412,6 +412,7 @@ func run() error {
 		CDR:         cdrAssembler,
 		Queues:      queueCatalog{catalogSvc},
 		WrapUps:     st.Ledger(),
+		Drafter:     wrapUpDrafter(cfg, st.Ledger(), hub, os.Getenv, slog.Default()),
 		Transcripts: transcripts,
 		Audiences:   transcripts,
 		Taps:        tap,

@@ -283,6 +283,25 @@ SET disposition_code  = excluded.disposition_code,
     is_confirmed      = excluded.is_confirmed
 RETURNING *;
 
+-- SaveWrapUpDraft writes the AI draft onto the agent's record, once, and only
+-- while the agent has not confirmed it. The condition is the whole of the
+-- idempotency and the confirm-first rule: a draft that arrives after
+-- confirmation, or a second job for the same record, matches no row.
+--
+-- The suggested code is checked against the vocabulary in the same statement
+-- (a code disabled since the prompt was built becomes NULL), so there is no
+-- window between the check and the write.
+-- name: SaveWrapUpDraft :one
+UPDATE wrap_ups
+SET draft_disposition_code = (
+        SELECT d.code FROM dispositions d
+        WHERE d.code = sqlc.narg('disposition_code')::text AND d.is_enabled),
+    draft_note         = sqlc.arg('note'),
+    draft_generated_at = now()
+WHERE call_id = sqlc.arg('call_id') AND agent_id = sqlc.arg('agent_id')
+  AND NOT is_confirmed AND draft_generated_at IS NULL
+RETURNING *;
+
 -- name: GetWrapUp :one
 SELECT * FROM wrap_ups WHERE call_id = $1 AND agent_id = $2;
 
