@@ -194,9 +194,10 @@ type WrapUpLedger interface {
 
 // WrapUpDrafter starts the job that drafts a wrap-up with AI. DraftWrapUp
 // returns at once: the job runs on its own goroutine, and after-call work never
-// waits for it.
+// waits for it. partyID is the agent leg that just ended, uuid.Nil when the
+// caller does not know it.
 type WrapUpDrafter interface {
-	DraftWrapUp(callID, agentID uuid.UUID)
+	DraftWrapUp(callID, agentID, partyID uuid.UUID)
 }
 
 // AttachDrafter points the opening of a wrap-up at the draft job. Without one,
@@ -343,6 +344,12 @@ func (s *Service) NotReady(ctx context.Context, agentID uuid.UUID, reason Reason
 // means, and a timer that let go early would deliver one to somebody still
 // writing up the last.
 func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (Presence, error) {
+	return s.startWrapUp(ctx, agentID, callID, uuid.Nil)
+}
+
+// startWrapUp is StartWrapUp for a caller that knows which party was the
+// agent's leg; the draft job reads that leg's transcript through it.
+func (s *Service) startWrapUp(ctx context.Context, agentID, callID, partyID uuid.UUID) (Presence, error) {
 	if callID != uuid.Nil {
 		s.mu.Lock()
 		s.lastWrapUpCall[agentID] = callID
@@ -372,7 +379,7 @@ func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (P
 	// The draft is written onto the record just opened, so it starts only when
 	// there is one. Fire and forget: nothing here waits for it.
 	if s.drafter != nil {
-		s.drafter.DraftWrapUp(callID, agentID)
+		s.drafter.DraftWrapUp(callID, agentID, partyID)
 	}
 	return p, nil
 }
@@ -384,8 +391,8 @@ func (s *Service) StartWrapUp(ctx context.Context, agentID, callID uuid.UUID) (P
 // whether or not presence could be recorded, and there is nobody on that path
 // to hand a failure to. An agent who is not signed in — the leg outlived their
 // session — is not an error either, which is why this reports nothing.
-func (s *Service) BeginAfterCallWork(ctx context.Context, agentID, callID uuid.UUID) {
-	if _, err := s.StartWrapUp(ctx, agentID, callID); err != nil {
+func (s *Service) BeginAfterCallWork(ctx context.Context, agentID, callID, partyID uuid.UUID) {
+	if _, err := s.startWrapUp(ctx, agentID, callID, partyID); err != nil {
 		slog.WarnContext(ctx, "after-call work not started",
 			"agentId", agentID, "callId", callID, "error", err)
 	}

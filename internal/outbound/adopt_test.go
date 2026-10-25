@@ -215,11 +215,11 @@ func (e *eventLog) count() int {
 
 type noAgentsAtAll struct{}
 
-func (noAgentsAtAll) AgentAtExtension(string) (uuid.UUID, bool)                { return uuid.Nil, false }
-func (noAgentsAtAll) AgentByCallcenterName(string) (uuid.UUID, bool)           { return uuid.Nil, false }
-func (noAgentsAtAll) BenchForNoAnswer(context.Context, uuid.UUID)              {}
-func (noAgentsAtAll) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)    {}
-func (noAgentsAtAll) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID) {}
+func (noAgentsAtAll) AgentAtExtension(string) (uuid.UUID, bool)                           { return uuid.Nil, false }
+func (noAgentsAtAll) AgentByCallcenterName(string) (uuid.UUID, bool)                      { return uuid.Nil, false }
+func (noAgentsAtAll) BenchForNoAnswer(context.Context, uuid.UUID)                         {}
+func (noAgentsAtAll) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)               {}
+func (noAgentsAtAll) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) {}
 
 // warnings records WARN records so a test can count what was skipped.
 type warnings struct {

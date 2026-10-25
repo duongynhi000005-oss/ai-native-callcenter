@@ -33,11 +33,11 @@ func (s *recordingSwitch) IsUp() bool { return true }
 
 type unstaffedFloor struct{}
 
-func (unstaffedFloor) AgentAtExtension(string) (uuid.UUID, bool)                { return uuid.Nil, false }
-func (unstaffedFloor) AgentByCallcenterName(string) (uuid.UUID, bool)           { return uuid.Nil, false }
-func (unstaffedFloor) BenchForNoAnswer(context.Context, uuid.UUID)              {}
-func (unstaffedFloor) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)    {}
-func (unstaffedFloor) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID) {}
+func (unstaffedFloor) AgentAtExtension(string) (uuid.UUID, bool)                           { return uuid.Nil, false }
+func (unstaffedFloor) AgentByCallcenterName(string) (uuid.UUID, bool)                      { return uuid.Nil, false }
+func (unstaffedFloor) BenchForNoAnswer(context.Context, uuid.UUID)                         {}
+func (unstaffedFloor) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)               {}
+func (unstaffedFloor) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) {}
 
 type silentHub struct{}
 

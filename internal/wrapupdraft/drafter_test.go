@@ -145,6 +145,7 @@ type rig struct {
 	t       *testing.T
 	call    uuid.UUID
 	agent   uuid.UUID
+	party   uuid.UUID // the ended agent leg handed to DraftWrapUp; Nil when unknown
 	store   *fakeStore
 	llm     *fakeLLM
 	pub     *fakePub
@@ -201,7 +202,7 @@ func (r *rig) as(agent uuid.UUID) *rig {
 
 func (r *rig) run() {
 	r.t.Helper()
-	r.drafter.DraftWrapUp(r.call, r.agent)
+	r.drafter.DraftWrapUp(r.call, r.agent, r.party)
 	r.drafter.Wait()
 }
 
@@ -416,7 +417,7 @@ func TestAModelThatNeverAnswersTimesOutWithoutHoldingAnything(t *testing.T) {
 
 	started := make(chan struct{})
 	go func() {
-		r.drafter.DraftWrapUp(r.call, r.agent) // must not block on the model
+		r.drafter.DraftWrapUp(r.call, r.agent, r.party) // must not block on the model
 		close(started)
 	}()
 	select {
@@ -479,8 +480,8 @@ func TestTheJobRunningTwiceGivesOneDraftAndOneEvent(t *testing.T) {
 		<-release
 		return `{"dispositionCode":"RESOLVED","note":"n"}`, nil
 	}
-	r2.drafter.DraftWrapUp(r2.call, r2.agent)
-	r2.drafter.DraftWrapUp(r2.call, r2.agent)
+	r2.drafter.DraftWrapUp(r2.call, r2.agent, r2.party)
+	r2.drafter.DraftWrapUp(r2.call, r2.agent, r2.party)
 	close(release)
 	r2.drafter.Wait()
 	if n := len(r2.pub.all()); n != 1 || len(r2.llm.calls()) != 1 {
@@ -554,6 +555,37 @@ func TestEachAgentsDraftUsesOnlyTheirOwnSegment(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The agent's part is the leg that just ended, so an agent whose own speech
+// was never transcribed still gets a draft from the customer's lines on that
+// leg (live call 01a170e1-3393-7221-925f-60f4c492ac73). Without the party the
+// same lines name nobody, and a colleague's leg never joins either way.
+func TestACustomerOnlyLegIsTheAgentsPartWhenTheLegIsNamed(t *testing.T) {
+	ended, colleague := uuid.New(), uuid.New()
+	lines := []store.TranscriptLine{
+		textLine(store.SpeakerCustomer, &ended, nil, "My new address is 88 Green Road."),
+		textLine(store.SpeakerCustomer, &colleague, nil, "COLLEAGUE-LEG words"),
+	}
+
+	r := newRig(t, Config{})
+	r.party = ended
+	r.store.lines = lines
+	r.run()
+	calls := r.llm.calls()
+	if len(calls) != 1 {
+		t.Fatalf("model calls = %d, want 1", len(calls))
+	}
+	prompt := calls[0].User
+	if !strings.Contains(prompt, "88 Green Road") || strings.Contains(prompt, "COLLEAGUE-LEG") {
+		t.Errorf("prompt = %q, want the ended leg's lines and not the colleague's", prompt)
+	}
+
+	r = newRig(t, Config{})
+	r.store.lines = lines
+	r.run()
+	r.wantNoDraft("no leg named and the agent never spoke")
+	r.wantLogged("no transcript of the agent's part")
 }
 
 func TestACallThatDidNotComeFromTheBotHasNoBackground(t *testing.T) {
@@ -670,7 +702,7 @@ func TestTheJobSettlesBeforeReading(t *testing.T) {
 		}
 		return nil
 	}
-	r.drafter.DraftWrapUp(r.call, r.agent)
+	r.drafter.DraftWrapUp(r.call, r.agent, r.party)
 	time.Sleep(20 * time.Millisecond)
 	if n := len(r.llm.calls()); n != 0 {
 		t.Fatalf("the model was asked %d times before the settle wait ended", n)

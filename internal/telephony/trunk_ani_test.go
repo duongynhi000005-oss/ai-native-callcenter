@@ -21,10 +21,10 @@ func (d signedInDirectory) AgentAtExtension(ext string) (uuid.UUID, bool) {
 	id, ok := d[ext]
 	return id, ok
 }
-func (signedInDirectory) AgentByCallcenterName(string) (uuid.UUID, bool)           { return uuid.Nil, false }
-func (signedInDirectory) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)    {}
-func (signedInDirectory) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID) {}
-func (signedInDirectory) BenchForNoAnswer(context.Context, uuid.UUID)              {}
+func (signedInDirectory) AgentByCallcenterName(string) (uuid.UUID, bool)                      { return uuid.Nil, false }
+func (signedInDirectory) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)               {}
+func (signedInDirectory) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) {}
+func (signedInDirectory) BenchForNoAnswer(context.Context, uuid.UUID)                         {}
 
 // A call from the carrier whose caller id happens to be an extension number
 // is a customer's call, whoever is signed in at that number (#105). Presence

@@ -22,11 +22,11 @@ import (
 
 type noAgents struct{}
 
-func (noAgents) AgentAtExtension(string) (uuid.UUID, bool)                { return uuid.Nil, false }
-func (noAgents) AgentByCallcenterName(string) (uuid.UUID, bool)           { return uuid.Nil, false }
-func (noAgents) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)    {}
-func (noAgents) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID) {}
-func (noAgents) BenchForNoAnswer(context.Context, uuid.UUID)              {}
+func (noAgents) AgentAtExtension(string) (uuid.UUID, bool)                           { return uuid.Nil, false }
+func (noAgents) AgentByCallcenterName(string) (uuid.UUID, bool)                      { return uuid.Nil, false }
+func (noAgents) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)               {}
+func (noAgents) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) {}
+func (noAgents) BenchForNoAnswer(context.Context, uuid.UUID)                         {}
 
 type nullPublisher struct{}
 
@@ -230,13 +230,13 @@ func (twoAgents) AgentAtExtension(ext string) (uuid.UUID, bool) {
 	}
 	return uuid.Nil, false
 }
-func (twoAgents) AgentByCallcenterName(string) (uuid.UUID, bool)           { return uuid.Nil, false }
-func (twoAgents) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)    {}
-func (twoAgents) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID) {}
-func (twoAgents) BenchForNoAnswer(context.Context, uuid.UUID)              {}
-func (oneAgent) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)     {}
-func (oneAgent) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID)  {}
-func (oneAgent) BenchForNoAnswer(context.Context, uuid.UUID)               {}
+func (twoAgents) AgentByCallcenterName(string) (uuid.UUID, bool)                      { return uuid.Nil, false }
+func (twoAgents) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)               {}
+func (twoAgents) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) {}
+func (twoAgents) BenchForNoAnswer(context.Context, uuid.UUID)                         {}
+func (oneAgent) SetOnCall(context.Context, uuid.UUID, bool, uuid.UUID)                {}
+func (oneAgent) BeginAfterCallWork(context.Context, uuid.UUID, uuid.UUID, uuid.UUID)  {}
+func (oneAgent) BenchForNoAnswer(context.Context, uuid.UUID)                          {}
 
 // recordingTapper captures what the coordinator asked of the media tap.
 type recordingTapper struct {

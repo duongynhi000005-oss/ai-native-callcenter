@@ -190,7 +190,7 @@ func TestEvalSetIsWellFormed(t *testing.T) {
 				t.Error("must_not without must")
 			}
 			lines, agent := c.transcript(t)
-			seg := split(lines, agent)
+			seg := split(lines, agent, uuid.Nil)
 			if len(seg.agent) == 0 {
 				t.Fatal("the agent segment is empty after split")
 			}
@@ -238,7 +238,7 @@ func TestEvalSetIsWellFormed(t *testing.T) {
 func TestEvalSetGetsItsOwnNoteLanguage(t *testing.T) {
 	for _, c := range loadEvalCases(t) {
 		lines, agent := c.transcript(t)
-		if got := noteLanguage(split(lines, agent).agent); got != c.Lang {
+		if got := noteLanguage(split(lines, agent, uuid.Nil).agent); got != c.Lang {
 			t.Errorf("%s: note language %q, case is %q", c.ID, got, c.Lang)
 		}
 	}

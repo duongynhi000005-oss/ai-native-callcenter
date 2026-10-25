@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rasonyang/ai-native-callcenter/internal/textllm"
 )
 
@@ -134,7 +136,7 @@ type evalResult struct {
 
 func runEvalCase(t *testing.T, client textllm.Client, c evalCase) evalResult {
 	lines, agent := c.transcript(t)
-	prompt, ok := render(split(lines, agent), seededDispositions, DefaultBudgetChars)
+	prompt, ok := render(split(lines, agent, uuid.Nil), seededDispositions, DefaultBudgetChars)
 	if !ok {
 		return evalResult{err: fmt.Errorf("the transcript does not render")}
 	}

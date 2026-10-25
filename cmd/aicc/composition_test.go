@@ -174,7 +174,7 @@ func (s *systemEvents) Publish(_ context.Context, ev events.Event, scope events.
 
 type fakeDrafter struct{}
 
-func (fakeDrafter) DraftWrapUp(uuid.UUID, uuid.UUID) {}
+func (fakeDrafter) DraftWrapUp(uuid.UUID, uuid.UUID, uuid.UUID) {}
 
 // fakeWrapUps stands in for the ledger the beginning of after-call work opens
 // a record in.

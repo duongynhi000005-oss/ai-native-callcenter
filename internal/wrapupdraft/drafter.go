@@ -103,8 +103,10 @@ func New(st Store, llm textllm.Client, pub Publisher, cfg Config, log *slog.Logg
 }
 
 // DraftWrapUp starts the job for one agent's record and returns at once. A job
-// already running for the same record makes this a no-op.
-func (d *Drafter) DraftWrapUp(callID, agentID uuid.UUID) {
+// already running for the same record makes this a no-op. partyID is the agent
+// leg that just ended (uuid.Nil when unknown): its lines are the agent's part
+// even if the agent never spoke on it.
+func (d *Drafter) DraftWrapUp(callID, agentID, partyID uuid.UUID) {
 	k := key{callID, agentID}
 	d.mu.Lock()
 	if _, running := d.inflight[k]; running {
@@ -127,7 +129,7 @@ func (d *Drafter) DraftWrapUp(callID, agentID uuid.UUID) {
 				d.log.Error("wrap-up draft panicked", "callId", callID, "agentId", agentID, "panic", r)
 			}
 		}()
-		d.run(callID, agentID)
+		d.run(callID, agentID, partyID)
 	}()
 }
 
@@ -137,7 +139,7 @@ func (d *Drafter) Wait() { d.wg.Wait() }
 // errTooLong and friends are the invalid-answer reasons, logged as errors.
 var errNoteTooLong = errors.New("the note is longer than allowed")
 
-func (d *Drafter) run(callID, agentID uuid.UUID) {
+func (d *Drafter) run(callID, agentID, partyID uuid.UUID) {
 	log := d.log.With("callId", callID, "agentId", agentID)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -180,7 +182,7 @@ func (d *Drafter) run(callID, agentID uuid.UUID) {
 		log.Error("wrap-up draft failed", "stage", "read the transcript", "error", err)
 		return
 	}
-	seg := split(lines, agentID)
+	seg := split(lines, agentID, partyID)
 	if len(seg.agent) == 0 {
 		log.Info("wrap-up draft skipped", "reason", "no transcript of the agent's part")
 		return

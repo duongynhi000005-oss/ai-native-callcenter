@@ -52,17 +52,22 @@ type line struct {
 
 // split derives one agent's segments from a call's transcript.
 //
-// The agent's windows are found through the transcript itself. A line from the
-// tap on the agent's leg carries that leg's party id whoever spoke, and its
-// agent_id when the agent did: so the agent's party ids are the party ids of
-// the lines this agent spoke, and every text line with one of those ids falls
-// inside one of the agent's PARTY_ESTABLISHED..PARTY_RELEASED windows, because
-// the tap exists only while the leg is bridged. A consult or a transfer back
-// is another leg, another party id, the same agent_id. Another agent's lines
-// carry another party id and never join. Lines from the bot phase carry no
-// party id at all.
-func split(lines []store.TranscriptLine, agentID uuid.UUID) segments {
+// A line from the tap on the agent's leg carries that leg's party id whoever
+// spoke, and its agent_id when the agent did. The agent's party ids are the
+// leg that just ended (endedParty, from the coordinator, uuid.Nil when
+// unknown) and the party ids of the lines this agent spoke. The first needs no
+// speech from the agent: a silent or untranscribed agent still leaves the
+// customer's lines on that leg. The second keeps earlier windows of the same
+// agent, a consult or a transfer back being another leg, another party id, the
+// same agent_id. Every text line with one of those ids falls inside one of the
+// agent's PARTY_ESTABLISHED..PARTY_RELEASED windows, because the tap exists
+// only while the leg is bridged. Another agent's lines carry another party id
+// and never join. Lines from the bot phase carry no party id at all.
+func split(lines []store.TranscriptLine, agentID, endedParty uuid.UUID) segments {
 	parties := map[uuid.UUID]bool{}
+	if endedParty != uuid.Nil {
+		parties[endedParty] = true
+	}
 	for _, l := range lines {
 		if l.Speaker == store.SpeakerHumanAgent && l.AgentID != nil && *l.AgentID == agentID && l.PartyID != nil {
 			parties[*l.PartyID] = true
