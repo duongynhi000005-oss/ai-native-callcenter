@@ -339,6 +339,18 @@ describe('the rest of the cockpit', () => {
   })
 })
 
+const draftEvent = (callId: string, extra: Record<string, unknown> = {}) => ({
+  type: 'AGENT_WRAP_UP_DRAFTED',
+  callId,
+  payload: {
+    callId,
+    dispositionCode: 'FOLLOW_UP_REQUIRED',
+    note: 'Customer asked for a callback on Friday.',
+    generatedAt: new Date().toISOString(),
+    ...extra,
+  },
+})
+
 /** An agent in after-call work for the call they just finished. */
 function inWrapUp(overrides: Partial<ReturnType<typeof presenceFixture>> = {}) {
   return presenceFixture({
@@ -437,18 +449,6 @@ describe('after-call work', () => {
     expect(await screen.findByLabelText(/^disposition$/i)).toHaveValue('NO_ANSWER')
     expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('typed before the page was refreshed')
   })
-
-const draftEvent = (callId: string, extra: Record<string, unknown> = {}) => ({
-  type: 'AGENT_WRAP_UP_DRAFTED',
-  callId,
-  payload: {
-    callId,
-    dispositionCode: 'FOLLOW_UP_REQUIRED',
-    note: 'Customer asked for a callback on Friday.',
-    generatedAt: new Date().toISOString(),
-    ...extra,
-  },
-})
 
   describe('AI draft', () => {
     const OTHER_CALL_ID = '019a0b7e-1111-7a2b-9c3d-4e5f6a7b8c9d'
