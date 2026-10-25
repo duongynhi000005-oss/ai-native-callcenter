@@ -347,7 +347,7 @@ func TestTheBotSegmentIsShortenedBeforeTheAgents(t *testing.T) {
 
 	// A budget that only the agent's segment fits drops the background whole,
 	// summary included, and still keeps every agent line.
-	agentOnly := runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + 200
+	agentOnly := runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + runes(noteLanguageLine(nil)) + 200
 	r3 := newRig(t, Config{BudgetChars: agentOnly}).as(r.agent)
 	r3.store.lines = lines
 	r3.run()
@@ -358,7 +358,7 @@ func TestTheBotSegmentIsShortenedBeforeTheAgents(t *testing.T) {
 
 	// Only when the background is gone does the agent's segment lose its
 	// oldest lines.
-	r4 := newRig(t, Config{BudgetChars: runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + 60}).as(r.agent)
+	r4 := newRig(t, Config{BudgetChars: runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + runes(noteLanguageLine(nil)) + 60}).as(r.agent)
 	r4.store.lines = lines
 	r4.run()
 	p4 := r4.llm.calls()[0].User
@@ -367,7 +367,7 @@ func TestTheBotSegmentIsShortenedBeforeTheAgents(t *testing.T) {
 	}
 
 	// And when not even the newest line fits, there is no draft.
-	r5 := newRig(t, Config{BudgetChars: runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + 10}).as(r.agent)
+	r5 := newRig(t, Config{BudgetChars: runes(systemPrompt) + runes(dispositionBlock(r.store.dispositions)) + runes(agentHeader) + runes(noteLanguageLine(nil)) + 10}).as(r.agent)
 	r5.store.lines = lines
 	r5.run()
 	r5.wantNoDraft("not even one agent line fits")

@@ -157,7 +157,8 @@ func runEvalCase(t *testing.T, client textllm.Client, c evalCase) evalResult {
 		return evalResult{invalid: err.Error(), note: answer}
 	}
 	r := evalResult{got: code, note: note}
-	r.agree = sameCode(code, c.ExpectCode) || (c.AcceptNull && code == nil)
+	r.agree = sameCode(code, c.ExpectCode) || (c.AcceptNull && code == nil) ||
+		(c.AcceptCode != "" && code != nil && *code == c.AcceptCode)
 	low := strings.ToLower(note)
 	for _, group := range c.Must {
 		if containsAny(low, group) {

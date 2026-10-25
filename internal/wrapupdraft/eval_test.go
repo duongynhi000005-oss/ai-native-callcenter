@@ -31,7 +31,10 @@ type evalCase struct {
 	// ExpectCode is a code from the seeded vocabulary, or null.
 	ExpectCode *string `json:"expect_code"`
 	// AcceptNull also counts a null answer as agreement.
-	AcceptNull      bool   `json:"accept_null"`
+	AcceptNull bool `json:"accept_null"`
+	// AcceptCode also counts this code as agreement, for a case whose honest
+	// answer is either null or that code.
+	AcceptCode      string `json:"accept_code"`
 	NoteExpectation string `json:"note_expectation"`
 	// Agent is the segment of the agent whose draft this is.
 	Agent []string `json:"agent"`
@@ -169,6 +172,9 @@ func TestEvalSetIsWellFormed(t *testing.T) {
 			if c.Type == "" {
 				t.Error("no type")
 			}
+			if c.AcceptCode != "" && !codes[c.AcceptCode] {
+				t.Errorf("accepted code %q is not in the seeded vocabulary", c.AcceptCode)
+			}
 			if c.ExpectCode != nil && !codes[*c.ExpectCode] {
 				t.Errorf("expected code %q is not in the seeded vocabulary", *c.ExpectCode)
 			}
@@ -222,6 +228,18 @@ func TestEvalSetIsWellFormed(t *testing.T) {
 		"mixed", "short", "long", "callback", "wrong_number", "bot_handoff", "consult"} {
 		if types[want] == 0 {
 			t.Errorf("no case of type %q", want)
+		}
+	}
+}
+
+// The language of the note is decided by the code, and the evaluation set's own
+// language labels are the check: every case must get the language it is
+// labelled with, the mixed English-led case included.
+func TestEvalSetGetsItsOwnNoteLanguage(t *testing.T) {
+	for _, c := range loadEvalCases(t) {
+		lines, agent := c.transcript(t)
+		if got := noteLanguage(split(lines, agent).agent); got != c.Lang {
+			t.Errorf("%s: note language %q, case is %q", c.ID, got, c.Lang)
 		}
 	}
 }
