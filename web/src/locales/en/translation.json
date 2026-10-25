@@ -216,6 +216,8 @@
     "disposition": "Disposition",
     "chooseDisposition": "Disposition…",
     "wrapUpNote": "Wrap-up note…",
+    "aiDraft": "AI draft",
+    "useAiDraft": "Use AI draft",
     "openCount_one": "{{count}} open",
     "openCount_other": "{{count}} open",
     "done": "Done",

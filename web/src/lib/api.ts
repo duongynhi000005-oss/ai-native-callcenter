@@ -109,6 +109,7 @@ export type WrapUpRequest = components['schemas']['WrapUpRequest']
  * work to confirm.
  */
 export type CurrentWrapUp = components['schemas']['CurrentWrapUp']
+export type SseWrapUpDraftPayload = components['schemas']['SseWrapUpDraftPayload']
 
 export const agentApi = {
   presence: () => request<Presence>('/agent/presence'),

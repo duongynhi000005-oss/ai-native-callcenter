@@ -23,12 +23,14 @@ import {
   myParty, otherParty, useCallActions, useCurrentWrapUp, useElapsedSec,
   useIsWrapUpPending, useMyCalls, usePresence, usePresenceActions, useWaitingCalls,
 } from '@/lib/agent'
-import { callApi, type CallSnapshot, type StaffedQueue, type WaitingCall } from '@/lib/api'
+import {
+  callApi, type CallSnapshot, type CurrentWrapUp, type SseWrapUpDraftPayload, type StaffedQueue, type WaitingCall,
+} from '@/lib/api'
 import { useContactFor } from '@/lib/contacts'
 import {
   useCallbacks, useDispositions, useMyCDRs, useMyDay, type WrapUp,
 } from '@/lib/ledger'
-import { useStreamStatus } from '@/lib/use-event-stream'
+import { useEventListener, useStreamStatus } from '@/lib/use-event-stream'
 import { cn, formatDuration } from '@/lib/utils'
 
 /**
@@ -835,6 +837,19 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
   const { data: vocabulary } = useDispositions()
   const { data: open } = useCurrentWrapUp(signedIn)
   const [draft, setDraft] = useState<{ callId?: string; note?: string; dispositionCode?: string }>({})
+  // The last AI draft the stream delivered. It is only used while its call is
+  // the one being wrapped up, so a draft for another call is simply never read.
+  const [streamedDraft, setStreamedDraft] = useState<AiDraft | undefined>()
+  useEventListener('AGENT_WRAP_UP_DRAFTED', (event) => {
+    const payload = event.payload as unknown as SseWrapUpDraftPayload | undefined
+    const callId = payload?.callId ?? event.callId
+    if (!callId) return
+    setStreamedDraft({
+      callId,
+      dispositionCode: payload?.dispositionCode || undefined,
+      note: payload?.note ?? '',
+    })
+  })
 
   const inWrapUp = presence?.availability === 'WRAP_UP'
   const elapsedSec = useElapsedSec(presence?.enteredAt)
@@ -863,8 +878,26 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
   // The record is the starting point; the draft is only what the agent has
   // changed since. That way a reload shows the disposition already chosen and
   // whatever note was saved, and nothing here has to remember it.
-  const dispositionCode = draft.dispositionCode ?? open?.dispositionCode ?? ''
-  const note = draft.note ?? open?.note ?? ''
+  //
+  // The AI's draft sits between the two: a field the agent has not touched
+  // shows the draft, a field they have touched keeps their value. The draft
+  // never overwrites typing; it is offered back instead.
+  const aiDraft = aiDraftFor(open, streamedDraft, open?.callId ?? activeCallID)
+  const dispositionCode = draft.dispositionCode ?? aiDraft?.dispositionCode ?? open?.dispositionCode ?? ''
+  const note = draft.note ?? (aiDraft?.note || open?.note) ?? ''
+  const isDispositionAI = Boolean(aiDraft?.dispositionCode) && dispositionCode === aiDraft?.dispositionCode
+  const isNoteAI = Boolean(aiDraft?.note) && note === aiDraft?.note
+  const isDraftOffered =
+    Boolean(aiDraft) &&
+    ((Boolean(aiDraft?.note) && !isNoteAI) || (Boolean(aiDraft?.dispositionCode) && !isDispositionAI))
+  const useDraft = () => {
+    if (!aiDraft) return
+    setDraft((current) => ({
+      ...current,
+      ...(aiDraft.dispositionCode && isFileable ? { dispositionCode: aiDraft.dispositionCode } : {}),
+      ...(aiDraft.note ? { note: aiDraft.note } : {}),
+    }))
+  }
 
   // A new call is a new sheet: a note written about the last customer must
   // never ride along into the next conversation.
@@ -897,6 +930,16 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
         <Empty text={t('agent.wrapUpIdle')} />
       ) : (
         <div className="flex flex-col gap-2">
+          {(isDispositionAI || isNoteAI || isDraftOffered) && (
+            <div className="flex h-7 items-center justify-between gap-2">
+              {isDispositionAI || isNoteAI ? <Badge>{t('agent.aiDraft')}</Badge> : <span />}
+              {isDraftOffered && (
+                <Button variant="ghost" size="sm" onClick={useDraft}>
+                  {t('agent.useAiDraft')}
+                </Button>
+              )}
+            </div>
+          )}
           <Select
             ariaLabel={t('agent.disposition')}
             value={dispositionCode}
@@ -942,6 +985,34 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
       )}
     </Card>
   )
+}
+
+/** An AI draft of the record, from the stream or from the record itself. */
+interface AiDraft {
+  callId: string
+  dispositionCode?: string
+  note: string
+}
+
+/**
+ * The draft for the call being wrapped up, if there is one. The record carries
+ * it too (a reload, a missed event), so the stream only makes it arrive sooner.
+ */
+function aiDraftFor(
+  open: CurrentWrapUp | null | undefined,
+  streamed: AiDraft | undefined,
+  callId: string | undefined,
+): AiDraft | undefined {
+  if (!callId) return undefined
+  if (streamed && streamed.callId === callId) return streamed
+  if (open && open.callId === callId && open.draftGeneratedAt) {
+    return {
+      callId,
+      dispositionCode: open.draftDispositionCode || undefined,
+      note: open.draftNote ?? '',
+    }
+  }
+  return undefined
 }
 
 /** What the agent filed for the last call. Finished work, so it is read. */

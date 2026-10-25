@@ -438,6 +438,115 @@ describe('after-call work', () => {
     expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('typed before the page was refreshed')
   })
 
+const draftEvent = (callId: string, extra: Record<string, unknown> = {}) => ({
+  type: 'AGENT_WRAP_UP_DRAFTED',
+  callId,
+  payload: {
+    callId,
+    dispositionCode: 'FOLLOW_UP_REQUIRED',
+    note: 'Customer asked for a callback on Friday.',
+    generatedAt: new Date().toISOString(),
+    ...extra,
+  },
+})
+
+  describe('AI draft', () => {
+    const OTHER_CALL_ID = '019a0b7e-1111-7a2b-9c3d-4e5f6a7b8c9d'
+    const drafted = {
+      draftDispositionCode: 'FOLLOW_UP_REQUIRED',
+      draftNote: 'Customer asked for a callback on Friday.',
+      draftGeneratedAt: new Date().toISOString(),
+    }
+    const base = { presence: inWrapUp(), dispositions: dispositionsFixture() }
+
+    it('prefills from the record on load and marks it as AI-written', async () => {
+      await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture(drafted) })
+
+      expect(await screen.findByLabelText(/^disposition$/i)).toHaveValue('FOLLOW_UP_REQUIRED')
+      expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.')
+      expect(screen.getByText('AI draft')).toBeInTheDocument()
+    })
+
+    it('shows nothing until a draft exists', async () => {
+      await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture() })
+
+      expect(await screen.findByLabelText(/^disposition$/i)).toHaveValue('RESOLVED')
+      expect(screen.queryByText('AI draft')).not.toBeInTheDocument()
+    })
+
+    it('prefills when the draft arrives on the stream', async () => {
+      await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture() })
+      await screen.findByLabelText(/^disposition$/i)
+
+      act(() => emitEvent('AGENT_WRAP_UP_DRAFTED', draftEvent(CALL_ID)))
+
+      await waitFor(() => expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('FOLLOW_UP_REQUIRED'))
+      expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.')
+      expect(screen.getByText('AI draft')).toBeInTheDocument()
+    })
+
+    it('does not overwrite what the agent typed, and offers the draft instead', async () => {
+      const { user } = await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture() })
+      const note = await screen.findByLabelText(/wrap-up note/i)
+      await user.type(note, 'my own words')
+
+      act(() => emitEvent('AGENT_WRAP_UP_DRAFTED', draftEvent(CALL_ID)))
+
+      await screen.findByRole('button', { name: /use ai draft/i })
+      expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('my own words')
+      // The untouched disposition does take the draft.
+      expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('FOLLOW_UP_REQUIRED')
+
+      await user.click(screen.getByRole('button', { name: /use ai draft/i }))
+      expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.')
+      expect(screen.queryByRole('button', { name: /use ai draft/i })).not.toBeInTheDocument()
+    })
+
+    it('drops the AI mark once the agent edits the note', async () => {
+      const { user } = await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture({ ...drafted, draftDispositionCode: undefined }) })
+      const note = await screen.findByLabelText(/wrap-up note/i)
+      await screen.findByText('AI draft')
+
+      await user.type(note, ' Also emailed.')
+
+      expect(screen.queryByText('AI draft')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /use ai draft/i })).toBeInTheDocument()
+    })
+
+    it('ignores a draft for a different call', async () => {
+      await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture() })
+      await screen.findByLabelText(/^disposition$/i)
+
+      act(() => emitEvent('AGENT_WRAP_UP_DRAFTED', draftEvent(OTHER_CALL_ID)))
+
+      expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('RESOLVED')
+      expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('')
+      expect(screen.queryByText('AI draft')).not.toBeInTheDocument()
+    })
+
+    it('keeps the disposition when the draft suggests none', async () => {
+      await renderCockpit({
+        ...base,
+        currentWrapUp: openWrapUpFixture({ ...drafted, draftDispositionCode: undefined }),
+      })
+
+      expect(await screen.findByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.')
+      expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('RESOLVED')
+    })
+
+    it('keeps the disposition when a stream draft suggests none', async () => {
+      await renderCockpit({ ...base, currentWrapUp: openWrapUpFixture() })
+      await screen.findByLabelText(/^disposition$/i)
+
+      act(() => emitEvent('AGENT_WRAP_UP_DRAFTED', draftEvent(CALL_ID, { dispositionCode: undefined })))
+
+      await waitFor(() =>
+        expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.'),
+      )
+      expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('RESOLVED')
+    })
+  })
+
   // The timer counts up from when the call ended, because nothing is going to
   // take the decision off the agent — there is no deadline to count down to.
   it('counts the time in after-call work upwards', async () => {
