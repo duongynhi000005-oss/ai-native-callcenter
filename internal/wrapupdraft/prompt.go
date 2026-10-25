@@ -187,7 +187,7 @@ const hanShareForChinese = 0.3
 // transcript.
 func noteLanguageLine(agent []line) string {
 	if noteLanguage(agent) == "zh" {
-		return "\nWrite the note in Chinese (简体中文).\n"
+		return "\nWrite the note in Chinese (简体中文). Call the agent 坐席 and the customer 客户.\n"
 	}
 	return "\nWrite the note in English.\n"
 }

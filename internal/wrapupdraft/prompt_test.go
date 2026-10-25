@@ -33,7 +33,7 @@ func TestNoteLanguage(t *testing.T) {
 
 func TestRenderStatesTheNoteLanguageLast(t *testing.T) {
 	p, ok := render(segments{agent: []line{{"Customer", "我想查账单"}}}, seededDispositions, DefaultBudgetChars)
-	if !ok || !strings.HasSuffix(p, "Write the note in Chinese (简体中文).\n") {
+	if !ok || !strings.HasSuffix(p, "Write the note in Chinese (简体中文). Call the agent 坐席 and the customer 客户.\n") {
 		t.Fatalf("ok=%v prompt=%q", ok, p)
 	}
 	p, _ = render(segments{agent: []line{{"Customer", "my bill"}}}, seededDispositions, DefaultBudgetChars)
