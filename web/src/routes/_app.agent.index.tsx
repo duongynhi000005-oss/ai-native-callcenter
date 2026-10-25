@@ -835,7 +835,7 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
   const signedIn = Boolean(presence && presence.state !== 'LOGGED_OUT')
   const { wrapUp } = usePresenceActions()
   const { data: vocabulary } = useDispositions()
-  const { data: open } = useCurrentWrapUp(signedIn)
+  const { data: latest } = useCurrentWrapUp(signedIn)
   const [draft, setDraft] = useState<{ callId?: string; note?: string; dispositionCode?: string }>({})
   // The last AI draft the stream delivered. It is only used while its call is
   // the one being wrapped up, so a draft for another call is simply never read.
@@ -859,8 +859,17 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
   // Fileable means *this* sheet's call is finished, not that some call is.
   // An agent can be on a new call while the last one is still unconfirmed — a
   // direct call reaches them in after-call work — and confirming then would
-  // put this conversation's note on the previous conversation.
+  // put this conversation's note on the previous conversation. For the same
+  // reason the new call's sheet starts blank: the previous record, confirmed
+  // or not, and its AI draft are never read into it (see `open` below).
   const isFileable = !call && Boolean(presence?.wrapUpCallId)
+
+  // The server answers with the agent's most recent record, confirmed or not,
+  // which during a new call is the previous call's. The form only ever works
+  // from a record that belongs to the call it is for: with a call in progress
+  // that is the call itself; with none, whatever record the server names.
+  // `latest` stays available to the read-only view of what was filed.
+  const open = call && latest?.callId !== call.callId ? undefined : latest
 
   // The sheet stays in front of the agent until they confirm it. Between the
   // caller hanging up and presence saying "after-call work" there is a moment
@@ -873,7 +882,7 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
 
   // What was filed: the confirmed record for this call if there is one, then
   // the ledger's answer for the last one, which is what survives a reload.
-  const filed = !showForm ? (open?.isConfirmed ? open : lastCall.wrapUp) : undefined
+  const filed = !showForm ? (latest?.isConfirmed ? latest : lastCall.wrapUp) : undefined
 
   // The record is the starting point; the draft is only what the agent has
   // changed since. That way a reload shows the disposition already chosen and
@@ -882,7 +891,7 @@ function WrapUpCard({ call, lastCall }: { call?: CallSnapshot; lastCall: LastCal
   // The AI's draft sits between the two: a field the agent has not touched
   // shows the draft, a field they have touched keeps their value. The draft
   // never overwrites typing; it is offered back instead.
-  const aiDraft = aiDraftFor(open, streamedDraft, open?.callId ?? activeCallID)
+  const aiDraft = aiDraftFor(open, streamedDraft, call?.callId ?? open?.callId ?? activeCallID)
   const dispositionCode = draft.dispositionCode ?? aiDraft?.dispositionCode ?? open?.dispositionCode ?? ''
   const note = draft.note ?? (aiDraft?.note || open?.note) ?? ''
   const isDispositionAI = Boolean(aiDraft?.dispositionCode) && dispositionCode === aiDraft?.dispositionCode

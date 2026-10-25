@@ -351,6 +351,18 @@ const draftEvent = (callId: string, extra: Record<string, unknown> = {}) => ({
   },
 })
 
+// The record can arrive before the call list does; the card is only for
+// the new call once the hang-up control is on screen.
+const settledOnNewCall = () => screen.findByRole('button', { name: /hang up/i })
+
+function expectBlankSheet() {
+  expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('')
+  expect(screen.getByLabelText(/^disposition$/i)).not.toHaveValue('NO_ANSWER')
+  expect(screen.getByLabelText(/^disposition$/i)).not.toHaveValue('FOLLOW_UP_REQUIRED')
+  expect(screen.queryByText('AI draft')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /use ai draft/i })).not.toBeInTheDocument()
+}
+
 /** An agent in after-call work for the call they just finished. */
 function inWrapUp(overrides: Partial<ReturnType<typeof presenceFixture>> = {}) {
   return presenceFixture({
@@ -544,6 +556,46 @@ describe('after-call work', () => {
         expect(screen.getByLabelText(/wrap-up note/i)).toHaveValue('Customer asked for a callback on Friday.'),
       )
       expect(screen.getByLabelText(/^disposition$/i)).toHaveValue('RESOLVED')
+    })
+  })
+
+  // The server answers with the agent's most recent record, which during the
+  // next call is the previous call's. The new sheet starts blank.
+  describe('a new call after a wrapped-up one', () => {
+    const NEW_CALL_ID = '019a0b7e-2222-7a2b-9c3d-4e5f6a7b8c9d'
+    const newCall = { ...callFixture('TALKING'), callId: NEW_CALL_ID }
+    const previous = {
+      dispositionCode: 'NO_ANSWER',
+      dispositionLabel: 'No Answer',
+      note: 'previous customer note',
+      draftDispositionCode: 'FOLLOW_UP_REQUIRED',
+      draftNote: 'Customer asked for a callback on Friday.',
+      draftGeneratedAt: new Date().toISOString(),
+    }
+    const onNewCall = { calls: [newCall], presence: presenceFixture({ availability: 'ON_CALL' }), dispositions: dispositionsFixture() }
+
+    it('does not show the confirmed record or its AI draft', async () => {
+      await renderCockpit({ ...onNewCall, currentWrapUp: openWrapUpFixture({ ...previous, isConfirmed: true }) })
+      await screen.findByLabelText(/wrap-up note/i)
+      await settledOnNewCall()
+      expectBlankSheet()
+    })
+
+    it('does not show a previous record that was never confirmed', async () => {
+      await renderCockpit({ ...onNewCall, currentWrapUp: openWrapUpFixture(previous) })
+      await screen.findByLabelText(/wrap-up note/i)
+      await settledOnNewCall()
+      expectBlankSheet()
+    })
+
+    it('ignores a streamed draft for the previous call', async () => {
+      await renderCockpit({ ...onNewCall, currentWrapUp: openWrapUpFixture({ ...previous, isConfirmed: true }) })
+      await screen.findByLabelText(/wrap-up note/i)
+      await settledOnNewCall()
+
+      act(() => emitEvent('AGENT_WRAP_UP_DRAFTED', draftEvent(CALL_ID)))
+
+      expectBlankSheet()
     })
   })
 
