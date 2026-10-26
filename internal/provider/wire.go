@@ -35,9 +35,17 @@ type wireEvent struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 
+	// Session is on session.created and session.updated. Only its id is read:
+	// it is the provider's own name for this session, the key to its logs.
+	Session *wireSession `json:"session"`
+
 	Item     *wireItem     `json:"item"`
 	Response *wireResponse `json:"response"`
 	Error    *wireError    `json:"error"`
+}
+
+type wireSession struct {
+	ID string `json:"id"`
 }
 
 type wireItem struct {

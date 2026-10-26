@@ -1392,7 +1392,18 @@ func (r *Realtime) readLoop() {
 func (r *Realtime) handle(event *wireEvent) {
 	switch event.Type {
 	case "session.created":
-		// Informational: the provider's defaults, before ours are applied.
+		// The provider's defaults, before ours are applied, are not used. What
+		// is kept is the session id: it is the provider's own name for this
+		// call, and the only way to match a call to the provider's session
+		// logs and captures when calls overlap. The event arrives once per
+		// connection, so this is one line per call. A provider that sends no
+		// id gets a debug line instead, so the absence is visible without
+		// an Info line that carries an empty field.
+		if event.Session != nil && event.Session.ID != "" {
+			r.log.Info("provider session created", "providerSessionId", event.Session.ID)
+		} else {
+			r.log.Debug("provider session created without an id")
+		}
 		return
 
 	case "session.updated":
