@@ -127,6 +127,12 @@ type RTPSession struct {
 	lastDTMFTS  int64 // receive goroutine only
 	lastRTPNano atomic.Int64
 
+	// beforeTxRecv, when non-nil, is called on the pacer goroutine after Run has
+	// seen a non-empty queue and before it dequeues. A test uses it to run
+	// ClearTx or Stop at exactly the point barge-in can; r.seq read there is the
+	// sequence number of the packet this tick is about to send. Set it before Run.
+	beforeTxRecv func()
+
 	log *slog.Logger
 }
 
@@ -414,7 +420,9 @@ func (r *RTPSession) Run() {
 		switch {
 		case playing:
 			if queued > 0 {
-				frame, pooled = <-r.tx, true
+				frame, pooled = r.popTx()
+			}
+			if pooled {
 				underruns = 0
 			} else {
 				// A brief gap in supply is padded rather than treated as the
@@ -427,8 +435,12 @@ func (r *RTPSession) Run() {
 			}
 		case queued >= prebufferFrames ||
 			(queued > 0 && !prebufferDeadline.IsZero() && !time.Now().Before(prebufferDeadline)):
-			playing = true
-			frame, pooled = <-r.tx, true
+			if frame, pooled = r.popTx(); pooled {
+				playing = true
+			} else {
+				prebufferDeadline = time.Now().Add(prebufferFrames * FrameDuration)
+				frame = silence
+			}
 		default:
 			// Short utterances never reach the prebuffer target, so the wait
 			// for it is bounded.
@@ -463,6 +475,22 @@ func (r *RTPSession) Run() {
 		r.timestamp.Add(media.FrameSamples)
 		r.sent.Add(1)
 		r.sentOctets.Add(media.FrameSamples) // G.711 is one byte per sample
+	}
+}
+
+// popTx takes one queued frame without blocking. Run decided to dequeue from a
+// length it read earlier, and ClearTx may have emptied the queue since, so an
+// empty queue is an answer here, not a wait: the caller pads the tick with
+// silence and the stream keeps its 20 ms cadence.
+func (r *RTPSession) popTx() ([]byte, bool) {
+	if r.beforeTxRecv != nil {
+		r.beforeTxRecv()
+	}
+	select {
+	case frame := <-r.tx:
+		return frame, true
+	default:
+		return nil, false
 	}
 }
 
