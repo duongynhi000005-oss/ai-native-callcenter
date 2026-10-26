@@ -127,6 +127,11 @@ type RTPSession struct {
 	lastDTMFTS  int64 // receive goroutine only
 	lastRTPNano atomic.Int64
 
+	// beforeTxRecv, when non-nil, is called by Run between checking len(r.tx)
+	// and receiving from r.tx so tests can deterministically interleave ClearTx
+	// or Stop at that point.
+	beforeTxRecv func()
+
 	log *slog.Logger
 }
 
@@ -414,7 +419,9 @@ func (r *RTPSession) Run() {
 		switch {
 		case playing:
 			if queued > 0 {
-				frame, pooled = <-r.tx, true
+				frame, pooled = r.popTx()
+			}
+			if pooled {
 				underruns = 0
 			} else {
 				// A brief gap in supply is padded rather than treated as the
@@ -427,8 +434,12 @@ func (r *RTPSession) Run() {
 			}
 		case queued >= prebufferFrames ||
 			(queued > 0 && !prebufferDeadline.IsZero() && !time.Now().Before(prebufferDeadline)):
-			playing = true
-			frame, pooled = <-r.tx, true
+			if frame, pooled = r.popTx(); pooled {
+				playing = true
+			} else {
+				prebufferDeadline = time.Now().Add(prebufferFrames * FrameDuration)
+				frame = silence
+			}
 		default:
 			// Short utterances never reach the prebuffer target, so the wait
 			// for it is bounded.
@@ -463,6 +474,18 @@ func (r *RTPSession) Run() {
 		r.timestamp.Add(media.FrameSamples)
 		r.sent.Add(1)
 		r.sentOctets.Add(media.FrameSamples) // G.711 is one byte per sample
+	}
+}
+
+func (r *RTPSession) popTx() ([]byte, bool) {
+	if r.beforeTxRecv != nil {
+		r.beforeTxRecv()
+	}
+	select {
+	case frame := <-r.tx:
+		return frame, true
+	default:
+		return nil, false
 	}
 }
 
