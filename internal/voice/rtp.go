@@ -127,9 +127,10 @@ type RTPSession struct {
 	lastDTMFTS  int64 // receive goroutine only
 	lastRTPNano atomic.Int64
 
-	// beforeTxRecv, when non-nil, is called by Run between checking len(r.tx)
-	// and receiving from r.tx so tests can deterministically interleave ClearTx
-	// or Stop at that point.
+	// beforeTxRecv, when non-nil, is called on the pacer goroutine after Run has
+	// seen a non-empty queue and before it dequeues. A test uses it to run
+	// ClearTx or Stop at exactly the point barge-in can; r.seq read there is the
+	// sequence number of the packet this tick is about to send. Set it before Run.
 	beforeTxRecv func()
 
 	log *slog.Logger
@@ -477,6 +478,10 @@ func (r *RTPSession) Run() {
 	}
 }
 
+// popTx takes one queued frame without blocking. Run decided to dequeue from a
+// length it read earlier, and ClearTx may have emptied the queue since, so an
+// empty queue is an answer here, not a wait: the caller pads the tick with
+// silence and the stream keeps its 20 ms cadence.
 func (r *RTPSession) popTx() ([]byte, bool) {
 	if r.beforeTxRecv != nil {
 		r.beforeTxRecv()
