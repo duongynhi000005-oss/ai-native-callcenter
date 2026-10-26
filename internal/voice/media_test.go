@@ -3,7 +3,11 @@
 package voice
 
 import (
+	"bytes"
+	"math/rand/v2"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -465,5 +469,253 @@ func TestFirstMediaAtIsTheFirstPacketsArrival(t *testing.T) {
 	session.handlePacket(packet)
 	if first.Before(before) || !session.FirstMediaAt().Equal(first) {
 		t.Errorf("FirstMediaAt = %v then %v, want the first packet's time, unchanged", first, session.FirstMediaAt())
+	}
+}
+
+
+func startLoopbackPacer(t *testing.T) (*RTPSession, *net.UDPConn, chan struct{}) {
+	t.Helper()
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen sink: %v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+
+	session := NewRTPSession(0, media.LawMu, -1, nil)
+	if err := session.Start(sink.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	t.Cleanup(session.Stop)
+	return session, sink, make(chan struct{})
+}
+
+func readRTPPayload(t *testing.T, sink *net.UDPConn, timeout time.Duration) []byte {
+	t.Helper()
+	_ = sink.SetReadDeadline(time.Now().Add(timeout))
+	buf := make([]byte, 512)
+	n, _, err := sink.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read RTP packet: %v", err)
+	}
+	pkt, err := unmarshalForTest(buf[:n])
+	if err != nil {
+		t.Fatalf("unmarshal RTP packet: %v", err)
+	}
+	return pkt.Payload
+}
+
+func TestPacerDoesNotBlockWhenBargeInClearsTxWhilePlaying(t *testing.T) {
+	t.Parallel()
+	silence := media.SilenceFrame(media.LawMu)
+	audio := bytes.Repeat([]byte{0x42}, media.FrameSamples)
+
+	for _, count := range []int{1, 2, prebufferFrames, 1500} {
+		session, sink, done := startLoopbackPacer(t)
+
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var hookArmed atomic.Bool
+
+		session.beforeTxRecv = func() {
+			if hookArmed.CompareAndSwap(true, false) {
+				entered <- struct{}{}
+				<-release
+			}
+		}
+
+		// Pre-fill prebufferFrames + count so the first frame enters playing
+		// and the second tick enters the playing && queued > 0 branch with count frames.
+		for range prebufferFrames {
+			session.Send(audio)
+		}
+		go func() {
+			defer close(done)
+			session.Run()
+		}()
+
+		// First tick starts playout with audio.
+		gotFirst := readRTPPayload(t, sink, 200*time.Millisecond)
+		if !bytes.Equal(gotFirst, audio) {
+			t.Fatalf("count=%d: first packet payload mismatch, want audio", count)
+		}
+
+		// Set exact queued count for the next playing tick and arm the hook.
+		session.ClearTx()
+		for range count {
+			session.Send(audio)
+		}
+		hookArmed.Store(true)
+
+		select {
+		case <-entered:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("count=%d: timed out waiting for pacer to reach beforeTxRecv hook", count)
+		}
+		_ = sink.SetReadDeadline(time.Now())
+		for {
+			var discard [512]byte
+			if _, _, err := sink.ReadFromUDP(discard[:]); err != nil {
+				break
+			}
+		}
+		session.ClearTx()
+		close(release)
+
+		// Both the barge-in tick and the following tick must emit silence promptly.
+		for tick := range 2 {
+			payload := readRTPPayload(t, sink, 100*time.Millisecond)
+			if !bytes.Equal(payload, silence) {
+				t.Fatalf("count=%d tick=%d: got non-silence payload after ClearTx", count, tick)
+			}
+		}
+		session.Stop()
+		<-done
+	}
+}
+
+func TestPacerDoesNotBlockWhenBargeInClearsTxAtUtteranceStart(t *testing.T) {
+	t.Parallel()
+	silence := media.SilenceFrame(media.LawMu)
+	audio := bytes.Repeat([]byte{0x33}, media.FrameSamples)
+
+	for _, mode := range []string{"prebuffer_full", "prebuffer_deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			session, sink, done := startLoopbackPacer(t)
+
+			entered := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var hookArmed atomic.Bool
+			session.beforeTxRecv = func() {
+				if hookArmed.CompareAndSwap(true, false) {
+					entered <- struct{}{}
+					<-release
+				}
+			}
+
+			go func() {
+				defer close(done)
+				session.Run()
+			}()
+
+			// Wait for one idle tick so prebufferDeadline is seeded when queued == 0.
+			_ = readRTPPayload(t, sink, 200*time.Millisecond)
+
+			if mode == "prebuffer_full" {
+				hookArmed.Store(true)
+				for range prebufferFrames {
+					session.Send(audio)
+				}
+			} else {
+				// Queue 1 frame (< prebufferFrames) and wait until prebufferDeadline elapses.
+				session.Send(audio)
+				for range prebufferFrames - 1 {
+					_ = readRTPPayload(t, sink, 100*time.Millisecond)
+				}
+				hookArmed.Store(true)
+			}
+
+			select {
+			case <-entered:
+			case <-time.After(250 * time.Millisecond):
+				t.Fatalf("%s: timed out waiting for pacer to reach beforeTxRecv hook", mode)
+			}
+			session.ClearTx()
+			close(release)
+
+			for tick := range 2 {
+				payload := readRTPPayload(t, sink, 100*time.Millisecond)
+				if !bytes.Equal(payload, silence) {
+					t.Fatalf("%s tick=%d: expected silence after ClearTx at utterance start", mode, tick)
+				}
+			}
+			session.Stop()
+			<-done
+		})
+	}
+}
+
+func TestPacerReturnsPromptlyWhenStopRunsDuringTxDequeue(t *testing.T) {
+	t.Parallel()
+	audio := bytes.Repeat([]byte{0x55}, media.FrameSamples)
+	session, _, done := startLoopbackPacer(t)
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once atomic.Bool
+	session.beforeTxRecv = func() {
+		if once.CompareAndSwap(false, true) {
+			entered <- struct{}{}
+			<-release
+		}
+	}
+
+	for range prebufferFrames {
+		session.Send(audio)
+	}
+	go func() {
+		defer close(done)
+		session.Run()
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for pacer to reach beforeTxRecv hook")
+	}
+
+	session.Stop()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Run() blocked after Stop() drained r.tx between length check and receive")
+	}
+}
+
+func TestPacerSurvivesRepeatedConcurrentBargeIns(t *testing.T) {
+	t.Parallel()
+	audio := bytes.Repeat([]byte{0x77}, media.FrameSamples)
+	session, sink, done := startLoopbackPacer(t)
+
+	go func() {
+		defer close(done)
+		session.Run()
+	}()
+
+	stopCh := make(chan struct{})
+	feederDone := make(chan struct{})
+	go func() {
+		defer close(feederDone)
+		rng := rand.New(rand.NewPCG(42, 99))
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			burst := 1 + rng.IntN(6)
+			for range burst {
+				session.Send(audio)
+			}
+			time.Sleep(time.Duration(rng.IntN(5)) * time.Millisecond)
+			session.ClearTx()
+		}
+	}()
+
+	for i := range 15 {
+		payload := readRTPPayload(t, sink, 100*time.Millisecond)
+		if len(payload) != media.FrameSamples {
+			t.Fatalf("tick %d: payload len = %d, want %d", i, len(payload), media.FrameSamples)
+		}
+	}
+
+	close(stopCh)
+	<-feederDone
+	session.Stop()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Run() did not return promptly after Stop()")
 	}
 }
